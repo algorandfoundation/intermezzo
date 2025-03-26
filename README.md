@@ -1,3 +1,40 @@
+# Pawn
+
+## Conceptual Architecture
+
+This pattern ensure that applications comply with the principle of **ISOLATION** between appliation space and "trusted" space; i.e the KMS.
+Most web3 applications handle cryptographic keys in-memory and in the same run-time space as the application. This is a security risk as the keys can be easily compromised by an attacker who gains access to the application's memory space.
+
+This ensures that if the application is compromised, the keys are still secure and cannot be accessed by the attacker.
+
+### Integration
+
+Integration expects the client to use REST to communicate and request actions such as creating assets, transferring assets, etc. The client will send a request to the application, which will then forward the request to the KMS for key gen and signing.
+
+```mermaid
+    C4Context
+        title "API & KMS"
+        Boundary(b0, "Run-time", "Kubernetes") {
+            System(clientPod, "Client", "Docker")
+
+            Boundary(b1, "Pawn", "Docker") {
+                System(app, "Algorand API", "NestJS")
+            }
+
+            Boundary(b2, "KMS", "Docker") {
+                System(kms, "Hashicorp Vault", "Key Management Service")
+            }
+
+            BiRel(app, kms, "uses", "REST")
+            Rel(clientPod, app, "uses", "REST")
+        }
+
+        UpdateRelStyle(app, kms, $textColor="green", $lineColor="blue", $offsetX="0")
+        UpdateRelStyle(clientPod, app, $textColor="green", $lineColor="blue", $offsetY="-30")
+        UpdateLayoutConfig($c4ShapeInRow="1", $c4BoundaryInRow="0")
+
+```
+
 # Setup Development Environment
 
 ## Build and run docker
