@@ -1,0 +1,14 @@
+node_modules/*
+!node_modules/.gitkeep
+dist/*
+test/coverage
+tsconfig.build.tsbuildinfo
+.idea/
+package-lock.json
+data/
+volumes/*
+vault-seal-keys.json
+.log/
+coverage/
+manager-role-and-secrets.json
+user-role-and-secrets.json

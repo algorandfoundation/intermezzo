@@ -1,0 +1,32 @@
+services:
+
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    ports:
+      - "8200:8200"
+    restart: unless-stopped
+    volumes:
+      - ./volumes/vault/logs:/vault/logs
+      - ./volumes/vault/file:/vault/file
+    environment:
+      VAULT_LOCAL_CONFIG: '{"storage": {"file": {"path": "/vault/file"}},"listener": {"tcp": {"address": "0.0.0.0:8200","tls_disable": true}},"ui": true}'
+      VAULT_ADDR: http://127.0.0.1:8200
+    cap_add:
+      - IPC_LOCK
+    command: server
+
+  pawn:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    image: pawn-dev
+    working_dir: /opt/app
+    command: sh -c 'yarn && yarn start:dev;'
+    container_name: pawn
+    env_file:
+      - .env
+    volumes:
+      - .:/opt/app/
+    ports:
+      - "3000:3000"
