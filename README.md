@@ -25,9 +25,9 @@ Integration expects the client to use REST to communicate and request actions su
                 System(kms, "Hashicorp Vault", "Key Management Service")
             }
 
-            BiRel(clientPod, kms, "auth_token", "REST")
+            BiRel(clientPod, kms, "vault_token", "REST")
             BiRel(app, kms, "uses", "REST")
-            Rel(clientPod, app, "uses", "REST")
+            Rel(clientPod, app, "auth_token", "REST")
         }
 
         UpdateRelStyle(app, kms, $textColor="green", $lineColor="blue", $offsetX="0")
