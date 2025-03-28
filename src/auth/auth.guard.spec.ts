@@ -1,4 +1,4 @@
-import { AuthGuard } from './auth.gard';
+import { AuthGuard } from './auth.guard';
 import { JwtService } from '@nestjs/jwt';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';

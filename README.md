@@ -54,10 +54,11 @@ docker compose exec pawn yarn run vault:development:init;
 You have to unseal vault and get tokens.
 Note that, every time you restart the vault container, you need to unseal, which means you need to run this command.
 This command's output will provide you 4 important pieces of information:
-    1) Vault Root Token
-    2) Token for "pawn_managers_approle"
-    3) Token for "pawn_users_approle"
-    4) Manager's public Algorand address
+
+1) Vault Root Token
+2) Token for "pawn_managers_approle"
+3) Token for "pawn_users_approle"
+4) Manager's public Algorand address
 
 You can re-run `vault:development:init` whenever you want.
 
