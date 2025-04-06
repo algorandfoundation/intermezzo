@@ -63,10 +63,19 @@ But before you can use the API, you need to unseal vault and / or set up the vau
 
 ## Setup Vault Keys
 
+Go inside the pawn container with:
+
 ```bash
-docker compose exec pawn yarn run vault:development:init;
+docker exec -it pawn bash
 ```
-You have to unseal vault and get tokens.
+
+And run the following command:
+
+```bash
+yarn run vault:development:init
+```
+
+This will unseal vault and get tokens. If you are running this for the first time, it will also create users, setup hashicorp's transit engines, setup access policies for the different roles, and create the vault keys.
 Note that, every time you restart the vault container, you need to unseal, which means you need to run this command.
 This command's output will provide you 4 important pieces of information:
 
