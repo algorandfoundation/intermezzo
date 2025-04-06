@@ -263,7 +263,7 @@ export class ChainService {
       txid: response['txId'],
     };
 
-    // await this.waitConfirmation(postTransactionResponse.txid);
+    await this.waitConfirmation(postTransactionResponse.txid);
     return postTransactionResponse;
   }
 }
