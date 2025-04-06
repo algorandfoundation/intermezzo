@@ -240,6 +240,22 @@ export class ChainService {
     }
   }
 
+  /**
+   * Get the last round number from the Algorand node.
+   * 
+   * @returns - last round number
+   */
+  async getLastRound(): Promise<bigint> {
+    const response = await this.makeAlgoNodeRequest('v2/status', 'GET');
+    return BigInt(response['last-round']);
+  }
+
+  /**
+   * Submits a transaction or transactions to the Algorand network.
+   * 
+   * @param txnOrtxns - The transaction or transactions to be submitted.
+   * @returns - The transaction ID of the submitted transaction.
+   */
   async submitTransaction(txnOrtxns: Uint8Array | Uint8Array[]): Promise<TruncatedPostTransactionsResponse> {
     let data = txnOrtxns instanceof Uint8Array ? Buffer.from(txnOrtxns) : Buffer.concat(txnOrtxns);
     let response = await this.makeAlgoNodeRequest('v2/transactions', 'POST', data);
@@ -247,7 +263,7 @@ export class ChainService {
       txid: response['txId'],
     };
 
-    await this.waitConfirmation(postTransactionResponse.txid);
+    // await this.waitConfirmation(postTransactionResponse.txid);
     return postTransactionResponse;
   }
 }

@@ -12,3 +12,4 @@ vault-seal-keys.json
 coverage/
 manager-role-and-secrets.json
 user-role-and-secrets.json
+prompt

@@ -2,7 +2,6 @@ import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosResponse } from 'axios';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import { UserInfoDto } from './user-info.dto';
 
@@ -16,7 +15,7 @@ export class VaultService {
     private readonly configService: ConfigService,
   ) {}
 
-  async transitCreateKey(keyName: string, transitKeyPath: string, token: string): Promise<string> {
+  async transitCreateKey(keyName: string, transitKeyPath: string, token: string): Promise<Buffer> {
     // https://developer.hashicorp.com/vault/api-docs/secret/transit#create-key
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
 
@@ -40,7 +39,7 @@ export class VaultService {
     }
 
     const publicKeyBase64: string = result.data.data.keys['1'].public_key;
-    return new AlgorandEncoder().encodeAddress(Buffer.from(publicKeyBase64, 'base64'));
+    return Buffer.from(publicKeyBase64, 'base64')
   }
 
   /**
@@ -49,9 +48,9 @@ export class VaultService {
    * @param keyName - user id
    * @param transitKeyPath - path to the transit engine
    * @param token - vault token
-   * @returns - public Algorand address of the user
+   * @returns - public key of the user
    */
-  private async _transitGetKey(keyName: string, transitKeyPath: string, token: string): Promise<string> {
+  async getKey(keyName: string, transitKeyPath: string, token: string): Promise<Buffer> {
     // https://developer.hashicorp.com/vault/api-docs/secret/transit#read-key
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
 
@@ -65,10 +64,11 @@ export class VaultService {
     }
 
     const publicKeyBase64: string = result.data.data.keys['1'].public_key;
-    return new AlgorandEncoder().encodeAddress(Buffer.from(publicKeyBase64, 'base64'));
+    // return new AlgorandEncoder().encodeAddress(Buffer.from(publicKeyBase64, 'base64'));
+    return Buffer.from(publicKeyBase64, 'base64')
   }
 
-  private async _sign(keyName: string, transitPath: string, data: Uint8Array, token: string): Promise<Uint8Array> {
+  public async sign(keyName: string, transitPath: string, data: Uint8Array, token: string): Promise<Buffer> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
 
     let result: AxiosResponse;
@@ -88,13 +88,40 @@ export class VaultService {
       throw new HttpErrorByCode[error.response.status]('VaultException');
     }
 
-    const sig: string = result.data.data.signature.toString();
-    // split vault specific prefixes vault:${version}:signature
-    const signature = sig.split(':')[2];
-    // vault default base64 decode
-    const decoded: Buffer = Buffer.from(signature, 'base64');
-    // return as Uint8Array
-    return new Uint8Array(decoded);
+    return result.data.data.signature
+  }
+
+  /**
+   * 
+   * @param roleId - Role ID of the AppRole
+   * @param secretId - Secret ID of the AppRole
+   * @returns - client token based on the AppRole
+   * @throws - VaultException
+   * @description - This method is used to authenticate with the Vault using AppRole authentication.
+   * The AppRole authentication method is used to authenticate machines or applications that need to access the Vault.
+   * The method takes the Role ID and Secret ID of the AppRole and returns a client token that can be used to access the Vault.
+   * The client token is valid for a certain period of time and can be used to access the Vault until it expires.
+   * The method uses the AppRole authentication endpoint of the Vault API to authenticate and retrieve the client token.
+   * The method throws a VaultException if the authentication fails or if there is an error while communicating with the Vault.
+   */
+  async getTokenWithRole(roleId: string, secretId: string): Promise<string> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+
+    let result: AxiosResponse;
+    try {
+      result = await this.httpService.axiosRef.post(
+        `${baseUrl}/v1/auth/approle/login`,
+        {
+          role_id: roleId,
+          secret_id: secretId,
+        },
+      );
+    }
+    catch (error) {
+      throw new HttpErrorByCode[error.response.status]('VaultException');
+    }
+    const token: string = result.data.auth.client_token;
+    return token;
   }
 
   async checkToken(token: string): Promise<boolean> {
@@ -110,30 +137,30 @@ export class VaultService {
     }
   }
 
-  async signAsUser(user_id: string, data: Uint8Array, token: string): Promise<Uint8Array> {
+  async signAsUser(user_id: string, data: Uint8Array, token: string): Promise<Buffer> {
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
-    return this._sign(user_id, transitKeyPath, data, token);
+    return this.sign(user_id, transitKeyPath, data, token);
   }
 
-  async signAsManager(data: Uint8Array, token: string): Promise<Uint8Array> {
+  async signAsManager(data: Uint8Array, token: string): Promise<Buffer> {
     const manager_id = this.configService.get('VAULT_MANAGER_KEY');
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_MANAGERS_PATH');
 
-    return this._sign(manager_id, transitKeyPath, data, token);
+    return this.sign(manager_id, transitKeyPath, data, token);
   }
 
-  async getUserPublicAddress(keyName: string, token: string): Promise<string> {
+  async getUserPublicKey(keyName: string, token: string): Promise<Buffer> {
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
-    return this._transitGetKey(keyName, transitKeyPath, token);
+    return this.getKey(keyName, transitKeyPath, token);
   }
 
-  async getManagerPublicAddress(token: string): Promise<string> {
+  async getManagerPublicKey(token: string): Promise<Buffer> {
     const manager_id = this.configService.get('VAULT_MANAGER_KEY');
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_MANAGERS_PATH');
 
-    return this._transitGetKey(manager_id, transitKeyPath, token);
+    return this.getKey(manager_id, transitKeyPath, token);
   }
 
   /**
@@ -167,7 +194,7 @@ export class VaultService {
     for (let i = 0; i < users.length; i++) {
       let userObj = {
         user_id: users[i],
-        public_address: await this._transitGetKey(users[i], transitKeyPath, token),
+        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'),
       };
       usersObjs.push(userObj);
     }
