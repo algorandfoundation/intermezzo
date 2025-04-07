@@ -65,7 +65,7 @@ But before you can use the API, you need to unseal vault and / or set up the vau
 Go inside the pawn container with:
 
 ```bash
-docker exec -it pawn bash
+docker exec -it pawn ash
 ```
 
 And run the following command:
