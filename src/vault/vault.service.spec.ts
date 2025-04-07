@@ -71,7 +71,6 @@ describe('VaultService', () => {
       (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
 
       const key1: Buffer = randomBytes(32);
-      const keys = [key1.toString('base64'), key1.toString('base64')];
 
       const axiosResponse: AxiosResponse = {
         data: {
@@ -86,8 +85,6 @@ describe('VaultService', () => {
       };
 
       (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(axiosResponse);
-
-      const algoEncoder: AlgorandEncoder = new AlgorandEncoder();
 
       // mock two calls for get keys
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue({
@@ -111,18 +108,18 @@ describe('VaultService', () => {
       expect(result).toEqual([
         {
           user_id: 'user-key1',
-          public_address: algoEncoder.encodeAddress(key1),
+          public_address: key1.toString('base64'),
         },
         {
           user_id: 'user-key2',
-          public_address: algoEncoder.encodeAddress(key1),
+          public_address: key1.toString('base64'),
         },
       ]);
     });
   });
 
-  describe('getUserPublicAddress (using _transitCreateKey)', () => {
-    it('should create key and return encoded public address', async () => {
+  describe('getUserPublicKey (using _transitCreateKey)', () => {
+    it('should create key and return encoded public key', async () => {
       const baseUrl = 'http://vault';
       const transitPath = 'transit/path';
       (configService.get as jest.Mock).mockImplementation((key: string) => {
@@ -149,12 +146,12 @@ describe('VaultService', () => {
 
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue(axiosResponse);
 
-      const result = await vaultService.getUserPublicAddress('user-key', 'token');
+      const result: Buffer = await vaultService.getUserPublicKey('user-key', 'token');
 
       expect(httpService.axiosRef.get).toHaveBeenCalledWith(`${baseUrl}/v1/${transitPath}/keys/user-key`, {
         headers: { 'X-Vault-Token': 'token' },
       });
-      expect(result).toBe(new AlgorandEncoder().encodeAddress(publicKey));
+      expect(result.toString('base64')).toEqual(publicKey.toString('base64'));
     });
 
     it('\(FAIL) should throw 403 when lacking permissions', async () => {
@@ -168,7 +165,7 @@ describe('VaultService', () => {
       (httpService.axiosRef.get as jest.Mock).mockRejectedValue(error);
 
       // check code to be 403
-      await expect(vaultService.getUserPublicAddress('user-key', 'token')).rejects.toThrow(HttpErrorByCode[403]);
+      await expect(vaultService.getUserPublicKey('user-key', 'token')).rejects.toThrow(HttpErrorByCode[403]);
     });
   });
 
@@ -190,17 +187,16 @@ describe('VaultService', () => {
         headers: {},
         config: { headers: {} as any },
       };
-      (httpService.axiosRef.post as jest.Mock).mockResolvedValue(axiosResponse);
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce(axiosResponse);
 
       const result = await vaultService.signAsUser('user-key', fakeData, 'token');
 
-      const expected = new Uint8Array(Buffer.from(rawSignature));
       expect(httpService.axiosRef.post).toHaveBeenCalledWith(
         expect.stringContaining(`${transitPath}/sign/user-key`),
         { input: Buffer.from(fakeData).toString('base64') },
         { headers: { 'X-Vault-Token': 'token' } },
       );
-      expect(result).toEqual(expected);
+      expect(result).toEqual(vaultSignature);
     });
 
     it('should throw UnauthorizedException when vault returns 401 in _sign', async () => {
@@ -235,17 +231,16 @@ describe('VaultService', () => {
         headers: {},
         config: { headers: {} as any },
       };
-      (httpService.axiosRef.post as jest.Mock).mockResolvedValue(axiosResponse);
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce(axiosResponse);
 
       const result = await vaultService.signAsManager(fakeData, 'token');
 
-      const expected = new Uint8Array(Buffer.from(rawSignature));
       expect(httpService.axiosRef.post).toHaveBeenCalledWith(
         expect.stringContaining(`${transitPath}/sign/${managerId}`),
         { input: Buffer.from(fakeData).toString('base64') },
         { headers: { 'X-Vault-Token': 'token' } },
       );
-      expect(result).toEqual(expected);
+      expect(result).toEqual(vaultSignature);
     });
 
     it('should throw InternalServerErrorException for unknown error in _sign (manager)', async () => {
@@ -263,8 +258,8 @@ describe('VaultService', () => {
     });
   });
 
-  describe('getManagerPublicAddress', () => {
-    it('should create key for manager and return encoded public address', async () => {
+  describe('getManagerPublicKey', () => {
+    it('should create key for manager and return encoded public key', async () => {
       const baseUrl = 'http://vault';
       const transitPath = 'transit/managers';
       const managerId = 'manager-key';
@@ -291,64 +286,12 @@ describe('VaultService', () => {
       };
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue(axiosResponse);
 
-      const result = await vaultService.getManagerPublicAddress('token');
+      const result = await vaultService.getManagerPublicKey('token');
 
       expect(httpService.axiosRef.get).toHaveBeenCalledWith(`${baseUrl}/v1/${transitPath}/keys/${managerId}`, {
         headers: { 'X-Vault-Token': 'token' },
       });
-      expect(result).toBe('NVQW4YLHMVZFA5LCNRUWGS3FPFNFYR4K');
-    });
-  });
-
-  // --- Direct tests of the private methods to improve coverage ---
-  describe('Private method _sign', () => {
-    it('should split the vault signature correctly and decode it', async () => {
-      const transitPath = 'transit/private';
-      const fakeData = new Uint8Array([7, 8, 9]);
-      const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValue(baseUrl);
-      // Prepare a vault signature with the expected format so that split returns an array with at least 3 elements.
-      const rawSignature = 'privateSig';
-      const signatureBase64 = Buffer.from(rawSignature).toString('base64');
-      const fakeVaultSignature = `vault:1:${signatureBase64}`;
-      const axiosResponse: AxiosResponse = {
-        data: { data: { signature: fakeVaultSignature } },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: { headers: {} as any },
-      };
-      (httpService.axiosRef.post as jest.Mock).mockResolvedValue(axiosResponse);
-
-      // Directly invoke the private method _sign using bracket notation.
-      const result: Uint8Array = await (vaultService as any)._sign('private-key', transitPath, fakeData, 'token');
-      expect(result).toEqual(new Uint8Array(Buffer.from(rawSignature)));
-    });
-  });
-
-  describe('Private method _transitGetKey', () => {
-    it('should extract public key and call AlgorandEncoder correctly', async () => {
-      const transitPath = 'transit/private';
-      const keyName = 'private-key';
-      const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValue(baseUrl);
-
-      // Use a fake public key that we expect.
-      const publicKey = randomBytes(32);
-      const publicKey64 = Buffer.from(publicKey).toString('base64');
-      const axiosResponse: AxiosResponse = {
-        data: { data: { keys: { '1': { public_key: publicKey64 } } } },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: { headers: {} as any },
-      };
-      (httpService.axiosRef.post as jest.Mock).mockResolvedValue(axiosResponse);
-
-      // Directly call the private method.
-      const result: string = await (vaultService as any).transitCreateKey(keyName, transitPath, 'token');
-      // We don't know the exact encoding output, but we expect a string.
-      expect(result).toBe(new AlgorandEncoder().encodeAddress(publicKey));
+      expect(result.toString('base64')).toBe(fakePublicKeyBase64);
     });
   });
 });

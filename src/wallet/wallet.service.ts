@@ -17,26 +17,36 @@ export class WalletService {
   ) {}
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
-    const public_address = await this.vaultService.getUserPublicAddress(user_id, vault_token);
-    return { user_id, public_address };
+    const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
+    return { user_id, public_address: new AlgorandEncoder().encodeAddress(public_address) };
   }
 
-  async getMangerInfo(vault_token: string): Promise<ManagerDetailDto> {
-    const public_address = await this.vaultService.getManagerPublicAddress(vault_token);
-    return plainToClass(ManagerDetailDto, { public_address });
+  async getManagerInfo(vault_token: string): Promise<ManagerDetailDto> {
+    const public_address = await this.vaultService.getManagerPublicKey(vault_token);
+    return plainToClass(ManagerDetailDto, { public_address: new AlgorandEncoder().encodeAddress(public_address) });
   }
 
   // Create new user and key
   async userCreate(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
-    const public_address: string = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
+    const public_key: Buffer = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
+    const public_address: string = new AlgorandEncoder().encodeAddress(public_key);
     return { user_id, public_address };
   }
 
   // Get all users
   async getKeys(vault_token: string): Promise<UserInfoResponseDto[]> {
-    return (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
+
+
+    const keys: UserInfoResponseDto[] = (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
+
+    // convert all public keys to algorand address
+    keys.map((key) => {
+      key.public_address = new AlgorandEncoder().encodeAddress(Buffer.from(key.public_address, 'base64'));
+    });
+
+    return keys;
   }
 
   /**
@@ -52,8 +62,15 @@ export class WalletService {
     tx: Uint8Array<ArrayBufferLike>,
     vault_token: string,
   ): Promise<Uint8Array<ArrayBufferLike>> {
-    const signature: Uint8Array<ArrayBufferLike> = await this.vaultService.signAsUser(user_id, tx, vault_token);
-    const signedTx: Uint8Array<ArrayBufferLike> = this.chainService.addSignatureToTxn(tx, signature);
+    const vaultRawSig: Buffer = await this.vaultService.signAsUser(user_id, tx, vault_token);
+    // split vault specific prefixes vault:${version}:signature
+    const signature = vaultRawSig.toString().split(':')[2];
+    // vault default base64 decode
+    const decoded: Buffer = Buffer.from(signature, 'base64');
+    // return as Uint8Array
+    const sig: Uint8Array = new Uint8Array(decoded);
+
+    const signedTx: Uint8Array<ArrayBufferLike> = this.chainService.addSignatureToTxn(tx, sig);
     return signedTx;
   }
 
@@ -65,13 +82,20 @@ export class WalletService {
    * @returns The signed transaction, as a Uint8Array.
    */
   async signTxAsManager(tx: Uint8Array<ArrayBufferLike>, vault_token: string): Promise<Uint8Array<ArrayBufferLike>> {
-    const signature: Uint8Array<ArrayBufferLike> = await this.vaultService.signAsManager(tx, vault_token);
-    const signedTx: Uint8Array<ArrayBufferLike> = this.chainService.addSignatureToTxn(tx, signature);
+    const vaultRawSig: Buffer = await this.vaultService.signAsManager(tx, vault_token);
+    // split vault specific prefixes vault:${version}:signature
+    const signature = vaultRawSig.toString().split(':')[2];
+    // vault default base64 decode
+    const decoded: Buffer = Buffer.from(signature, 'base64');
+    // return as Uint8Array
+    const sig: Uint8Array = new Uint8Array(decoded);
+    const signedTx: Uint8Array<ArrayBufferLike> = this.chainService.addSignatureToTxn(tx, sig);
     return signedTx;
   }
 
   async createAsset(options: CreateAssetDto, vault_token: string) {
-    const managerPublicAddress: string = await this.vaultService.getManagerPublicAddress(vault_token);
+    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
     const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(managerPublicAddress, options);
     const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(tx, vault_token);
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
@@ -95,7 +119,8 @@ export class WalletService {
    */
   async transferAsset(assetId: bigint, userId: string, amount: number, vault_token: string) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    const managerPublicAddress: string = await this.vaultService.getManagerPublicAddress(vault_token);
+    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
 
     let suggested_params = await this.chainService.getSuggestedParams();
 

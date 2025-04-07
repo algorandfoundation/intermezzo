@@ -7,6 +7,8 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
+import { randomBytes } from 'crypto';
+import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 
 describe('WalletService', () => {
   let walletService: WalletService;
@@ -44,38 +46,42 @@ describe('WalletService', () => {
   });
 
   it('getUserInfo() test', async () => {
-    vaultServiceMock.getUserPublicAddress.mockResolvedValueOnce(
-      'FVP5QNTHFME5BFBAX3LCQZUTWNKY4HLCXY2HL5JNCMXYINQ3ILT7VUEF6A',
-    );
+    const pubKey = randomBytes(32)
+
+    vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(pubKey);
 
     const result = await walletService.getUserInfo('123581253191824129481240513501928401928', 'vault_token');
 
-    expect(vaultServiceMock.getUserPublicAddress).toHaveBeenCalledWith(
+    expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(
       '123581253191824129481240513501928401928',
       'vault_token',
     );
     expect(result).toStrictEqual({
-      public_address: 'FVP5QNTHFME5BFBAX3LCQZUTWNKY4HLCXY2HL5JNCMXYINQ3ILT7VUEF6A',
+      public_address: new AlgorandEncoder().encodeAddress(pubKey),
       user_id: '123581253191824129481240513501928401928',
     });
   });
 
   it('getManagerInfo() test', async () => {
-    vaultServiceMock.getManagerPublicAddress.mockResolvedValueOnce(
-      'FVP5QNTHFME5BFBAX3LCQZUTWNKY4HLCXY2HL5JNCMXYINQ3ILT7VUEF6A',
-    );
+    const pubKey = randomBytes(32)
 
-    const result = await walletService.getMangerInfo('vault_token');
+    vaultServiceMock.getManagerPublicKey.mockResolvedValueOnce(pubKey);
 
-    expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith('vault_token');
+    const result = await walletService.getManagerInfo('vault_token');
+
+    expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith('vault_token');
 
     expect(result).toStrictEqual(plainToClass(ManagerDetailDto, {
-      public_address: 'FVP5QNTHFME5BFBAX3LCQZUTWNKY4HLCXY2HL5JNCMXYINQ3ILT7VUEF6A',
+      public_address: new AlgorandEncoder().encodeAddress(pubKey),
     }))
   });
 
 
-  it('createAsset() test', async () => {
+  it('\(OK) createAsset()', async () => {
+    const pubKey = randomBytes(32)
+
+    const address = new AlgorandEncoder().encodeAddress(pubKey);
+
     const createAssetDto: CreateAssetDto = {
       total: 5,
       decimals: BigInt(2),
@@ -83,42 +89,44 @@ describe('WalletService', () => {
       unitName: 'Tasst',
       assetName: 'Test Asset',
       url: 'https://example.com',
-      managerAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
-      reserveAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
-      freezeAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
-      clawbackAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      managerAddress: address,
+      reserveAddress: address,
+      freezeAddress: address,
+      clawbackAddress: address,
     };
 
     const vaultToken = 'vault_token';
-    const publicAddress = 'FVP5QNTHFME5BFBAX3LCQZUTWNKY4HLCXY2HL5JNCMXYINQ3ILT7VUEF6A';
     const tx = new Uint8Array(5); // Initialize with an empty Uint8Array
-    const signature = new Uint8Array(10); // Initialize with an empty Uint8Array
-    const signedTx = new Uint8Array(15); // Initialize with an empty Uint8Array
+    const signedTx = new Uint8Array(64); // Initialize with an empty Uint8Array
+    const signature = Buffer.from(`vault:1:${Buffer.from(signedTx).toString('base64')}`, 'utf-8');
     const transactionId = 'transactionId';
 
-    vaultServiceMock.getManagerPublicAddress.mockResolvedValueOnce(publicAddress);
+    vaultServiceMock.getManagerPublicKey.mockResolvedValueOnce(pubKey);
     chainServiceMock.craftAssetCreateTx.mockResolvedValueOnce(tx);
     vaultServiceMock.signAsManager.mockResolvedValueOnce(signature);
     chainServiceMock.addSignatureToTxn.mockReturnValueOnce(signedTx);
     chainServiceMock.submitTransaction.mockResolvedValueOnce({ txid: transactionId } as any);
 
     const result = await walletService.createAsset(createAssetDto, vaultToken);
-
-    expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith(vaultToken);
-    expect(chainServiceMock.craftAssetCreateTx).toHaveBeenCalledWith(publicAddress, createAssetDto);
+    
+    expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(vaultToken);
+    expect(chainServiceMock.craftAssetCreateTx).toHaveBeenCalledWith(address, createAssetDto);
     expect(vaultServiceMock.signAsManager).toHaveBeenCalledWith(tx, vaultToken);
-    expect(chainServiceMock.addSignatureToTxn).toHaveBeenCalledWith(tx, signature);
+    expect(chainServiceMock.addSignatureToTxn).toHaveBeenCalledWith(tx, signedTx);
     expect(chainServiceMock.submitTransaction).toHaveBeenCalledWith(signedTx);
     expect(result).toBe(transactionId);
   });
 
   describe('transferAsset()', () => {
+    const userPubKey = randomBytes(32)
+    const managerPubKey = randomBytes(32)
+
     const assetId = 1n;
     const userId = 'user123';
     const amount = 10;
     const vaultToken = 'vault_token';
-    const userPublicAddress = 'KADIR2X4ALLOHNOCXEP6NPG5QI6ACLDJM4NFKB3GCJ23WR5ATTQJXKG4ZY';
-    const managerPublicAddress = 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU';
+    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
     const suggestedParams = {
       minFee: 1000,
       lastRound: 1n,
@@ -131,8 +139,8 @@ describe('WalletService', () => {
     beforeEach(async () => {
       chainServiceMock.getSuggestedParams.mockResolvedValueOnce(suggestedParams);
       chainServiceMock.submitTransaction.mockResolvedValueOnce({ txid: 'final_tx_id' } as any);
-      vaultServiceMock.getUserPublicAddress.mockResolvedValueOnce(userPublicAddress);
-      vaultServiceMock.getManagerPublicAddress.mockResolvedValueOnce(managerPublicAddress);
+      vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(userPubKey);
+      vaultServiceMock.getManagerPublicKey.mockResolvedValueOnce(managerPubKey);
 
       // not mock tx creation, and set group id functions
       chainServiceMock.craftAssetTransferTx.mockImplementation((...args) => chainService.craftAssetTransferTx(...args));
@@ -163,8 +171,8 @@ describe('WalletService', () => {
       const result = await walletService.transferAsset(assetId, userId, amount, vaultToken);
 
       // Verify the flow.
-      expect(vaultServiceMock.getUserPublicAddress).toHaveBeenCalledWith(userId, vaultToken);
-      expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith(vaultToken);
+      expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
+      expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(vaultToken);
       expect(chainServiceMock.getSuggestedParams).toHaveBeenCalled();
       expect(chainServiceMock.getAccountAsset).toHaveBeenCalledWith(userPublicAddress, assetId);
       expect(chainServiceMock.getAccountDetail).toHaveBeenCalledWith(userPublicAddress);
@@ -216,8 +224,8 @@ describe('WalletService', () => {
       const result = await walletService.transferAsset(assetId, userId, amount, vaultToken);
 
       // Verify the flow.
-      expect(vaultServiceMock.getUserPublicAddress).toHaveBeenCalledWith(userId, vaultToken);
-      expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith(vaultToken);
+      expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
+      expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(vaultToken);
       expect(chainServiceMock.getSuggestedParams).toHaveBeenCalled();
       expect(chainServiceMock.getAccountAsset).toHaveBeenCalledWith(userPublicAddress, assetId);
       expect(chainServiceMock.getAccountDetail).toHaveBeenCalledWith(userPublicAddress);
@@ -268,8 +276,8 @@ describe('WalletService', () => {
       const result = await walletService.transferAsset(assetId, userId, amount, vaultToken);
 
       // Verify the flow.
-      expect(vaultServiceMock.getUserPublicAddress).toHaveBeenCalledWith(userId, vaultToken);
-      expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith(vaultToken);
+      expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
+      expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(vaultToken);
       expect(chainServiceMock.getSuggestedParams).toHaveBeenCalled();
       expect(chainServiceMock.getAccountAsset).toHaveBeenCalledWith(userPublicAddress, assetId);
       expect(chainServiceMock.getAccountDetail).toHaveBeenCalledWith(userPublicAddress);
@@ -304,8 +312,8 @@ describe('WalletService', () => {
       const result = await walletService.transferAsset(assetId, userId, amount, vaultToken);
 
       // Verify the flow.
-      expect(vaultServiceMock.getUserPublicAddress).toHaveBeenCalledWith(userId, vaultToken);
-      expect(vaultServiceMock.getManagerPublicAddress).toHaveBeenCalledWith(vaultToken);
+      expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
+      expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(vaultToken);
       expect(chainServiceMock.getSuggestedParams).toHaveBeenCalled();
       expect(chainServiceMock.getAccountAsset).toHaveBeenCalledWith(userPublicAddress, assetId);
       expect(chainServiceMock.getAccountDetail).toHaveBeenCalledWith(userPublicAddress);

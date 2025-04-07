@@ -52,7 +52,7 @@ export class Wallet {
     type: ManagerDetailDto,
   })
   async managersDetail(@Request() request: any): Promise<ManagerDetailDto> {
-    return await this.walletService.getMangerInfo(request.vault_token);
+    return await this.walletService.getManagerInfo(request.vault_token);
   }
 
   // Endpoint to create a new user
