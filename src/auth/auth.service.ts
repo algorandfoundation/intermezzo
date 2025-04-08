@@ -34,4 +34,10 @@ export class AuthService {
 
     return response as SignInResponseDto;
   }
+
+  async authGithub(token: string): Promise<string> {
+    const vault_token = await this.vaultService.authGithub(token);
+    return vault_token
+  }
+
 }

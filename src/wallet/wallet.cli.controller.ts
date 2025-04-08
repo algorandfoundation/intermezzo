@@ -36,6 +36,22 @@ export class WalletCLI {
 
 	/**
 	 *
+	 * @param personalAccessToken
+	 * @returns
+	 */
+	async loginWithToken(personalAccessToken: string): Promise<boolean> {
+		try {
+			const authResponse: string = await this.authService.authGithub(personalAccessToken);
+			this.latestVaultToken = authResponse;
+			return true;
+		} catch (error) {
+			Logger.error("Failed to login with Personal Access Token", error);
+			return false;
+		}
+	}
+
+	/**
+	 *
 	 * @returns
 	 */
 	async getAddress(keyPath: string = process.env.VAULT_TRANSIT_MANAGERS_PATH, keyName: string = process.env.VAULT_MANAGER_KEY): Promise<string> {
