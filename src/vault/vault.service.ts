@@ -114,6 +114,7 @@ export class VaultService {
 
   public async sign(keyName: string, transitPath: string, data: Uint8Array, token: string): Promise<Buffer> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
@@ -125,6 +126,7 @@ export class VaultService {
         {
           headers: {
             'X-Vault-Token': token,
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
           },
         },
       );
