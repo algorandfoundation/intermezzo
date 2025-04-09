@@ -29,6 +29,56 @@ describe('VaultService', () => {
     vaultService = new VaultService(httpService, configService);
   });
 
+  describe('authGithub', () => {
+    it('\(OK) should be able to use personal access token to auth', async () => {
+      const personal_token: string = 'personal_token';
+      const baseUrl: string = 'http://vault';
+
+      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({
+        data: {
+          auth: {
+            client_token: 'vault_token',
+          },
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: { headers: {} as any },
+      } as AxiosResponse);
+
+      const result: string = await vaultService.authGithub(personal_token);
+      expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+        `${baseUrl}/v1/auth/github/login`,
+        { token: personal_token },
+        {
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+      expect(result).toEqual('vault_token');
+    });
+
+    it('\(FAIL) should throw error when auth fails', async () => {
+      const personal_token: string = 'personal_token';
+      const baseUrl: string = 'http://vault';
+
+      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
+      (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+        response: { status: 401 },
+      });
+
+      await expect(vaultService.authGithub(personal_token)).rejects.toThrow(HttpErrorByCode[401]);
+      expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+        `${baseUrl}/v1/auth/github/login`,
+        { token: personal_token },
+        {
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    })
+
+  })
+
   describe('checkToken', () => {
     it('should return true when token is valid', async () => {
       const baseUrl = 'http://vault';
@@ -146,10 +196,13 @@ describe('VaultService', () => {
 
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue(axiosResponse);
 
-      const result: Buffer = await vaultService.getUserPublicKey('user-key', 'token');
+      const result: Buffer = await vaultService.getUserPublicKey('user-key', 'valid-token');
 
       expect(httpService.axiosRef.get).toHaveBeenCalledWith(`${baseUrl}/v1/${transitPath}/keys/user-key`, {
-        headers: { 'X-Vault-Token': 'token' },
+        headers: { 
+          'X-Vault-Token': 'valid-token',
+          'Content-Type': 'application/json',
+        },
       });
       expect(result.toString('base64')).toEqual(publicKey.toString('base64'));
     });
@@ -289,7 +342,10 @@ describe('VaultService', () => {
       const result = await vaultService.getManagerPublicKey('token');
 
       expect(httpService.axiosRef.get).toHaveBeenCalledWith(`${baseUrl}/v1/${transitPath}/keys/${managerId}`, {
-        headers: { 'X-Vault-Token': 'token' },
+        headers: { 
+          'X-Vault-Token': 'token',
+          'Content-Type': 'application/json'
+        },
       });
       expect(result.toString('base64')).toBe(fakePublicKeyBase64);
     });

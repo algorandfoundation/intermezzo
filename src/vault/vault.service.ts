@@ -1,5 +1,5 @@
 import { HttpService } from '@nestjs/axios';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosResponse } from 'axios';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
@@ -14,6 +14,42 @@ export class VaultService {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {}
+
+  /**
+   * 
+   * @param token - personal access token
+   * @returns 
+   */
+  async authGithub(token: string): Promise<string> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+
+    let result: AxiosResponse;
+    try {
+      result = await this.httpService.axiosRef.post(
+        `${baseUrl}/v1/auth/github/login`,
+        {
+          token: token,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          },
+        },
+      );
+
+      // log with stringify
+      Logger.log('Github login result: ', JSON.stringify(result.data));
+    }
+    catch (error) {
+      Logger.error('Failed to login with Personal Access Token', JSON.stringify(error));
+      throw new HttpErrorByCode[error.response.status]('VaultException');
+    }
+    const vault_token: string = result.data.auth.client_token;
+    return vault_token;
+  }
+
 
   async transitCreateKey(keyName: string, transitKeyPath: string, token: string): Promise<Buffer> {
     // https://developer.hashicorp.com/vault/api-docs/secret/transit#create-key
@@ -53,11 +89,19 @@ export class VaultService {
   async getKey(keyName: string, transitKeyPath: string, token: string): Promise<Buffer> {
     // https://developer.hashicorp.com/vault/api-docs/secret/transit#read-key
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
-      result = await this.httpService.axiosRef.get(`${baseUrl}/v1/${transitKeyPath}/keys/${keyName}`, {
-        headers: { 'X-Vault-Token': token },
+      const url = `${baseUrl}/v1/${transitKeyPath}/keys/${keyName}`;
+      Logger.log('getKey url: ', url);
+
+      result = await this.httpService.axiosRef.get(url, {
+        headers: { 
+          'X-Vault-Token': token,
+          'Content-Type': 'application/json',
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+        },
       });
     } catch (error) {
       throw new HttpErrorByCode[error.response.status]('VaultException');
@@ -70,6 +114,7 @@ export class VaultService {
 
   public async sign(keyName: string, transitPath: string, data: Uint8Array, token: string): Promise<Buffer> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
@@ -81,6 +126,7 @@ export class VaultService {
         {
           headers: {
             'X-Vault-Token': token,
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
           },
         },
       );
