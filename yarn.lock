@@ -818,10 +818,10 @@
     webpack "5.97.1"
     webpack-node-externals "3.0.0"
 
-"@nestjs/common@11.0.13":
-  version "11.0.13"
-  resolved "https://registry.yarnpkg.com/@nestjs/common/-/common-11.0.13.tgz#532cd172d5b5fa4e7da471c83e6945e0a1ebd80b"
-  integrity sha512-cXqXJPQTcJIYqT8GtBYqjYY9sklCBqp/rh9z1R40E60gWnsU598YIQWkojSFRI9G7lT/+uF+jqSrg/CMPBk7QQ==
+"@nestjs/common@11.0.16":
+  version "11.0.16"
+  resolved "https://registry.yarnpkg.com/@nestjs/common/-/common-11.0.16.tgz#b6550ac2998e9991f24a99563a93475542885ba7"
+  integrity sha512-agvuQ8su4aZ+PVxAmY89odG1eR97HEQvxPmTMdDqyvDWzNerl7WQhUEd+j4/UyNWcF1or1UVcrtPj52x+eUSsA==
   dependencies:
     uid "2.0.2"
     iterare "1.2.1"
