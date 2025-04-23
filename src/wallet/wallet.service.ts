@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { ChainService } from '../chain/chain.service';
 import { CreateAssetDto } from './create-asset.dto';
@@ -47,6 +47,24 @@ export class WalletService {
     });
 
     return keys;
+  }
+
+  /**
+   * 
+   * Fetches the asset balance for a user by their user ID and vault token.
+   * @param user_id - The ID of the user whose asset balance is to be fetched.
+   * @param vault_token - The token used to authenticate with the vault.
+   * @returns An array of AssetHolding objects representing the user's asset balance.
+   * @throws Will throw an error if the user is not found or if there is an issue with the vault token.
+   */
+  async getAssetHoldings(user_id: string, vault_token: string): Promise<AssetHolding[]> {
+    const userPublicAddress: string = (await this.getUserInfo(user_id, vault_token)).public_address;
+
+    // log
+    Logger.debug(`Fetching asset balance for user: ${user_id} with address: ${userPublicAddress}`);
+
+    const account: AssetHolding[] = await this.chainService.getAccountAssetHoldings(userPublicAddress)
+    return account
   }
 
   /**

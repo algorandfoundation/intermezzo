@@ -66,6 +66,29 @@ describe('Wallet Controller', () => {
     });
   });
 
+  describe('assetsBalances', () => {
+    it('should return asset balances for a user', async () => {
+      const userId = 'user123';
+      const vaultToken = 'vault-token-abc';
+      const expectedPublicAddress = 'PUBLIC_ADDRESS_XYZ';
+      const expectedAssets: AssetHolding[] = [
+        { amount: BigInt(100), 'asset-id': 123, 'is-frozen': false },
+        { amount: BigInt(200), 'asset-id': 456, 'is-frozen': true },
+      ];
+      const expectedAccountAssetsDto = {
+        address: expectedPublicAddress,
+        assets: expectedAssets,
+      };
+      const requestMock = { vault_token: vaultToken };
+      mockWalletService.getAssetHoldings.mockResolvedValueOnce(expectedAssets);
+      mockWalletService.getUserInfo.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress });
+      const result = await walletController.assetsBalances(requestMock, userId);
+      expect(mockWalletService.getAssetHoldings).toHaveBeenCalledWith(userId, vaultToken);
+      expect(mockWalletService.getUserInfo).toHaveBeenCalledWith(userId, vaultToken);
+      expect(result).toEqual(expectedAccountAssetsDto);
+    });
+  })
+
   describe('createAsset', () => {
     it('should create an asset transaction and return the transaction id', async () => {
       const vaultToken = 'vault-token-def';

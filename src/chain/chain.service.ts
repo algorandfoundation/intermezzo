@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AlgorandEncoder,
@@ -213,15 +213,47 @@ export class ChainService {
     return suggestedParams;
   }
 
+  /**
+   * Get the account detail for a specific public address.
+   * 
+   * @param public_address - The public address of the account.
+   * @returns - The account detail including amount, min balance, and asset holdings.
+   */
   async getAccountDetail(public_address: string): Promise<TruncatedAccountResponse> {
     const response = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account detail response: ${JSON.stringify(response)}`);
+
     const truncatedAccountResponse: TruncatedAccountResponse = {
       amount: BigInt(response['amount']),
       minBalance: BigInt(response['min-balance']),
-      assets: response['assets'].map((asset: any) => ({ assetId: asset['asset-id'] }) as TruncatedAssetHolding),
+      assets: response['assets'].map((asset: any) => ({ assetId: asset['asset-id'], balance: asset['amount'] }) as TruncatedAssetHolding),
     };
     return truncatedAccountResponse;
   }
+
+  /**
+   * Get the asset holding for a specific account and asset ID.
+   * 
+   * @param public_address - The public address of the account.
+   * @param asset_id - The ID of the asset.
+   * @returns - The asset holding for the account and asset ID, or null if not found.
+   */
+  async getAccountAssetHoldings(public_address: string): Promise<AssetHolding[]> {
+    const response: AccountAssetsResponse = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account asset holdings response: ${JSON.stringify(response)}`);
+
+    return response.assets
+  }
+
+  /**
+   * Get the asset holding for a specific account and asset ID.
+   * 
+   * @param public_address - The public address of the account.
+   * @param asset_id - The ID of the asset.
+   * @returns - The asset holding for the account and asset ID, or null if not found.
+   */
 
   async getAccountAsset(public_address: string, asset_id: bigint): Promise<TruncatedAccountAssetResponse | null> {
     try {

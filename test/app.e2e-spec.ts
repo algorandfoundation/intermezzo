@@ -399,6 +399,23 @@ describe('App E2E', () => {
       );
       expect(response2.status).toBe(201); // HTTP 201 Created
       expect(typeof response2.data.transaction_id).toEqual('string');
+
+      // ############################################################
+      // Check if the asset is transferred to the user by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(`${APP_BASE_URL}/wallet/assets/${userId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0);
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(assetTransferRequestData.assetId);
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(assetTransferRequestData.amount);
+      // ############################################################
+
     }, 60000);
 
     it('(FAIL) can transfer asset if user permission', async () => {
