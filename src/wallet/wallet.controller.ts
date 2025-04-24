@@ -16,6 +16,7 @@ import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
 } from '@nestjs/swagger';
+import { AccountAssetsDto } from './account-assets.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -53,6 +54,37 @@ export class Wallet {
   })
   async managersDetail(@Request() request: any): Promise<ManagerDetailDto> {
     return await this.walletService.getManagerInfo(request.vault_token);
+  }
+
+  // Endpoint to fetch asset balance
+  @Get('wallet/assets/:user_id')
+  @ApiOperation({
+    summary: 'Get Account Asset Holdings',
+    description:
+      'Fetch the account asset holdings for a user by their user ID. The response includes the **Algorand** `public_address` of the user and the list of assets held by the user.',
+  })
+  @ApiOkResponse({
+    description: 'The asset balance has been successfully fetched.',
+    type: AccountAssetsDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async assetsBalances(
+    @Request() request: any,
+    @Param('user_id') user_id: string
+  ): Promise<AccountAssetsDto> {
+    const accountAssets: AssetHolding[] = await this.walletService.getAssetHoldings(user_id, request.vault_token);
+    const userPublicAddress: string = (await this.walletService.getUserInfo(user_id, request.vault_token)).public_address;
+    const accountAssetsDto: AccountAssetsDto = {
+      address: userPublicAddress,
+      assets: accountAssets,
+    };
+
+    return accountAssetsDto;
   }
 
   // Endpoint to create a new user
