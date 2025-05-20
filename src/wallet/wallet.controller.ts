@@ -158,10 +158,11 @@ export class Wallet {
   ): Promise<AssetTransferResponseDto> {
     return {
       transaction_id: await this.walletService.transferAsset(
+        request.vault_token,
         assetTransferRequestDto.assetId,
         assetTransferRequestDto.userId,
         assetTransferRequestDto.amount,
-        request.vault_token,
+        assetTransferRequestDto.lease,
       ),
     } as AssetTransferResponseDto;
   }
