@@ -483,6 +483,13 @@ describe('App E2E', () => {
       assetTransferRequestData.assetId = Number(assetId);
       assetTransferRequestData.userId = userId;
       assetTransferRequestData.amount = 0;
+
+      // Adds a lease to the transaction to prevent replay and conflicting transactions.
+      // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
+      // ensuring only one transaction with that lease can be confirmed during that window.
+      // Use a consistent lease value if retrying or managing exclusivity; generating a new random lease each time
+      // prevents replay but won't prevent conflicting submissions.
+      // To generate a lease: Buffer.from(crypto.randomBytes(32)).toString('base64')
       assetTransferRequestData.lease =
         '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=';
 

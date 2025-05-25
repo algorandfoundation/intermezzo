@@ -29,7 +29,7 @@ export class AssetTransferRequestDto {
   @ApiProperty({
     example: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
     description:
-      'The transaction lease to be attached to the Asset transfer transaction',
+      'Optional 32-byte base64-encoded lease to prevent replay and conflicting transactions. Use a fixed value to ensure exclusivity. Generate with: Buffer.from(crypto.randomBytes(32)).toString("base64")',
   })
   lease?: string;
 }
