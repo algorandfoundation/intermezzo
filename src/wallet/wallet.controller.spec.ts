@@ -122,6 +122,7 @@ describe('Wallet Controller', () => {
         assetId: 123n,
         userId: 'user456',
         amount: 10,
+        lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
       };
       const expectedTransactionId = 'tx987654321';
 
@@ -135,10 +136,11 @@ describe('Wallet Controller', () => {
       );
 
       expect(mockWalletService.transferAsset).toHaveBeenCalledWith(
+        vaultToken,
         assetTransferRequest.assetId,
         assetTransferRequest.userId,
         assetTransferRequest.amount,
-        vaultToken,
+        assetTransferRequest.lease,
       );
       expect(result).toEqual(plainToClass(AssetTransferResponseDto, { transaction_id: expectedTransactionId }));
     });

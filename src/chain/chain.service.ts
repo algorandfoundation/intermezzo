@@ -112,6 +112,7 @@ export class ChainService {
     to: string,
     asset_id: bigint,
     amount: number | bigint,
+    lease?: string,
     suggested_params?: TruncatedSuggestedParamsResponse,
   ): Promise<Uint8Array> {
     suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
@@ -129,6 +130,17 @@ export class ChainService {
 
     if (amount != 0) {
       builder.addAssetAmount(amount);
+    }
+    if (lease) {
+      try {
+        const leaseBuffer = Buffer.from(lease, 'base64');
+        const leaseUint8Array = new Uint8Array(leaseBuffer);
+        builder.addLease(leaseUint8Array);
+      } catch (error) {
+        throw new HttpErrorByCode[400](
+          `Invalid lease format: ${error.message}`,
+        );
+      }
     }
 
     return builder.get().encode();
