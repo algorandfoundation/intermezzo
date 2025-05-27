@@ -232,6 +232,96 @@ describe('ChainService', () => {
     });
   });
 
+  describe('craftAssetClawbackTx', () => {
+    it('should craft asset clawback transaction', async () => {
+      (httpServiceMock.axiosRef.get as jest.Mock).mockResolvedValue({
+        data: {
+          'min-fee': 1000,
+          'last-round': 1,
+        },
+        status: 200,
+      });
+      // Use a valid dummy Algorand address for all address options.
+      const dummyAddress1 =
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+      const dummyAddress2 =
+        'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
+      const dummyAddress3 =
+        'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const clawbackAddress = dummyAddress1;
+      const senderAddress = dummyAddress2;
+      const receiverAddress = dummyAddress3;
+      const assetId = 1234n;
+      const amount = 2n;
+      const result = await chainService.craftAssetClawbackTx(
+        clawbackAddress,
+        senderAddress,
+        receiverAddress,
+        assetId,
+        amount,
+      );
+      expect(result).toBeInstanceOf(Uint8Array);
+      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
+        aamt: 2,
+        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
+        fee: 1000,
+        fv: 1,
+        gen: 'test-genesis-id',
+        gh: new Uint8Array([
+          181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172,
+        ]),
+        lv: 1001,
+        snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
+        type: 'axfer',
+        xaid: 1234,
+        asnd: new AlgorandEncoder().decodeAddress(senderAddress),
+      });
+    });
+    it('if amount is zero, should not include amount in asset clawback transaction', async () => {
+      (httpServiceMock.axiosRef.get as jest.Mock).mockResolvedValue({
+        data: {
+          'min-fee': 1000,
+          'last-round': 1,
+        },
+        status: 200,
+      });
+      // Use a valid dummy Algorand address for all address options.
+      const dummyAddress1 =
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
+      const dummyAddress2 =
+        'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
+      const dummyAddress3 =
+        'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const clawbackAddress = dummyAddress1;
+      const senderAddress = dummyAddress2;
+      const receiverAddress = dummyAddress3;
+      const assetId = 1234n;
+      const amount = 0n;
+      const result = await chainService.craftAssetClawbackTx(
+        clawbackAddress,
+        senderAddress,
+        receiverAddress,
+        assetId,
+        amount,
+      );
+      expect(result).toBeInstanceOf(Uint8Array);
+      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
+        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
+        fee: 1000,
+        fv: 1,
+        gen: 'test-genesis-id',
+        gh: new Uint8Array([
+          181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172,
+        ]),
+        lv: 1001,
+        snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
+        type: 'axfer',
+        xaid: 1234,
+        asnd: new AlgorandEncoder().decodeAddress(senderAddress),
+      });
+    });
+  });
+
   describe('getSuggestedParams', () => {
     it('should return suggested params on success', async () => {
       (httpServiceMock.axiosRef.get as jest.Mock).mockResolvedValue({

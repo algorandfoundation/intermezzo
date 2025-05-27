@@ -17,6 +17,7 @@ import {
   ApiNotFoundResponse,
 } from '@nestjs/swagger';
 import { AccountAssetsDto } from './account-assets.dto';
+import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -163,6 +164,37 @@ export class Wallet {
         assetTransferRequestDto.userId,
         assetTransferRequestDto.amount,
         assetTransferRequestDto.lease,
+      ),
+    } as AssetTransferResponseDto;
+  }
+
+  // Asset clawback by manager
+  @Post('wallet/transactions/clawback-asset/')
+  @ApiOperation({
+    summary: 'Clawback Asset',
+    description:
+      'Clawback an **Algorand** `Asset` from a **User** to the **Manager**. The `Asset` must have been created with the manager as the clawback address.',
+  })
+  @ApiCreatedResponse({
+    description: 'The asset has been successfully clawed back.',
+    type: AssetTransferResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async assetClawbackTx(
+    @Request() request: any,
+    @Body() assetClawbackRequestDto: AssetClawbackRequestDto,
+  ): Promise<AssetTransferResponseDto> {
+    return {
+      transaction_id: await this.walletService.clawbackAsset(
+        request.vault_token,
+        assetClawbackRequestDto.assetId,
+        assetClawbackRequestDto.userId,
+        assetClawbackRequestDto.amount,
       ),
     } as AssetTransferResponseDto;
   }

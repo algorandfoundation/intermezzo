@@ -146,6 +146,37 @@ export class ChainService {
     return builder.get().encode();
   }
 
+  async craftAssetClawbackTx(
+    clawbackAddress: string,
+    from: string,
+    to: string,
+    asset_id: bigint,
+    amount: number | bigint,
+    suggested_params?: TruncatedSuggestedParamsResponse,
+  ): Promise<Uint8Array> {
+    suggested_params = suggested_params
+      ? suggested_params
+      : await this.getSuggestedParams();
+
+    const builder = new AssetTransferTxBuilder(
+      this.configService.get('GENESIS_ID'),
+      this.configService.get('GENESIS_HASH'),
+    );
+    builder.addAssetId(asset_id);
+    builder.addSender(clawbackAddress);
+    builder.addAssetSender(from);
+    builder.addAssetReceiver(to);
+    builder.addFee(suggested_params.minFee);
+    builder.addFirstValidRound(suggested_params.lastRound);
+    builder.addLastValidRound(suggested_params.lastRound + 1000n);
+
+    if (amount != 0) {
+      builder.addAssetAmount(amount);
+    }
+
+    return builder.get().encode();
+  }
+
   async makeAlgoNodeRequest(path: string, method: 'GET' | 'POST', data?: any): Promise<any> {
     const nodeHttpScheme: string = this.configService.get<string>('NODE_HTTP_SCHEME');
     const nodeHost: string = this.configService.get<string>('NODE_HOST');
