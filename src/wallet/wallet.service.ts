@@ -227,4 +227,45 @@ export class WalletService {
 
     return (await this.chainService.submitTransaction(signedTxs)).txid;
   }
+
+  async clawbackAsset(
+    vault_token: string,
+    assetId: bigint,
+    userId: string,
+    amount: number,
+  ) {
+    const userPublicAddress: string = (
+      await this.getUserInfo(userId, vault_token)
+    ).public_address;
+    const managerPublicKey: Buffer =
+      await this.vaultService.getManagerPublicKey(vault_token);
+    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(
+      managerPublicKey,
+    );
+
+    const suggested_params = await this.chainService.getSuggestedParams();
+
+    // build unsigned tx
+    const tx: Uint8Array<ArrayBufferLike> =
+      await this.chainService.craftAssetClawbackTx(
+        managerPublicAddress,
+        userPublicAddress,
+        managerPublicAddress,
+        assetId,
+        amount,
+        suggested_params,
+      );
+
+    // sign tx by manager
+
+    const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(
+      tx,
+      vault_token,
+    );
+    const transactionId: string = (
+      await this.chainService.submitTransaction(signedTx)
+    ).txid;
+
+    return transactionId;
+  }
 }

@@ -482,7 +482,7 @@ describe('App E2E', () => {
 
       assetTransferRequestData.assetId = Number(assetId);
       assetTransferRequestData.userId = userId;
-      assetTransferRequestData.amount = 0;
+      assetTransferRequestData.amount = 2;
 
       // Adds a lease to the transaction to prevent replay and conflicting transactions.
       // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
@@ -490,8 +490,9 @@ describe('App E2E', () => {
       // Use a consistent lease value if retrying or managing exclusivity; generating a new random lease each time
       // prevents replay but won't prevent conflicting submissions.
       // To generate a lease: Buffer.from(crypto.randomBytes(32)).toString('base64')
-      assetTransferRequestData.lease =
-        '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=';
+      assetTransferRequestData.lease = Buffer.from(randomBytes(32)).toString(
+        'base64',
+      );
 
       // Transfer the asset
 
@@ -506,14 +507,255 @@ describe('App E2E', () => {
       expect(typeof response1.data.transaction_id).toEqual('string');
 
       // transfer it again
-      assetTransferRequestData.amount = 1;
+      assetTransferRequestData.amount = 3;
 
       await expect(
-        axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
-          headers: { Authorization: `Bearer ${managerAccessToken}` },
-        }),
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+          assetTransferRequestData,
+          {
+            headers: { Authorization: `Bearer ${managerAccessToken}` },
+          },
+        ),
       ).rejects.toMatchObject({ response: { status: 400 } });
+    }, 60000);
+  });
 
+  describe('Clawback Asset', () => {
+    /**
+     * Represents the data structure for an asset clawback.
+     *
+     * @property {bigint} assetId - The ID of the asset to be clawed back.
+     * @property {string} userId - The ID of the user from whom the asset is being clawed back.
+     * @property {number} amount - The amount of the asset to be clawed back.
+     */
+    const assetClawbackRequestData = {
+      assetId: 1,
+      userId: 'test-user-id',
+      amount: 1,
+    };
+
+    let assetId: bigint | number;
+
+    beforeAll(async () => {
+      // before all tests, create an asset and set assetId
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+      const managerAddress = await getManagerAddress();
+
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        clawbackAddress: managerAddress, // Pawn assumes clawback address is the manager address but it's needs to be set explicitly when creating the asset
+      };
+      const createAssetResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/create-asset`,
+        assetData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      assetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
+      if (assetId == 0) {
+        throw new Error('Manager does not asset to testing transfer.');
+      }
+    }, 60000);
+
+    afterAll(() => {
+      assetClawbackRequestData.amount = 1;
+    });
+
+    it('(OK) clawback asset', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+      // clawback the asset
+      const response2 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response2.status).toBe(201); // HTTP 201 Created
+      expect(typeof response2.data.transaction_id).toEqual('string');
+      // ############################################################
+      // Check if the asset is clawed back to the manager by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(
+        `${APP_BASE_URL}/wallet/assets/${userId}`,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0); // Asset should be clawed back, but still present
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(
+        assetClawbackRequestData.assetId,
+      );
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(0);
+      // ############################################################
+    }, 60000);
+    it('(FAIL) can not clawback asset if user permission', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // clawback the asset
+      await expect(
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+          assetClawbackRequestData,
+          {
+            headers: { Authorization: `Bearer ${userAccessToken}` },
+          },
+        ),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    }, 60000);
+    it('(FAIL) can not clawback asset without clawback address', async () => {
+      // create asset without clawback address
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+      };
+      const createAssetResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/create-asset`,
+        assetData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+      const managerAddress = await getManagerAddress();
+      const managerDetail = await getAccountDetail(managerAddress);
+      assetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
+      if (assetId == 0) {
+        throw new Error('Manager does not asset to testing transfer.');
+      }
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // clawback the asset
+      await expect(
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+          assetClawbackRequestData,
+          {
+            headers: { Authorization: `Bearer ${managerAccessToken}` },
+          },
+        ),
+      ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
     }, 60000);
   });
 });

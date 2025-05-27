@@ -145,4 +145,35 @@ describe('Wallet Controller', () => {
       expect(result).toEqual(plainToClass(AssetTransferResponseDto, { transaction_id: expectedTransactionId }));
     });
   });
+  describe('assetClawbackTx', () => {
+    it('should clawback an asset and return the transaction id', async () => {
+      const vaultToken = 'vault-token-jkl';
+      const assetClawbackRequest: AssetTransferRequestDto = {
+        assetId: 123n,
+        userId: 'user456',
+        amount: 10,
+      };
+      const expectedTransactionId = 'tx987654321';
+      mockWalletService.clawbackAsset.mockResolvedValueOnce(
+        expectedTransactionId,
+      );
+      const requestMock = { vault_token: vaultToken };
+      const result: AssetTransferResponseDto =
+        await walletController.assetClawbackTx(
+          requestMock,
+          assetClawbackRequest,
+        );
+      expect(mockWalletService.clawbackAsset).toHaveBeenCalledWith(
+        vaultToken,
+        assetClawbackRequest.assetId,
+        assetClawbackRequest.userId,
+        assetClawbackRequest.amount,
+      );
+      expect(result).toEqual(
+        plainToClass(AssetTransferResponseDto, {
+          transaction_id: expectedTransactionId,
+        }),
+      );
+    });
+  });
 });

@@ -344,8 +344,6 @@ describe('WalletService', () => {
       expect(result).toBe('final_tx_id');
     });
 
-
-
     it('transferAsset() -- user exists -- not opted in -- has enough algo', async () => {
       chainServiceMock.getAccountAsset.mockResolvedValueOnce(null);
       chainServiceMock.getAccountDetail.mockResolvedValueOnce({
@@ -387,6 +385,98 @@ describe('WalletService', () => {
       expect(walletService.signTxAsUser).toHaveBeenCalledTimes(1);
 
       expect(chainServiceMock.submitTransaction).toHaveBeenCalledWith([dummySignedUserTx, dummySignedManagerTx1]);
+
+      expect(result).toBe('final_tx_id');
+    });
+  });
+
+  describe('clawbackAsset()', () => {
+    const userPubKey = randomBytes(32);
+    const managerPubKey = randomBytes(32);
+
+    const assetId = 1n;
+    const userId = 'user123';
+    const amount = 10;
+    const vaultToken = 'vault_token';
+    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new AlgorandEncoder().encodeAddress(
+      managerPubKey,
+    );
+    const suggestedParams = {
+      minFee: 1000,
+      lastRound: 1n,
+    } as TruncatedSuggestedParamsResponse;
+    const dummySignedManagerTx1 = new Uint8Array([4]);
+    const dummySignedUserTx = new Uint8Array([5]);
+    const dummySignedManagerTx2 = new Uint8Array([6]);
+
+    beforeEach(async () => {
+      chainServiceMock.getSuggestedParams.mockResolvedValueOnce(
+        suggestedParams,
+      );
+      chainServiceMock.submitTransaction.mockResolvedValueOnce({
+        txid: 'final_tx_id',
+      } as any);
+      vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(userPubKey);
+      vaultServiceMock.getManagerPublicKey.mockResolvedValueOnce(managerPubKey);
+
+      // not mock tx creation, and set group id functions
+      chainServiceMock.craftAssetTransferTx.mockImplementation((...args) =>
+        chainService.craftAssetTransferTx(...args),
+      );
+      chainServiceMock.craftPaymentTx.mockImplementation((...args) =>
+        chainService.craftPaymentTx(...args),
+      );
+      chainServiceMock.setGroupID.mockImplementation((...args) =>
+        chainService.setGroupID(...args),
+      );
+
+      // signed tx mocks
+      walletService.signTxAsManager = jest
+        .fn()
+        .mockResolvedValueOnce(dummySignedManagerTx1)
+        .mockResolvedValueOnce(dummySignedManagerTx2);
+      walletService.signTxAsUser = jest
+        .fn()
+        .mockResolvedValueOnce(dummySignedUserTx);
+    });
+    afterEach(() => {
+      jest.clearAllMocks();
+    });
+    it('clawbackAsset() -- test clawback', async () => {
+      // Call
+      const result = await walletService.clawbackAsset(
+        vaultToken,
+        assetId,
+        userId,
+        amount,
+      );
+
+      // Verify the flow.
+      expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(
+        userId,
+        vaultToken,
+      );
+      expect(vaultServiceMock.getManagerPublicKey).toHaveBeenCalledWith(
+        vaultToken,
+      );
+      expect(chainServiceMock.getSuggestedParams).toHaveBeenCalled();
+
+      expect(chainServiceMock.craftAssetClawbackTx).toHaveBeenNthCalledWith(
+        1,
+        managerPublicAddress,
+        userPublicAddress,
+        managerPublicAddress,
+        assetId,
+        amount,
+        suggestedParams,
+      );
+
+      expect(walletService.signTxAsManager).toHaveBeenCalledTimes(1);
+
+      expect(chainServiceMock.submitTransaction).toHaveBeenCalledWith(
+        dummySignedManagerTx1,
+      );
 
       expect(result).toBe('final_tx_id');
     });
