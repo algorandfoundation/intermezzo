@@ -9,6 +9,7 @@ import {
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import { HttpService } from '@nestjs/axios';
 import { AxiosResponse } from 'axios';
+import { safeStringify } from '../util';
 
 @Injectable()
 export class ChainService {
@@ -131,9 +132,13 @@ export class ChainService {
     if (amount != 0) {
       builder.addAssetAmount(amount);
     }
+
     if (lease) {
       try {
         const leaseBuffer = Buffer.from(lease, 'base64');
+        if (leaseBuffer.length !== 32) {
+          throw new Error(`Expected lease length 32, found ${leaseBuffer.length}`)
+        }
         const leaseUint8Array = new Uint8Array(leaseBuffer);
         builder.addLease(leaseUint8Array);
       } catch (error) {
@@ -204,9 +209,12 @@ export class ChainService {
       return result.data;
     } catch (error) {
       if (error.response?.status) {
-        throw new HttpErrorByCode[error.response.status](`NodeException: ${error.response.text}`);
+        const message = error.response.text ?? (
+          typeof error.response.data === "string" ? error.response.data : safeStringify(error.response.data)
+        )
+        throw new HttpErrorByCode[error.response.status](`NodeException: ${message}`);
       } else {
-        throw new InternalServerErrorException('NodeException');
+        throw new InternalServerErrorException(`NodeException: ${error.message}`);
       }
     }
   }
