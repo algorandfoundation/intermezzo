@@ -123,6 +123,7 @@ describe('Wallet Controller', () => {
         userId: 'user456',
         amount: 10,
         lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+        note: "This is my note. I am not proud of it but it is what it is."
       };
       const expectedTransactionId = 'tx987654321';
 
@@ -141,6 +142,7 @@ describe('Wallet Controller', () => {
         assetTransferRequest.userId,
         assetTransferRequest.amount,
         assetTransferRequest.lease,
+        assetTransferRequest.note,
       );
       expect(result).toEqual(plainToClass(AssetTransferResponseDto, { transaction_id: expectedTransactionId }));
     });

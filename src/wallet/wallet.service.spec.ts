@@ -125,6 +125,7 @@ describe('WalletService', () => {
     const userId = 'user123';
     const amount = 10;
     const lease = randomBytes(32).toString('base64');
+    const note = "Note to self: notes are recorded for all";
     const vaultToken = 'vault_token';
     const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
     const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
@@ -191,6 +192,7 @@ describe('WalletService', () => {
         assetId,
         0,
         undefined,
+        undefined,
         suggestedParams,
       );
       expect(chainServiceMock.craftAssetTransferTx).toHaveBeenNthCalledWith(
@@ -199,6 +201,7 @@ describe('WalletService', () => {
         userPublicAddress,
         assetId,
         amount,
+        undefined,
         undefined,
         suggestedParams,
       );
@@ -246,6 +249,7 @@ describe('WalletService', () => {
         assetId,
         0,
         undefined,
+        undefined,
         suggestedParams,
       );
       expect(chainServiceMock.craftAssetTransferTx).toHaveBeenNthCalledWith(
@@ -254,6 +258,7 @@ describe('WalletService', () => {
         userPublicAddress,
         assetId,
         amount,
+        undefined,
         undefined,
         suggestedParams,
       );
@@ -296,6 +301,7 @@ describe('WalletService', () => {
         assetId,
         amount,
         undefined,
+        undefined,
         suggestedParams,
       );
 
@@ -307,7 +313,7 @@ describe('WalletService', () => {
       expect(result).toBe('final_tx_id');
     });
 
-    it('transferAsset() -- user exists -- opted in -- has enough algo -- with lease', async () => {
+    it('transferAsset() -- user exists -- opted in -- has enough algo -- with lease and note', async () => {
       chainServiceMock.getAccountAsset.mockResolvedValueOnce({} as TruncatedAccountAssetResponse); // opted in
       chainServiceMock.getAccountDetail.mockResolvedValueOnce({
         amount: 220000n,
@@ -315,7 +321,7 @@ describe('WalletService', () => {
       } as TruncatedAccountResponse);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount, lease);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount, lease, note);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -333,6 +339,7 @@ describe('WalletService', () => {
         assetId,
         amount,
         lease,
+        note,
         suggestedParams,
       );
 
@@ -369,6 +376,7 @@ describe('WalletService', () => {
         assetId,
         0,
         undefined,
+        undefined,
         suggestedParams,
       );
       expect(chainServiceMock.craftAssetTransferTx).toHaveBeenNthCalledWith(
@@ -377,6 +385,7 @@ describe('WalletService', () => {
         userPublicAddress,
         assetId,
         amount,
+        undefined,
         undefined,
         suggestedParams,
       );

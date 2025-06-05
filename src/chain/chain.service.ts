@@ -113,6 +113,7 @@ export class ChainService {
     asset_id: bigint,
     amount: number | bigint,
     lease?: string,
+    note?: string,
     suggested_params?: TruncatedSuggestedParamsResponse,
   ): Promise<Uint8Array> {
     suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
@@ -127,7 +128,9 @@ export class ChainService {
     builder.addFee(suggested_params.minFee);
     builder.addFirstValidRound(suggested_params.lastRound);
     builder.addLastValidRound(suggested_params.lastRound + 1000n);
-
+    if (note) {
+      builder.addNote(note);
+    }
     if (amount != 0) {
       builder.addAssetAmount(amount);
     }
