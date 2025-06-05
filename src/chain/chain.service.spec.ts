@@ -258,12 +258,14 @@ describe('ChainService', () => {
       const receiverAddress = dummyAddress3;
       const assetId = 1234n;
       const amount = 2n;
+      const note = "note: clawback note"
       const result = await chainService.craftAssetClawbackTx(
         clawbackAddress,
         senderAddress,
         receiverAddress,
         assetId,
         amount,
+        note,
       );
       expect(result).toBeInstanceOf(Uint8Array);
       expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
@@ -276,6 +278,7 @@ describe('ChainService', () => {
           181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172,
         ]),
         lv: 1001,
+        note: new Uint8Array(Buffer.from(note)),
         snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
         type: 'axfer',
         xaid: 1234,

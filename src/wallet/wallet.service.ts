@@ -235,6 +235,7 @@ export class WalletService {
     assetId: bigint,
     userId: string,
     amount: number,
+    note?: string,
   ) {
     const userPublicAddress: string = (
       await this.getUserInfo(userId, vault_token)
@@ -255,6 +256,7 @@ export class WalletService {
         managerPublicAddress,
         assetId,
         amount,
+        note,
         suggested_params,
       );
 

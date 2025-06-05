@@ -478,6 +478,7 @@ describe('WalletService', () => {
         managerPublicAddress,
         assetId,
         amount,
+        undefined,
         suggestedParams,
       );
 
