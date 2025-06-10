@@ -184,8 +184,11 @@ describe('ChainService', () => {
       // Use a valid dummy Algorand address for all address options.
       const dummyAddress1 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
+      const lease = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+      const leaseB64 = Buffer.from(lease).toString("base64")
+      const note = "note: note"
 
-      const result = await chainService.craftAssetTransferTx(dummyAddress1, dummyAddress2, 1234n, 2);
+      const result = await chainService.craftAssetTransferTx(dummyAddress1, dummyAddress2, 1234n, 2, leaseB64, note);
 
       expect(result).toBeInstanceOf(Uint8Array);
       expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
@@ -195,7 +198,9 @@ describe('ChainService', () => {
         fv: 1,
         gen: 'test-genesis-id',
         gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        lx: new Uint8Array(Buffer.from(lease)),
         lv: 1001,
+        note: new Uint8Array(Buffer.from(note)),
         snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
         type: 'axfer',
         xaid: 1234,
@@ -253,12 +258,14 @@ describe('ChainService', () => {
       const receiverAddress = dummyAddress3;
       const assetId = 1234n;
       const amount = 2n;
+      const note = "note: clawback note"
       const result = await chainService.craftAssetClawbackTx(
         clawbackAddress,
         senderAddress,
         receiverAddress,
         assetId,
         amount,
+        note,
       );
       expect(result).toBeInstanceOf(Uint8Array);
       expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
@@ -271,6 +278,7 @@ describe('ChainService', () => {
           181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172,
         ]),
         lv: 1001,
+        note: new Uint8Array(Buffer.from(note)),
         snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
         type: 'axfer',
         xaid: 1234,

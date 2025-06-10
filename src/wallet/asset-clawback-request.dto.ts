@@ -1,4 +1,4 @@
-import { IsString, IsNumber } from 'class-validator';
+import { IsString, IsNumber, IsOptional, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 
@@ -23,4 +23,14 @@ export class AssetClawbackRequestDto {
     description: 'The amount of the Asset to transfer',
   })
   amount: number;
+  
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  @ApiProperty({
+    example: 'Note to all: notes are public',
+    description:
+      'Optional public note to attach to transaction',
+  })
+  note?: string;
 }

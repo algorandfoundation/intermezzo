@@ -164,6 +164,7 @@ export class Wallet {
         assetTransferRequestDto.userId,
         assetTransferRequestDto.amount,
         assetTransferRequestDto.lease,
+        assetTransferRequestDto.note,
       ),
     } as AssetTransferResponseDto;
   }

@@ -1,4 +1,4 @@
-import { IsString, IsNumber, IsOptional } from 'class-validator';
+import { IsString, IsNumber, IsOptional, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 
@@ -32,4 +32,14 @@ export class AssetTransferRequestDto {
       'Optional 32-byte base64-encoded lease to prevent replay and conflicting transactions. Use a fixed value to ensure exclusivity. Generate with: Buffer.from(crypto.randomBytes(32)).toString("base64")',
   })
   lease?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  @ApiProperty({
+    example: 'Note to all: notes are public',
+    description:
+      'Optional public note to attach to transaction',
+  })
+  note?: string;
 }

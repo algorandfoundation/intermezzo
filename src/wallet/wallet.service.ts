@@ -135,7 +135,7 @@ export class WalletService {
    * @param vault_token The token used to authenticate with the vault.
    * @returns The transaction ID of the submitted transaction.
    */
-  async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string) {
+  async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string, note?: string) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
     const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
@@ -187,6 +187,7 @@ export class WalletService {
           assetId,
           0,
           lease,
+          undefined,
           suggested_params,
         ),
       );
@@ -198,6 +199,7 @@ export class WalletService {
         assetId,
         amount,
         lease,
+        note,
         suggested_params,
       ),
     );
@@ -233,6 +235,7 @@ export class WalletService {
     assetId: bigint,
     userId: string,
     amount: number,
+    note?: string,
   ) {
     const userPublicAddress: string = (
       await this.getUserInfo(userId, vault_token)
@@ -253,6 +256,7 @@ export class WalletService {
         managerPublicAddress,
         assetId,
         amount,
+        note,
         suggested_params,
       );
 
