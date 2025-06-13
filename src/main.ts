@@ -7,10 +7,80 @@ import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { ExceptionsFilter } from './exception.filter';
 import { LoggingInterceptor } from './logging.interceptor';
 
+// OIDC4vc
+import { Agent, ConnectionsModule, MediatorModule } from '@credo-ts/core';
+import { OpenId4VcIssuerModule, OpenId4VcVerifierModule } from '@credo-ts/openid4vc';
+import { agentDependencies } from '@credo-ts/node';
+import { Router } from 'express';
+
+// Aries Askar
+import { AskarModule } from '@credo-ts/askar';
+import { ariesAskar } from '@hyperledger/aries-askar-nodejs';
+import * as process from 'node:process';
+
+const name = 'pawn-agent';
+const port = typeof process.env.PORT === 'string' ? parseInt(process.env.PORT) : 3000;
+const endpoint =
+  typeof process.env.AGENT_ENDPOINT === 'string' ? process.env.AGENT_ENDPOINT : `http://localhost:${port}`;
+const issuerRoute = '/oid4vci';
+const verifierRoute = '/siop';
+
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'error', 'warn', 'debug', 'verbose'],
   });
+
+  const verifierRouter = Router();
+  const issuerRouter = Router();
+
+  // Load VC Routes
+  app.use(issuerRoute, issuerRouter);
+  app.use(verifierRoute, verifierRouter);
+
+  const agent = new Agent({
+    config: {
+      label: name,
+      walletConfig: {
+        id: name,
+        key: name,
+      },
+      endpoints: [endpoint],
+    },
+    dependencies: agentDependencies,
+    modules: {
+      askar: new AskarModule({ ariesAskar }),
+      mediator: new MediatorModule({
+        autoAcceptMediationRequests: true,
+      }),
+      connections: new ConnectionsModule({
+        autoAcceptConnections: true,
+      }),
+      openId4VcIssuer: new OpenId4VcIssuerModule({
+        baseUrl: `${endpoint}/${issuerRoute}`,
+        router: issuerRouter,
+        endpoints: {
+          credential: {
+            credentialRequestToCredentialMapper: async () => {
+              throw new Error('Not implemented');
+            },
+          },
+        },
+      }),
+      openId4VcVerifier: new OpenId4VcVerifierModule({
+        baseUrl: `${endpoint}/${verifierRoute}`,
+        router: verifierRouter,
+      }),
+    },
+  });
+
+  await agent.initialize();
+  const mediatorOutOfBandRecord = await agent.oob.createInvitation({ multiUseInvitation: true });
+
+  const mediatorInvitationUrl = mediatorOutOfBandRecord.outOfBandInvitation.toUrl({
+    domain: endpoint,
+  });
+
+  console.log(mediatorInvitationUrl);
 
   app.useGlobalFilters(new ExceptionsFilter());
   app.useGlobalInterceptors(new LoggingInterceptor());
@@ -44,6 +114,6 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, options, {});
   SwaggerModule.setup('docs', app, document);
 
-  await app.listen(3000);
+  await app.listen(port);
 }
 bootstrap();
