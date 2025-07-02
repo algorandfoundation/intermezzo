@@ -7,8 +7,6 @@ import { ConfigService } from '@nestjs/config';
 import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
-import { encode } from 'punycode';
-
 @Injectable()
 export class WalletService {
   constructor(
