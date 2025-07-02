@@ -21,12 +21,13 @@ export class WalletService {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
 
     // get algo balance
-    const algoBalance: bigint = await this.chainService.getAccountBalance(new AlgorandEncoder().encodeAddress(public_address));
+    const encodedAddress = new AlgorandEncoder().encodeAddress(public_address);
+    const algoBalance: bigint = await this.chainService.getAccountBalance(encodedAddress);
     Logger.debug(`User ${user_id} Algo Balance: ${algoBalance}`);
 
     return { 
       user_id, 
-      public_address: new AlgorandEncoder().encodeAddress(public_address),
+      public_address: encodedAddress,
       algoBalance: algoBalance.toString(),
     };
   }
