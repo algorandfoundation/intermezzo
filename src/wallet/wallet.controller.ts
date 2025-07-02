@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Logger, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { CreateAssetResponseDto } from './create-asset-response.dto';
