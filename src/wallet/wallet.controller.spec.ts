@@ -37,16 +37,17 @@ describe('Wallet Controller', () => {
       const userId = 'user123';
       const vaultToken = 'vault-token-abc';
       const expectedPublicAddress = 'PUBLIC_ADDRESS_XYZ';
+      const expectedAmount = '666';
 
       // Set up the WalletService mock for getUserPublicAddress.
-      mockWalletService.getUserInfo.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress });
-
+      mockWalletService.getUserInfo.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress, algoBalance: expectedAmount });
+[]
       const requestMock = { vault_token: vaultToken };
 
       const result = await walletController.userDetail(requestMock, userId);
 
       expect(mockWalletService.getUserInfo).toHaveBeenCalledWith(userId, vaultToken);
-      expect(result).toEqual({ user_id: userId, public_address: expectedPublicAddress });
+      expect(result).toEqual({ user_id: userId, public_address: expectedPublicAddress, algoBalance: expectedAmount });
     });
 
     it('\(OK) create user', async () => {
@@ -54,7 +55,7 @@ describe('Wallet Controller', () => {
       const vaultToken = 'vault-token-abc';
       const expectedPublicAddress = 'PUBLIC_ADDRESS_XYZ';
 
-      mockWalletService.userCreate.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress });
+      mockWalletService.userCreate.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress, algoBalance: '0' });
 
       const result: UserInfoResponseDto = await walletController.userCreate(
         { vault_token: vaultToken },
@@ -63,6 +64,8 @@ describe('Wallet Controller', () => {
 
       expect(result.user_id).toEqual(userId);
       expect(result.public_address).toEqual(expectedPublicAddress);
+      expect(result.algoBalance).toEqual('0'); // Initial balance is set to 0
+      expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, vaultToken);
     });
   });
 
@@ -71,6 +74,7 @@ describe('Wallet Controller', () => {
       const userId = 'user123';
       const vaultToken = 'vault-token-abc';
       const expectedPublicAddress = 'PUBLIC_ADDRESS_XYZ';
+      const algoBalanceExpected = '1000000'; // Example balance in microAlgos
       const expectedAssets: AssetHolding[] = [
         { amount: BigInt(100), 'asset-id': 123, 'is-frozen': false },
         { amount: BigInt(200), 'asset-id': 456, 'is-frozen': true },
@@ -81,7 +85,7 @@ describe('Wallet Controller', () => {
       };
       const requestMock = { vault_token: vaultToken };
       mockWalletService.getAssetHoldings.mockResolvedValueOnce(expectedAssets);
-      mockWalletService.getUserInfo.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress });
+      mockWalletService.getUserInfo.mockResolvedValueOnce({ user_id: userId, public_address: expectedPublicAddress, algoBalance: algoBalanceExpected });
       const result = await walletController.assetsBalances(requestMock, userId);
       expect(mockWalletService.getAssetHoldings).toHaveBeenCalledWith(userId, vaultToken);
       expect(mockWalletService.getUserInfo).toHaveBeenCalledWith(userId, vaultToken);

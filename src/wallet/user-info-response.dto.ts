@@ -15,4 +15,12 @@ export class UserInfoResponseDto {
     description: 'The public address of the User',
   })
   public_address: string;
+
+  @IsString()
+  @ApiProperty({
+    type: 'string',
+    example: '1000000',
+    description: 'The balance of Algorand held by the User in microAlgos',
+  })
+  algoBalance: string;
 }
