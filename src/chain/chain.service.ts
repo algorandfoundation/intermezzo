@@ -291,6 +291,15 @@ export class ChainService {
     return truncatedAccountResponse;
   }
 
+  // Get Algo Balance, fetch balance from AlgoD
+  async getAccountBalance(public_address: string): Promise<bigint> {
+    const response = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account balance response: ${JSON.stringify(response)}`);
+
+    return BigInt(response['amount']);
+  }
+
   /**
    * Get the asset holding for a specific account and asset ID.
    * 

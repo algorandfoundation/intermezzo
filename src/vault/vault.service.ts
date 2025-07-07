@@ -239,8 +239,8 @@ export class VaultService {
     let usersObjs: UserInfoDto[] = [];
     for (let i = 0; i < users.length; i++) {
       let userObj = {
+        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'), // TODO: rename public_address that is actually the public key in base64 format
         user_id: users[i],
-        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'),
       };
       usersObjs.push(userObj);
     }

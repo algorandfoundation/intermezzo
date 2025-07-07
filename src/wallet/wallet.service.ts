@@ -7,7 +7,6 @@ import { ConfigService } from '@nestjs/config';
 import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
-
 @Injectable()
 export class WalletService {
   constructor(
@@ -18,12 +17,37 @@ export class WalletService {
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
-    return { user_id, public_address: new AlgorandEncoder().encodeAddress(public_address) };
+
+    // get algo balance
+    const encodedAddress = new AlgorandEncoder().encodeAddress(public_address);
+    const algoBalance: bigint = await this.chainService.getAccountBalance(encodedAddress);
+    Logger.debug(`User ${user_id} Algo Balance: ${algoBalance}`);
+
+    return { 
+      user_id, 
+      public_address: encodedAddress,
+      algoBalance: algoBalance.toString(),
+    };
   }
 
   async getManagerInfo(vault_token: string): Promise<ManagerDetailDto> {
     const public_address = await this.vaultService.getManagerPublicKey(vault_token);
-    return plainToClass(ManagerDetailDto, { public_address: new AlgorandEncoder().encodeAddress(public_address) });
+    // asset holdings 
+    const account: AssetHolding[] = await this.chainService.getAccountAssetHoldings(new AlgorandEncoder().encodeAddress(public_address));
+
+    // Log debug with stringify
+    Logger.debug(`Manager account details: ${JSON.stringify(account)}`);
+
+
+    // Get Algo Balance
+    const algoBalance: bigint = await this.chainService.getAccountBalance(new AlgorandEncoder().encodeAddress(public_address));
+    Logger.debug(`Manager Algo Balance: ${algoBalance}`);
+
+    return plainToClass(ManagerDetailDto, { 
+      public_address: new AlgorandEncoder().encodeAddress(public_address),
+      assets: account,
+      algoBalance: algoBalance.toString(),
+    });
   }
 
   // Create new user and key
@@ -32,17 +56,17 @@ export class WalletService {
 
     const public_key: Buffer = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
     const public_address: string = new AlgorandEncoder().encodeAddress(public_key);
-    return { user_id, public_address };
+    return { user_id, public_address, algoBalance: '0' }; // Initial balance is set to 0
   }
 
   // Get all users
   async getKeys(vault_token: string): Promise<UserInfoResponseDto[]> {
 
-
     const keys: UserInfoResponseDto[] = (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
 
     // convert all public keys to algorand address
     keys.map((key) => {
+      
       key.public_address = new AlgorandEncoder().encodeAddress(Buffer.from(key.public_address, 'base64'));
     });
 
