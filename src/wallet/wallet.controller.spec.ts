@@ -6,6 +6,7 @@ import { UserInfoResponseDto } from './user-info-response.dto';
 import createMockInstance from 'jest-create-mock-instance';
 import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
+import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { plainToClass } from 'class-transformer';
 
 describe('Wallet Controller', () => {
@@ -155,7 +156,7 @@ describe('Wallet Controller', () => {
   describe('assetClawbackTx', () => {
     it('should clawback an asset and return the transaction id', async () => {
       const vaultToken = 'vault-token-jkl';
-      const assetClawbackRequest: AssetTransferRequestDto = {
+      const assetClawbackRequest: AssetClawbackRequestDto = {
         assetId: 123n,
         userId: 'user456',
         amount: 10,

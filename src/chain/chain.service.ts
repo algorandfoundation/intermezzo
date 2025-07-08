@@ -22,6 +22,10 @@ export class ChainService {
     return new AlgorandTransactionCrafter(this.configService.get('GENESIS_ID'), this.configService.get('GENESIS_HASH'));
   }
 
+  private parseLease(lease: string): Uint8Array {
+    return new Uint8Array(Buffer.from(lease, 'base64'))
+  }
+
   addSignatureToTxn(encodedTransaction: Uint8Array, signature: Uint8Array): Uint8Array {
     let crafter = this.getCrafter();
     return crafter.addSignature(encodedTransaction, signature);
@@ -139,7 +143,7 @@ export class ChainService {
 
     if (lease) {
       try {
-        builder.addLease(new Uint8Array(Buffer.from(lease, 'base64')));
+        builder.addLease(this.parseLease(lease));
       } catch (error) {
         throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
       }
@@ -182,7 +186,7 @@ export class ChainService {
 
     if (lease) {
       try {
-        builder.addLease(new Uint8Array(Buffer.from(lease, 'base64')));
+        builder.addLease(this.parseLease(lease));
       } catch (error) {
         throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
       }

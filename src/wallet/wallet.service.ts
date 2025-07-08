@@ -159,7 +159,6 @@ export class WalletService {
    * @param lease An optional 32 byte lease encoded as base64.
    * @param note An optional transaction note.
    * @param vault_token The token used to authenticate with the vault.
-   * 
    * @returns The transaction ID of the submitted transaction.
    */
   async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string, note?: string) {
