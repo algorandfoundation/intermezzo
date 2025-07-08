@@ -258,13 +258,16 @@ describe('ChainService', () => {
       const receiverAddress = dummyAddress3;
       const assetId = 1234n;
       const amount = 2n;
-      const note = "note: clawback note"
+      const note = "note: clawback note";
+      const lease = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+      const leaseB64 = Buffer.from(lease).toString("base64");
       const result = await chainService.craftAssetClawbackTx(
         clawbackAddress,
         senderAddress,
         receiverAddress,
         assetId,
         amount,
+        leaseB64,
         note,
       );
       expect(result).toBeInstanceOf(Uint8Array);
@@ -277,6 +280,7 @@ describe('ChainService', () => {
         gh: new Uint8Array([
           181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172,
         ]),
+        lx: new Uint8Array(Buffer.from(lease)),
         lv: 1001,
         note: new Uint8Array(Buffer.from(note)),
         snd: new AlgorandEncoder().decodeAddress(clawbackAddress),

@@ -474,6 +474,8 @@ describe('WalletService', () => {
     const assetId = 1n;
     const userId = 'user123';
     const amount = 10;
+    const lease = randomBytes(32).toString('base64');
+    const note = "Note to self: notes are recorded for all";
     const vaultToken = 'vault_token';
     const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
     const managerPublicAddress = new AlgorandEncoder().encodeAddress(
@@ -529,6 +531,8 @@ describe('WalletService', () => {
         assetId,
         userId,
         amount,
+        lease,
+        note,
       );
 
       // Verify the flow.
@@ -548,7 +552,8 @@ describe('WalletService', () => {
         managerPublicAddress,
         assetId,
         amount,
-        undefined,
+        lease,
+        note,
         suggestedParams,
       );
 
