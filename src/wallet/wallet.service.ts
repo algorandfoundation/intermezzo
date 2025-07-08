@@ -156,7 +156,10 @@ export class WalletService {
    * @param assetId The ID of the asset to be transferred.
    * @param userId The ID of the user receiving the asset.
    * @param amount The amount of the asset to be transferred.
+   * @param lease An optional 32 byte lease encoded as base64.
+   * @param note An optional transaction note.
    * @param vault_token The token used to authenticate with the vault.
+   * 
    * @returns The transaction ID of the submitted transaction.
    */
   async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string, note?: string) {
@@ -254,11 +257,27 @@ export class WalletService {
     return (await this.chainService.submitTransaction(signedTxs)).txid;
   }
 
+    /**
+   * Claws back an asset from a user to the manager account.
+   *
+   * The function crafts the necessary transaction, signs it, and submits it to the blockchain.
+   *
+   * @param assetId The ID of the asset to be clawed back.
+   * @param userId The ID of the user to claw back from.
+   * @param amount The amount of the asset to be clawed back.
+   * @param lease An optional 32 byte lease encoded as base64.
+   * @param note An optional transaction note.
+   * @param vault_token The token used to authenticate with the vault.
+   * 
+   * @returns The transaction ID of the submitted transaction.
+   */
+
   async clawbackAsset(
     vault_token: string,
     assetId: bigint,
     userId: string,
     amount: number,
+    lease?: string,
     note?: string,
   ) {
     const userPublicAddress: string = (
@@ -280,6 +299,7 @@ export class WalletService {
         managerPublicAddress,
         assetId,
         amount,
+        lease,
         note,
         suggested_params,
       );

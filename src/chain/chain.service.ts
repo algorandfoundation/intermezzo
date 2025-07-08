@@ -132,22 +132,16 @@ export class ChainService {
     if (note) {
       builder.addNote(note);
     }
+    
     if (amount != 0) {
       builder.addAssetAmount(amount);
     }
 
     if (lease) {
       try {
-        const leaseBuffer = Buffer.from(lease, 'base64');
-        if (leaseBuffer.length !== 32) {
-          throw new Error(`Expected lease length 32, found ${leaseBuffer.length}`)
-        }
-        const leaseUint8Array = new Uint8Array(leaseBuffer);
-        builder.addLease(leaseUint8Array);
+        builder.addLease(new Uint8Array(Buffer.from(lease, 'base64')));
       } catch (error) {
-        throw new HttpErrorByCode[400](
-          `Invalid lease format: ${error.message}`,
-        );
+        throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
       }
     }
 
@@ -160,12 +154,11 @@ export class ChainService {
     to: string,
     asset_id: bigint,
     amount: number | bigint,
+    lease?: string,
     note?: string,
     suggested_params?: TruncatedSuggestedParamsResponse,
   ): Promise<Uint8Array> {
-    suggested_params = suggested_params
-      ? suggested_params
-      : await this.getSuggestedParams();
+    suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
 
     const builder = new AssetTransferTxBuilder(
       this.configService.get('GENESIS_ID'),
@@ -185,6 +178,14 @@ export class ChainService {
 
     if (amount != 0) {
       builder.addAssetAmount(amount);
+    }
+
+    if (lease) {
+      try {
+        builder.addLease(new Uint8Array(Buffer.from(lease, 'base64')));
+      } catch (error) {
+        throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
+      }
     }
 
     return builder.get().encode();
@@ -217,9 +218,9 @@ export class ChainService {
       return result.data;
     } catch (error) {
       if (error.response?.status) {
-        const message = error.response.text ?? (
-          typeof error.response.data === "string" ? error.response.data : safeStringify(error.response.data)
-        )
+        const message =
+          error.response.text ??
+          (typeof error.response.data === 'string' ? error.response.data : safeStringify(error.response.data));
         throw new HttpErrorByCode[error.response.status](`NodeException: ${message}`);
       } else {
         throw new InternalServerErrorException(`NodeException: ${error.message}`);
@@ -274,7 +275,7 @@ export class ChainService {
 
   /**
    * Get the account detail for a specific public address.
-   * 
+   *
    * @param public_address - The public address of the account.
    * @returns - The account detail including amount, min balance, and asset holdings.
    */
@@ -286,7 +287,9 @@ export class ChainService {
     const truncatedAccountResponse: TruncatedAccountResponse = {
       amount: BigInt(response['amount']),
       minBalance: BigInt(response['min-balance']),
-      assets: response['assets'].map((asset: any) => ({ assetId: asset['asset-id'], balance: asset['amount'] }) as TruncatedAssetHolding),
+      assets: response['assets'].map(
+        (asset: any) => ({ assetId: asset['asset-id'], balance: asset['amount'] }) as TruncatedAssetHolding,
+      ),
     };
     return truncatedAccountResponse;
   }
@@ -302,7 +305,7 @@ export class ChainService {
 
   /**
    * Get the asset holding for a specific account and asset ID.
-   * 
+   *
    * @param public_address - The public address of the account.
    * @param asset_id - The ID of the asset.
    * @returns - The asset holding for the account and asset ID, or null if not found.
@@ -312,12 +315,12 @@ export class ChainService {
 
     Logger.debug(`Account asset holdings response: ${JSON.stringify(response)}`);
 
-    return response.assets
+    return response.assets;
   }
 
   /**
    * Get the asset holding for a specific account and asset ID.
-   * 
+   *
    * @param public_address - The public address of the account.
    * @param asset_id - The ID of the asset.
    * @returns - The asset holding for the account and asset ID, or null if not found.
@@ -342,7 +345,7 @@ export class ChainService {
 
   /**
    * Get the last round number from the Algorand node.
-   * 
+   *
    * @returns - last round number
    */
   async getLastRound(): Promise<bigint> {
@@ -352,7 +355,7 @@ export class ChainService {
 
   /**
    * Submits a transaction or transactions to the Algorand network.
-   * 
+   *
    * @param txnOrtxns - The transaction or transactions to be submitted.
    * @returns - The transaction ID of the submitted transaction.
    */

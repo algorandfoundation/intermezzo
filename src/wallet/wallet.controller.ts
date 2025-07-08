@@ -196,6 +196,8 @@ export class Wallet {
         assetClawbackRequestDto.assetId,
         assetClawbackRequestDto.userId,
         assetClawbackRequestDto.amount,
+        assetClawbackRequestDto.lease,
+        assetClawbackRequestDto.note,
       ),
     } as AssetTransferResponseDto;
   }

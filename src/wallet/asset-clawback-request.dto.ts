@@ -23,7 +23,16 @@ export class AssetClawbackRequestDto {
     description: 'The amount of the Asset to transfer',
   })
   amount: number;
-  
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    example: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+    description:
+      'Optional 32-byte base64-encoded lease to prevent replay and conflicting transactions. Use a fixed value to ensure exclusivity. Generate with: Buffer.from(crypto.randomBytes(32)).toString("base64")',
+  })
+  lease?: string;
+
   @IsString()
   @IsOptional()
   @MaxLength(1000)
