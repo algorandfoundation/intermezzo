@@ -1,6 +1,6 @@
-# Pawn
+# Intermezzo
 
-Pawn uses a traditional KMS (Key Management Service) to manage the keys for Algorand transaction signing and integration. In this specific case, we are using Hashicorp Vault as the KMS.
+Intermezzo uses a traditional KMS (Key Management Service) to manage the keys for Algorand transaction signing and integration. In this specific case, we are using Hashicorp Vault as the KMS.
 
 ## For whom is this?
 
