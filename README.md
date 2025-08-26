@@ -58,6 +58,8 @@ docker compose up -d vault pawn;
 
 Now you can open to see endpoint documentation at http://localhost:3000/docs/
 
+> **Note**: The raw OpenAPI JSON spec is dynamically generated and available at http://localhost:3000/docs-json.
+
 But before you can use the API, you need to unseal vault and / or set up the vault keys, if they are not already set up
 
 > **Note**: If you make any changes to the `.env` file, you must redeploy the application for the changes to take effect. You can do this by running:
