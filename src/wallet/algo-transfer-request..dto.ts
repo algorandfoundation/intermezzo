@@ -5,7 +5,7 @@ export class AlgoTransferRequestDto {
   @IsString()
   @ApiProperty({
     example: '1234',
-    description: 'Address of the User to transfer the Asset to',
+    description: 'Address to transfer Algos to',
   })
   toAddress: string;
 
