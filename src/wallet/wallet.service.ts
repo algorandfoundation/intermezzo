@@ -148,7 +148,6 @@ export class WalletService {
    * 
    * Transfers Algos from one user to another.
    * 
-   * Transfers an asset from the manager to a user.
    * @param vault_token The token used to authenticate with the vault.
    * @param fromUserId The ID of the user sending the asset.
    * @param toAddress The address of the user receiving the asset.
