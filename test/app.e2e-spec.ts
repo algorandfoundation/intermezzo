@@ -310,6 +310,44 @@ describe('App E2E', () => {
     }, 60000);
   });
 
+  describe('Transfer Algo', () => {
+    it('(OK) transfer algo to address from manager', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      // transfer from manager to new user
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+      // check algoBalance
+      const userDetailResponse = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(userDetailResponse.status).toBe(200);
+      expect(userDetailResponse.data.algoBalance).toBe('1000000');
+    }, 60000);
+  })
+
   describe('Transfer Asset', () => {
     /**
      * Represents the data structure for an asset transfer.

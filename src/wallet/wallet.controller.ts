@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Param, Post, Request } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { CreateAssetResponseDto } from './create-asset-response.dto';
@@ -18,6 +18,8 @@ import {
 } from '@nestjs/swagger';
 import { AccountAssetsDto } from './account-assets.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
+import { AlgoTransferRequestDto } from './algo-transfer-request..dto';
+import { AlgoTransferResponseDto } from './algo-transfer-response.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -167,6 +169,39 @@ export class Wallet {
         assetTransferRequestDto.note,
       ),
     } as AssetTransferResponseDto;
+  }
+
+  // Algo Transfer
+  @Post('wallet/transactions/transfer-algo/')
+  @ApiOperation({
+    summary: 'Transfer Algo',
+    description:
+      'Send **Algorand** `Algos` to another account. The sender can be either the **Manager** or a **User**.',
+  })
+  @ApiCreatedResponse({
+    description: 'The Algos have been successfully transferred.',
+    type: AlgoTransferResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async algoTransferTx(
+    @Request() request: any,
+    @Body() algoTransferRequestDto: AlgoTransferRequestDto,
+  ): Promise<AlgoTransferResponseDto> {
+    return {
+      transaction_id: await this.walletService.transferAlgoToAddress(
+        request.vault_token,
+        algoTransferRequestDto.fromUserId,
+        algoTransferRequestDto.toAddress,
+        algoTransferRequestDto.amount,
+        algoTransferRequestDto.lease,
+        algoTransferRequestDto.note,
+      ),
+    } as AlgoTransferResponseDto;
   }
 
   // Asset clawback by manager
