@@ -8,7 +8,7 @@ import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { plainToClass } from 'class-transformer';
-import { AlgoTransferRequestDto } from './algo-transfer-request..dto';
+import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 
 describe('Wallet Controller', () => {
   let walletController: Wallet;
