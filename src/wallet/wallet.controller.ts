@@ -18,7 +18,7 @@ import {
 } from '@nestjs/swagger';
 import { AccountAssetsDto } from './account-assets.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
-import { AlgoTransferRequestDto } from './algo-transfer-request..dto';
+import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AlgoTransferResponseDto } from './algo-transfer-response.dto';
 
 @ApiBearerAuth()
