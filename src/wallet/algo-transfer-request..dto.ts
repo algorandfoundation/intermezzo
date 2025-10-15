@@ -19,7 +19,7 @@ export class AlgoTransferRequestDto {
   @IsString()
   @ApiProperty({
     example: '1234',
-    description: 'The id of the User that is transferring the Asset',
+    description: 'The id of the User that is transferring Algos',
   })
   fromUserId: string;
 
