@@ -72,7 +72,6 @@ export class WalletService {
 
     return keys;
   }
-
   /**
    * 
    * Fetches the asset balance for a user by their user ID and vault token.
@@ -146,36 +145,89 @@ export class WalletService {
   }
 
   /**
-   * Transfers an asset from the manager to a user.
-   *
-   * The function first checks if the user has opted in for the asset. If not, an opt-in transaction is created.
-   * It then checks if the user has enough Algo balance to cover the minimum balance after the transactions.
-   * If not, a payment transaction is created to cover the difference.
-   * The function then crafts the necessary transactions, groups them, signs them, and submits them to the blockchain.
-   *
-   * @param assetId The ID of the asset to be transferred.
-   * @param userId The ID of the user receiving the asset.
+   * 
+   * Transfers Algos from one user to another.
+   * 
+   * @param vault_token The token used to authenticate with the vault.
+   * @param fromUserId The ID of the user sending the asset.
+   * @param toAddress The address of the user receiving the asset.
    * @param amount The amount of the asset to be transferred.
    * @param lease An optional 32 byte lease encoded as base64.
    * @param note An optional transaction note.
-   * @param vault_token The token used to authenticate with the vault.
-   * @returns The transaction ID of the submitted transaction.
    */
-  async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string, note?: string) {
-    const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+  async transferAlgoToAddress(vault_token: string, fromUserId: string, toAddress: string, amount: number, lease?: string, note?: string) : Promise<string> {
+    let signedTx: Uint8Array
+    let fromAddress: string;
 
-    let suggested_params = await this.chainService.getSuggestedParams();
+    try {
+      if (fromUserId === 'manager') {
+        const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+        fromAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+      } else {
+        fromAddress = (await this.getUserInfo(fromUserId, vault_token)).public_address;
+      } 
+    } catch (error) {
+      throw new Error(`Failed to get from address for user ${fromUserId}: ${error.message}`);
+    }
 
-    // check if user opted in for the asset
+    Logger.debug(`Transferring ${amount} Algos from ${fromUserId} (${fromAddress}) to ${toAddress}`);
+    // craft algorand pay transaction
+    const payTx: Uint8Array = await this.chainService.craftPaymentTx(
+      fromAddress,
+      toAddress,
+      amount,
+      await this.chainService.getSuggestedParams(),
+    );
 
-    let willOptInTx: boolean = false;
+    try {
+
+      if (fromUserId === 'manager') {
+        Logger.debug(`Signing transaction as manager: ${payTx.toString()}`);
+        // sign as manager
+        signedTx = await this.signTxAsManager(payTx, vault_token);
+      } else {
+        // sign as user
+        signedTx = await this.signTxAsUser(fromUserId, payTx, vault_token);
+      }
+
+      // submit transaction
+      return (await this.chainService.submitTransaction(signedTx)).txid
+    } catch (error) {
+      throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Transfers an asset from the manager to a user.
+  *
+  * The function first checks if the user has opted in for the asset. If not, an opt-in transaction is created.
+  * It then checks if the user has enough Algo balance to cover the minimum balance after the transactions.
+  * If not, a payment transaction is created to cover the difference.
+  * The function then crafts the necessary transactions, groups them, signs them, and submits them to the blockchain.
+  *
+  * @param assetId The ID of the asset to be transferred.
+  * @param userId The ID of the user receiving the asset.
+  * @param amount The amount of the asset to be transferred.
+  * @param lease An optional 32 byte lease encoded as base64.
+  * @param note An optional transaction note.
+  * @param vault_token The token used to authenticate with the vault.
+  * @returns The transaction ID of the submitted transaction.
+  */
+ async transferAsset(vault_token: string, assetId: bigint, userId: string, amount: number, lease?: string, note?: string) {
+   const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
+   const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+   const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+   
+   let suggested_params = await this.chainService.getSuggestedParams();
+   
+   // check if user opted in for the asset
+   
+   let willOptInTx: boolean = false;
     let account_asset = await this.chainService.getAccountAsset(userPublicAddress, assetId);
     if (account_asset == null) {
       willOptInTx = true;
     }
-
+    
     // check if user has enough algo balance to cover min balance after transactions
 
     let willPaymentTx: boolean = false;

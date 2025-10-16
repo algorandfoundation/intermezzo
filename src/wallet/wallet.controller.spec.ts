@@ -8,6 +8,7 @@ import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { plainToClass } from 'class-transformer';
+import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 
 describe('Wallet Controller', () => {
   let walletController: Wallet;
@@ -69,6 +70,38 @@ describe('Wallet Controller', () => {
       expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, vaultToken);
     });
   });
+
+  describe('transferAlgoToAddress', () => {
+    it('should transfer Algos to a specified address and return the transaction id', async () => {
+      const vaultToken = 'vault-token-xyz';
+      const userId = 'user123'; // from user
+      const toAddress = 'TO_ADDRESS_ABC';
+      const amount = 500000; // in microAlgos
+      const expectedTransactionId = 'tx123456789';
+
+      // Set up the WalletService mock for transferAlgoToAddress.
+      mockWalletService.transferAlgoToAddress.mockResolvedValueOnce(expectedTransactionId);
+
+      const requestMock = { vault_token: vaultToken };
+      const bodyRequest: AlgoTransferRequestDto = {
+        toAddress,
+        amount,
+        fromUserId: userId,
+      }
+
+      const result = await walletController.algoTransferTx(requestMock, bodyRequest);
+
+      expect(mockWalletService.transferAlgoToAddress).toHaveBeenCalledWith(
+        vaultToken,
+        userId,
+        toAddress,
+        amount,
+        undefined,
+        undefined
+      );
+      expect(result).toEqual({ transaction_id: expectedTransactionId });
+    })
+  })
 
   describe('assetsBalances', () => {
     it('should return asset balances for a user', async () => {
