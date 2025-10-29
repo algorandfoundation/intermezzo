@@ -292,3 +292,20 @@ Since there are vault volumes and side effects of the `vault:development:init` p
 sudo rm -rf volumes node_modules dist data;
 sudo rm vault-seal-keys.json package-lock.json manager-role-and-secrets.json user-role-and-secrets.json;
 ```
+# SECURITY
+
+It's important to understand that Intermezzo does **NOT** manage security for you. The integrator is responsible for securing the vault's instance, managing access policies or handling of any admin tokens.
+
+Hashicorp Vault has a lot of documentation on how to secure and configure your access policies. You can refer to the [Hashicorp Vault Security documentation](https://www.vaultproject.io/docs/security) or [Hashicorp Vault Access Policies documentation](https://www.vaultproject.io/docs/concepts/policies) for more information.
+
+## User and Manager keys path
+
+Intermezzo uses two different paths for storing keys in vault. One for users and one for managers. These values are defined in the `.env` file as `VAULT_TRANSIT_USERS_PATH` and `VAULT_TRANSIT_MANAGERS_PATH`. Please configure these paths according to your security policies. 
+
+When creating and access keys intermezzo will append to those paths `/keys/{keyName}`. 
+
+## Vault Configuration and Root token
+
+Although intermezzo provides a development script to initialize vault, unseal and configure access policies, it's important to understand that this is only for development purposes. You can read the file `vault/development-init.ts` to see what actions are being performed and take that as reference for your own vault configuration.
+
+In production, you should follow Hashicorp Vault's best practices for securing and configuring your vault instance.
