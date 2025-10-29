@@ -302,7 +302,7 @@ Hashicorp Vault has a lot of documentation on how to secure and configure your a
 
 Intermezzo uses two different paths for storing keys in vault. One for users and one for managers. These values are defined in the `.env` file as `VAULT_TRANSIT_USERS_PATH` and `VAULT_TRANSIT_MANAGERS_PATH`. Please configure these paths according to your security policies. 
 
-When creating and access keys intermezzo will append to those paths `/keys/{keyName}`. 
+When creating and access keys Intermezzo will append to those paths `/keys/{keyName}`. 
 
 ## Vault Configuration and Root token
 
