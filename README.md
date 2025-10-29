@@ -306,6 +306,6 @@ When creating and access keys Intermezzo will append to those paths `/keys/{keyN
 
 ## Vault Configuration and Root token
 
-Although intermezzo provides a development script to initialize vault, unseal and configure access policies, it's important to understand that this is only for development purposes. You can read the file `vault/development-init.ts` to see what actions are being performed and take that as reference for your own vault configuration.
+Although Intermezzo provides a development script to initialize vault, unseal and configure access policies, it's important to understand that this is only for development purposes. You can read the file `vault/development-init.ts` to see what actions are being performed and take that as reference for your own vault configuration.
 
 In production, you should follow Hashicorp Vault's best practices for securing and configuring your vault instance.
