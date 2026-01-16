@@ -1,7 +1,6 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
-  AlgorandEncoder,
   AlgorandTransactionCrafter,
   AssetParamsBuilder,
   AssetTransferTxBuilder,
@@ -25,6 +24,7 @@ import {
 import { AppCallRequestDto } from '../wallet/app-call-request.dto';
 import { base64ToBytes, encodeString, encodeUint64 } from './encoding';
 import { sha512_256 } from 'js-sha512';
+import { decodeTransaction, encodeTransaction, groupTransactions } from '@algorandfoundation/algokit-utils/transact';
 
 @Injectable()
 export class ChainService {
@@ -55,16 +55,9 @@ export class ChainService {
    * @returns The list of transactions with the group ID set.
    */
   setGroupID(txns: Uint8Array[]): Uint8Array[] {
-    const groupId = new AlgorandEncoder().computeGroupId(txns);
-
-    const grouped: Uint8Array[] = [];
-    for (const txn of txns) {
-      const decodedTx = new AlgorandEncoder().decodeTransaction(txn);
-      decodedTx.grp = groupId;
-      grouped.push(new AlgorandEncoder().encodeTransaction(decodedTx));
-    }
-
-    return grouped;
+    const decodedTxns = txns.map(decodeTransaction);
+    const groupedTxns = groupTransactions(decodedTxns);
+    return groupedTxns.map(encodeTransaction);
   }
 
   async craftAssetCreateTx(
@@ -345,10 +338,8 @@ export class ChainService {
         return encodeString(value);
       }
       case 'address': {
-        // Expecting a base32 Algorand address string; need its 32-byte public key bytes
-        const encoder = new AlgorandEncoder();
         // decodeAddress returns the raw public key bytes for an address string
-        return encoder.decodeAddress(value);
+        return new Address(value).toString();
       }
       default:
         throw new Error(`Unsupported ABI argument type: ${type}`);
