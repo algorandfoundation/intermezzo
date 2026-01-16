@@ -8,7 +8,7 @@ import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
+import { Address } from '@algorandfoundation/algokit-utils';
 import {
   TruncatedAccountAssetResponse,
   TruncatedAccountResponse,
@@ -60,9 +60,9 @@ describe('WalletService', () => {
     const result = await walletService.userCreate(userId, 'vault_token');
 
     // expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, 'vault_token');
-    // expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(new AlgorandEncoder().encodeAddress(pubKey));
+    // expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(new Address(pubKey).toString());
     expect(result).toStrictEqual({
-      public_address: new AlgorandEncoder().encodeAddress(pubKey),
+      public_address: new Address(pubKey).toString(),
       user_id: userId,
       algoBalance: '0',
     });
@@ -85,7 +85,7 @@ describe('WalletService', () => {
     const result = await walletService.getKeys('vault_token');
     expect(result).toStrictEqual([
       {
-        public_address: new AlgorandEncoder().encodeAddress(pubKey),
+        public_address: new Address(pubKey).toString(),
         user_id: userId,
       },
     ]);
@@ -105,7 +105,7 @@ describe('WalletService', () => {
       'vault_token',
     );
     expect(result).toStrictEqual({
-      public_address: new AlgorandEncoder().encodeAddress(pubKey),
+      public_address: new Address(pubKey).toString(),
       user_id: '123581253191824129481240513501928401928',
       algoBalance: algoBalanceMock.toString(),
     });
@@ -126,7 +126,7 @@ describe('WalletService', () => {
 
     expect(result).toStrictEqual(
       plainToClass(ManagerDetailDto, {
-        public_address: new AlgorandEncoder().encodeAddress(pubKey),
+        public_address: new Address(pubKey).toString(),
         algoBalance: algoBalanceMock.toString(),
         assets: [],
       }),
@@ -136,7 +136,7 @@ describe('WalletService', () => {
   it('\(OK) createAsset()', async () => {
     const pubKey = randomBytes(32);
 
-    const address = new AlgorandEncoder().encodeAddress(pubKey);
+    const address = new Address(pubKey).toString();
 
     const createAssetDto: CreateAssetDto = {
       total: 5,
@@ -183,8 +183,8 @@ describe('WalletService', () => {
     const lease = randomBytes(32).toString('base64');
     const note = 'Note to self: notes are recorded for all';
     const vaultToken = 'vault_token';
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
+    const userPublicAddress = new Address(userPubKey).toString();
+    const managerPublicAddress = new Address(managerPubKey).toString();
     const suggestedParams = {
       minFee: 1000,
       lastRound: 1n,
@@ -487,8 +487,8 @@ describe('WalletService', () => {
     const lease = randomBytes(32).toString('base64');
     const note = 'Note to self: notes are recorded for all';
     const vaultToken = 'vault_token';
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
+    const userPublicAddress = new Address(userPubKey).toString();
+    const managerPublicAddress = new Address(managerPubKey).toString();
     const suggestedParams = {
       minFee: 1000,
       lastRound: 1n,

@@ -6,7 +6,7 @@ import { ChainService } from '../chain/chain.service';
 import { ConfigService } from '@nestjs/config';
 import createMockInstance from 'jest-create-mock-instance';
 import { randomBytes } from 'crypto';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
+import { Address } from '@algorandfoundation/algokit-utils';
 import { TruncatedPostTransactionsResponse } from 'src/chain/algo-node-responses';
 
 describe('WalletCLI', () => {
@@ -84,7 +84,7 @@ describe('WalletCLI', () => {
       vaultServiceMock.getKey.mockResolvedValueOnce(pubKey);
 
       const result = await walletCLI.getAddress(keyPath, keyName);
-      expect(result).toEqual(new AlgorandEncoder().encodeAddress(pubKey));
+      expect(result).toEqual(new Address(pubKey).toString());
       expect(vaultServiceMock.getKey).toHaveBeenCalledWith(keyName, keyPath, undefined);
     });
   });

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import axios from 'axios';
 import assert from 'assert';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 // Constants
 const VAULT_BASE_URL = 'http://vault:8200';
@@ -387,7 +387,7 @@ async function getOrCreateManager(token: string) {
   );
   assert(response.status == 200);
 
-  const publicKey = new AlgorandEncoder().encodeAddress(Buffer.from(response.data.data.keys['1'].public_key, 'base64'));
+  const publicKey = new Address(Buffer.from(response.data.data.keys['1'].public_key, 'base64')).toString();
   console.log('Manager public key: \n', publicKey);
 }
 

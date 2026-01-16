@@ -106,7 +106,6 @@ export class VaultService {
     }
 
     const publicKeyBase64: string = result.data.data.keys['1'].public_key;
-    // return new AlgorandEncoder().encodeAddress(Buffer.from(publicKeyBase64, 'base64'));
     return Buffer.from(publicKeyBase64, 'base64');
   }
 
