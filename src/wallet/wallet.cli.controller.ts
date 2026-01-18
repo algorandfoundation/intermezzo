@@ -1,8 +1,5 @@
 import { Controller, Logger } from '@nestjs/common';
 
-import { ConfigService } from '@nestjs/config';
-import { Crafter } from '@algorandfoundation/algo-models/dist/types/crafter.role';
-import { AlgorandTransactionCrafter } from '@algorandfoundation/algo-models';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
 import { AuthService } from '../auth/auth.service';
@@ -17,7 +14,6 @@ export class WalletCLI {
     private readonly authService: AuthService,
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
-    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -104,13 +100,5 @@ export class WalletCLI {
    */
   async getLastRound(): Promise<bigint> {
     return this.chainService.getLastRound();
-  }
-
-  /**
-   *
-   * @returns
-   */
-  craft(): Crafter {
-    return new AlgorandTransactionCrafter(this.configService.get('GENESIS_ID'), this.configService.get('GENESIS_HASH'));
   }
 }

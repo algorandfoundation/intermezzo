@@ -6,6 +6,14 @@ import { HttpService } from '@nestjs/axios';
 import { Axios } from 'axios';
 import { TruncatedAccountResponse } from 'src/chain/algo-node-responses';
 import * as algosdk from 'algosdk';
+import {
+  encodeTransaction,
+  PaymentTransactionFields,
+  Transaction,
+  TransactionParams,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 describe('ChainService', () => {
   let chainService: ChainService;
@@ -18,7 +26,7 @@ describe('ChainService', () => {
     configServiceMock.get.mockImplementation((key: string) => {
       const config = {
         GENESIS_ID: 'test-genesis-id',
-        GENESIS_HASH: 'test-genesis-hash'.padEnd(43, '0'),
+        GENESIS_HASH: 'SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
         NODE_HTTP_SCHEME: 'http',
         NODE_HOST: 'localhost',
         NODE_PORT: '4001',
@@ -37,7 +45,23 @@ describe('ChainService', () => {
 
   describe('addSignatureToTxn', () => {
     it('should add a signature to a given transaction', () => {
-      const txn = Uint8Array.of(1, 2, 3);
+      const payment: PaymentTransactionFields = {
+        receiver: Address.fromString('I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU'),
+        amount: 0n,
+      };
+
+      const txnFields: TransactionParams = {
+        type: TransactionType.Payment,
+        sender: Address.fromString('I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU'),
+        fee: 1000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
+        payment,
+      };
+
+      const txn = encodeTransaction(new Transaction(txnFields));
       const sig = Uint8Array.of(4, 5, 6);
 
       const result = chainService.addSignatureToTxn(txn, sig);
@@ -99,7 +123,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const dummyAddress4 = '6L7ABTLU2BZOZPTNO7FT3F35622CLGBCMMQGLOFUNDTSEZHIL62IARTTR4';
@@ -137,7 +161,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lv: 1001,
         snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
         type: 'acfg',
@@ -156,7 +180,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
 
       const result = await chainService.craftPaymentTx(dummyAddress1, dummyAddress2, 2);
@@ -167,7 +191,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lv: 1001,
         rcv: new AlgorandEncoder().decodeAddress(dummyAddress2),
         snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
@@ -187,7 +211,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const lease = 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD';
       const leaseB64 = Buffer.from(lease).toString('base64');
@@ -202,7 +226,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lx: new Uint8Array(Buffer.from(lease)),
         lv: 1001,
         note: new Uint8Array(Buffer.from(note)),
@@ -222,7 +246,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
 
       const result = await chainService.craftAssetTransferTx(dummyAddress1, dummyAddress2, 1234n, 0);
@@ -233,7 +257,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lv: 1001,
         snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
         type: 'axfer',
@@ -252,7 +276,7 @@ describe('ChainService', () => {
         status: 200,
       });
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
@@ -279,7 +303,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lx: new Uint8Array(Buffer.from(lease)),
         lv: 1001,
         note: new Uint8Array(Buffer.from(note)),
@@ -298,7 +322,7 @@ describe('ChainService', () => {
         status: 200,
       });
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
@@ -319,7 +343,7 @@ describe('ChainService', () => {
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
+        gh: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
         lv: 1001,
         snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
         type: 'axfer',

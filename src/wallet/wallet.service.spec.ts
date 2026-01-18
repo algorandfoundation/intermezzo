@@ -36,7 +36,7 @@ describe('WalletService', () => {
     configServiceMock.get.mockImplementation((key: string) => {
       const config = {
         GENESIS_ID: 'test-genesis-id',
-        GENESIS_HASH: 'test-genesis-hash',
+        GENESIS_HASH: 'SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
         NODE_HTTP_SCHEME: 'http',
         NODE_HOST: 'localhost',
         NODE_PORT: '4001',

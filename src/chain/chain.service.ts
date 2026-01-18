@@ -1,11 +1,6 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  AlgorandTransactionCrafter,
-  AssetParamsBuilder,
-  AssetTransferTxBuilder,
-  StateSchema,
-} from '@algorandfoundation/algo-models';
+import { StateSchema } from '@algorandfoundation/algo-models';
 
 import { ApplicationCallTxBuilder } from './algorand.transaction.appl.temp';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
@@ -21,10 +16,22 @@ import {
   TruncatedPostTransactionsResponse,
   TruncatedSuggestedParamsResponse,
 } from './algo-node-responses';
+import {
+  AssetTransferTransactionFields,
+  decodeTransaction,
+  encodeSignedTransaction,
+  encodeTransaction,
+  groupTransactions,
+  PaymentTransactionFields,
+  SignedTransaction,
+  Transaction,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
+import { AssetConfigTransactionFields, TransactionParams } from '@algorandfoundation/algokit-utils/transact';
+import { Address } from '@algorandfoundation/algokit-utils';
 import { AppCallRequestDto } from '../wallet/app-call-request.dto';
 import { base64ToBytes, encodeString, encodeUint64 } from './encoding';
 import { sha512_256 } from 'js-sha512';
-import { decodeTransaction, encodeTransaction, groupTransactions } from '@algorandfoundation/algokit-utils/transact';
 
 @Injectable()
 export class ChainService {
@@ -33,17 +40,14 @@ export class ChainService {
     private readonly httpService: HttpService,
   ) {}
 
-  private getCrafter(): AlgorandTransactionCrafter {
-    return new AlgorandTransactionCrafter(this.configService.get('GENESIS_ID'), this.configService.get('GENESIS_HASH'));
-  }
-
   private parseLease(lease: string): Uint8Array {
     return new Uint8Array(Buffer.from(lease, 'base64'));
   }
 
   addSignatureToTxn(encodedTransaction: Uint8Array, signature: Uint8Array): Uint8Array {
-    const crafter = this.getCrafter();
-    return crafter.addSignature(encodedTransaction, signature);
+    const decodedTxn = decodeTransaction(encodedTransaction);
+    const stxn: SignedTransaction = { txn: decodedTxn, sig: signature };
+    return encodeSignedTransaction(stxn);
   }
 
   /**
@@ -75,30 +79,34 @@ export class ChainService {
       clawbackAddress?: string;
     },
   ): Promise<Uint8Array> {
-    const crafter = this.getCrafter();
     const suggested_params: TruncatedSuggestedParamsResponse = await this.getSuggestedParams();
 
-    const paramsBuilder = new AssetParamsBuilder();
-    if (options.total) paramsBuilder.addTotal(options.total);
-    if (options.decimals) paramsBuilder.addDecimals(Number(options.decimals));
-    if (options.defaultFrozen) paramsBuilder.addDefaultFrozen(options.defaultFrozen);
-    if (options.unitName) paramsBuilder.addUnitName(options.unitName);
-    if (options.assetName) paramsBuilder.addAssetName(options.assetName);
-    if (options.managerAddress) paramsBuilder.addManagerAddress(options.managerAddress);
-    if (options.reserveAddress) paramsBuilder.addReserveAddress(options.reserveAddress);
-    if (options.freezeAddress) paramsBuilder.addFreezeAddress(options.freezeAddress);
-    if (options.clawbackAddress) paramsBuilder.addClawbackAddress(options.clawbackAddress);
+    const assetParams: AssetConfigTransactionFields = {
+      assetId: 0n,
+      total: BigInt(options.total),
+      decimals: Number(options.decimals),
+      defaultFrozen: options.defaultFrozen,
+      unitName: options.unitName,
+      assetName: options.assetName,
+      url: options.url,
+      manager: Address.fromString(options.managerAddress),
+      reserve: Address.fromString(options.reserveAddress),
+      freeze: Address.fromString(options.freezeAddress),
+      clawback: Address.fromString(options.clawbackAddress),
+    };
 
-    const params = paramsBuilder.get();
-    if (options.url) params.au = options.url;
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetConfig,
+      assetConfig: assetParams,
+      sender: Address.fromString(creatorAddress),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+    };
 
-    const transactionBuilder = crafter
-      .createAsset(creatorAddress, params)
-      .addFee(suggested_params.minFee)
-      .addFirstValidRound(suggested_params.lastRound)
-      .addLastValidRound(suggested_params.lastRound + 1000n);
-
-    return transactionBuilder.get().encode();
+    return encodeTransaction(new Transaction(txnParams));
   }
 
   async craftPaymentTx(
@@ -109,15 +117,23 @@ export class ChainService {
   ): Promise<Uint8Array> {
     suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
 
-    const crafter = this.getCrafter();
+    const pay: PaymentTransactionFields = {
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+    };
 
-    const transactionBuilder = crafter
-      .pay(amount, from, to)
-      .addFee(suggested_params.minFee)
-      .addFirstValidRound(suggested_params.lastRound)
-      .addLastValidRound(suggested_params.lastRound + 1000n);
+    const txnParams: TransactionParams = {
+      type: TransactionType.Payment,
+      payment: pay,
+      sender: Address.fromString(from),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+    };
 
-    return transactionBuilder.get().encode();
+    return encodeTransaction(new Transaction(txnParams));
   }
 
   async craftAssetTransferTx(
@@ -131,33 +147,26 @@ export class ChainService {
   ): Promise<Uint8Array> {
     suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
 
-    const builder = new AssetTransferTxBuilder(
-      this.configService.get('GENESIS_ID'),
-      this.configService.get('GENESIS_HASH'),
-    );
-    builder.addAssetId(asset_id);
-    builder.addSender(from);
-    builder.addAssetReceiver(to);
-    builder.addFee(suggested_params.minFee);
-    builder.addFirstValidRound(suggested_params.lastRound);
-    builder.addLastValidRound(suggested_params.lastRound + 1000n);
-    if (note) {
-      builder.addNote(note);
-    }
+    const assetTransfer: AssetTransferTransactionFields = {
+      assetId: asset_id,
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+    };
 
-    if (amount != 0) {
-      builder.addAssetAmount(amount);
-    }
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetTransfer,
+      assetTransfer: assetTransfer,
+      sender: Address.fromString(from),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: note ? Uint8Array.from(Buffer.from(note)) : undefined,
+      lease: lease ? this.parseLease(lease) : undefined,
+    };
 
-    if (lease) {
-      try {
-        builder.addLease(this.parseLease(lease));
-      } catch (error) {
-        throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
-      }
-    }
-
-    return builder.get().encode();
+    return encodeTransaction(new Transaction(txnParams));
   }
 
   async craftAssetClawbackTx(
@@ -172,35 +181,55 @@ export class ChainService {
   ): Promise<Uint8Array> {
     suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
 
-    const builder = new AssetTransferTxBuilder(
-      this.configService.get('GENESIS_ID'),
-      this.configService.get('GENESIS_HASH'),
-    );
-    builder.addAssetId(asset_id);
-    builder.addSender(clawbackAddress);
-    builder.addAssetSender(from);
-    builder.addAssetReceiver(to);
-    builder.addFee(suggested_params.minFee);
-    builder.addFirstValidRound(suggested_params.lastRound);
-    builder.addLastValidRound(suggested_params.lastRound + 1000n);
+    // const builder = new AssetTransferTxBuilder(
+    //   this.configService.get('GENESIS_ID'),
+    //   this.configService.get('GENESIS_HASH'),
+    // );
+    // builder.addAssetId(asset_id);
+    // builder.addSender(clawbackAddress);
+    // builder.addAssetSender(from);
+    // builder.addAssetReceiver(to);
+    // builder.addFee(suggested_params.minFee);
+    // builder.addFirstValidRound(suggested_params.lastRound);
+    // builder.addLastValidRound(suggested_params.lastRound + 1000n);
+    //
+    // if (note) {
+    //   builder.addNote(note);
+    // }
+    //
+    // if (amount != 0) {
+    //   builder.addAssetAmount(amount);
+    // }
+    //
+    // if (lease) {
+    //   try {
+    //     builder.addLease(this.parseLease(lease));
+    //   } catch (error) {
+    //     throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
+    //   }
+    // }
 
-    if (note) {
-      builder.addNote(note);
-    }
+    const assetTransfer: AssetTransferTransactionFields = {
+      assetId: asset_id,
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+      assetSender: Address.fromString(from),
+    };
 
-    if (amount != 0) {
-      builder.addAssetAmount(amount);
-    }
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetTransfer,
+      assetTransfer: assetTransfer,
+      sender: Address.fromString(clawbackAddress),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: note ? Uint8Array.from(Buffer.from(note)) : undefined,
+      lease: lease ? this.parseLease(lease) : undefined,
+    };
 
-    if (lease) {
-      try {
-        builder.addLease(this.parseLease(lease));
-      } catch (error) {
-        throw new HttpErrorByCode[400](`Invalid lease format: ${error.message}`);
-      }
-    }
-
-    return builder.get().encode();
+    return encodeTransaction(new Transaction(txnParams));
   }
 
   async craftAppCallTx(
