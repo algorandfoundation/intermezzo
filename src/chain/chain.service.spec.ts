@@ -5,6 +5,7 @@ import createMockInstance from 'jest-create-mock-instance';
 import { HttpService } from '@nestjs/axios';
 import { Axios } from 'axios';
 import { TruncatedAccountResponse } from 'src/chain/algo-node-responses';
+import * as algosdk from 'algosdk';
 
 describe('ChainService', () => {
   let chainService: ChainService;
@@ -17,7 +18,7 @@ describe('ChainService', () => {
     configServiceMock.get.mockImplementation((key: string) => {
       const config = {
         GENESIS_ID: 'test-genesis-id',
-        GENESIS_HASH: 'test-genesis-hash',
+        GENESIS_HASH: 'test-genesis-hash'.padEnd(43, '0'),
         NODE_HTTP_SCHEME: 'http',
         NODE_HOST: 'localhost',
         NODE_PORT: '4001',
@@ -76,10 +77,13 @@ describe('ChainService', () => {
       const groupedTxns: Uint8Array[] = chainService.setGroupID(txns);
 
       expect(groupedTxns.length).toBe(txns.length);
-      const groupId = new AlgorandEncoder().computeGroupId(txns);
+      // const groupId = new AlgorandEncoder().computeGroupId(txns);
+      const sdkGroupId = algosdk.computeGroupID(txns.map((txn) => algosdk.decodeUnsignedTransaction(txn.slice(2))));
+
       for (const txn of groupedTxns) {
         const decodedTx = new AlgorandEncoder().decodeTransaction(txn);
-        expect(decodedTx.grp).toEqual(groupId);
+        expect(decodedTx.grp).toEqual(sdkGroupId);
+        // expect(decodedTx.grp).toEqual(groupId);
       }
     });
   });
