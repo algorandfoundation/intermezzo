@@ -13,3 +13,4 @@ coverage/
 manager-role-and-secrets.json
 user-role-and-secrets.json
 prompt
+*.tgz
