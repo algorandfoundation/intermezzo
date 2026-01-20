@@ -2,18 +2,6 @@
 # yarn lockfile v1
 
 
-"@algorandfoundation/algo-models@1.0.0-canary.7":
-  version "1.0.0-canary.7"
-  resolved "https://registry.yarnpkg.com/@algorandfoundation/algo-models/-/algo-models-1.0.0-canary.7.tgz#0d328f350b92bdd59a6d756aece7cd67ff67c303"
-  integrity sha512-Ci4xe/mxAwIh6kZMygInvrmfCa5JTcpSkxohKTdMBhCNk313AahwVpxI/TEp6zR/+qK2H6yqR1xyOQx4PCbdNQ==
-  dependencies:
-    ajv "^8.12.0"
-    ajv-formats "^3.0.1"
-    ajv-keywords "^5.1.0"
-    algo-msgpack-with-bigint "^2.1.1"
-    hi-base32 "^0.5.1"
-    js-sha512 "^0.8.0"
-
 "@algorandfoundation/algokit-utils@10.0.0-alpha.29":
   version "10.0.0-alpha.29"
   resolved "https://registry.yarnpkg.com/@algorandfoundation/algokit-utils/-/algokit-utils-10.0.0-alpha.29.tgz#dc99e07b191437f5afb114400fa4a258d7f1ef68"
@@ -1516,13 +1504,6 @@ ajv-formats@2.1.1, ajv-formats@^2.1.1:
   dependencies:
     ajv "^8.0.0"
 
-ajv-formats@^3.0.1:
-  version "3.0.1"
-  resolved "https://registry.yarnpkg.com/ajv-formats/-/ajv-formats-3.0.1.tgz#3d5dc762bca17679c3c2ea7e90ad6b7532309578"
-  integrity sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==
-  dependencies:
-    ajv "^8.0.0"
-
 ajv-keywords@^3.5.2:
   version "3.5.2"
   resolved "https://registry.yarnpkg.com/ajv-keywords/-/ajv-keywords-3.5.2.tgz#31f29da5ab6e00d1c2d329acf7b5929614d5014d"
@@ -1555,7 +1536,7 @@ ajv@^6.12.4, ajv@^6.12.5:
     json-schema-traverse "^0.4.1"
     uri-js "^4.2.2"
 
-ajv@^8.0.0, ajv@^8.12.0, ajv@^8.9.0:
+ajv@^8.0.0, ajv@^8.9.0:
   version "8.17.1"
   resolved "https://registry.yarnpkg.com/ajv/-/ajv-8.17.1.tgz#37d9a5c776af6bc92d7f4f9510eba4c0a60d11a6"
   integrity sha512-B/gBuNg5SiMTrPkC+A2+cW0RszwxYmn6VYxB/inlBStS5nx6xHIt/ehKRhIMhqusl7a8LjQoZnjCs5vhwxOQ1g==
@@ -1564,11 +1545,6 @@ ajv@^8.0.0, ajv@^8.12.0, ajv@^8.9.0:
     fast-uri "^3.0.1"
     json-schema-traverse "^1.0.0"
     require-from-string "^2.0.2"
-
-algo-msgpack-with-bigint@^2.1.1:
-  version "2.1.1"
-  resolved "https://registry.yarnpkg.com/algo-msgpack-with-bigint/-/algo-msgpack-with-bigint-2.1.1.tgz#38bb717220525b3ff42232eefdcd9efb9ad405d6"
-  integrity sha512-F1tGh056XczEaEAqu7s+hlZUDWwOBT70Eq0lfMpBP2YguSQVyxRbprLq5rELXKQOyOaixTWYhMeMQMzP0U5FoQ==
 
 algorand-msgpack@^1.1.0:
   version "1.1.0"
