@@ -21,6 +21,9 @@ import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AlgoTransferResponseDto } from './algo-transfer-response.dto';
 import { AssetHolding } from 'src/chain/algo-node-responses';
+import { AppCallRequestDto } from './app-call-request.dto';
+import { AppCallResponseDto } from './app-call-response.dto';
+import { GroupRequestDto } from './group-request.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -230,5 +233,50 @@ export class Wallet {
         assetClawbackRequestDto.note,
       ),
     } as AssetTransferResponseDto;
+  }
+
+  // App Call
+  @Post('wallet/transactions/app-call/')
+  @ApiOperation({
+    summary: 'App Call',
+    description: 'Application call',
+  })
+  @ApiCreatedResponse({
+    description: 'The app call has been successfully completed.',
+    type: AppCallResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async appCallTx(@Request() request: any, @Body() appCallRequestDto: AppCallRequestDto): Promise<AppCallResponseDto> {
+    return {
+      transaction_id: await this.walletService.appCall(request.vault_token, appCallRequestDto),
+    } as AppCallResponseDto;
+
+    // throw new Error('createAppTx not implemented');
+  }
+
+  @Post('wallet/transactions/group-transaction/')
+  @ApiOperation({
+    summary: 'Group Transaction',
+    description: 'Group Transaction',
+  })
+  @ApiCreatedResponse({
+    description: 'The group transaction has been successfully completed.',
+    type: GroupRequestDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async groupTx(@Request() request: any, @Body() groupRequestDto: GroupRequestDto) {
+    return {
+      group_id: await this.walletService.groupTransaction(request.vault_token, groupRequestDto),
+    };
   }
 }

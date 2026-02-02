@@ -5,7 +5,11 @@ import {
   AlgorandTransactionCrafter,
   AssetParamsBuilder,
   AssetTransferTxBuilder,
+  // ApplicationCallTxBuilder,
+  StateSchema,
 } from '@algorandfoundation/algo-models';
+
+import { ApplicationCallTxBuilder } from './algorand.transaction.appl.temp';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import { HttpService } from '@nestjs/axios';
 import { AxiosResponse } from 'axios';
@@ -19,6 +23,9 @@ import {
   TruncatedPostTransactionsResponse,
   TruncatedSuggestedParamsResponse,
 } from './algo-node-responses';
+import { AppCallRequestDto } from '../wallet/app-call-request.dto';
+import { base64ToBytes, bytesToBase64, encodeString, encodeUint64 } from './encoding';
+import { sha512_256 } from 'js-sha512';
 
 @Injectable()
 export class ChainService {
@@ -202,6 +209,152 @@ export class ChainService {
     }
 
     return builder.get().encode();
+  }
+
+  async craftAppCallTx(
+    managerPublicAddress: string,
+    appCallRequestDto: AppCallRequestDto,
+    suggested_params: TruncatedSuggestedParamsResponse,
+    fee?: number,
+  ) {
+    const builder = new ApplicationCallTxBuilder(
+      this.configService.get('GENESIS_ID'),
+      this.configService.get('GENESIS_HASH'),
+    );
+    builder.addSender(managerPublicAddress);
+    builder.addFee(fee ?? suggested_params.minFee);
+    builder.addFirstValidRound(suggested_params.lastRound);
+    builder.addLastValidRound(suggested_params.lastRound + 1000n);
+
+    if (appCallRequestDto.note) builder.addNote(appCallRequestDto.note);
+    if (appCallRequestDto.lease) builder.addLease(this.parseLease(appCallRequestDto.lease));
+
+    if (appCallRequestDto.onComplete) builder.addOnComplete(appCallRequestDto.onComplete);
+
+    let globalStateSchema: StateSchema | undefined;
+    if (appCallRequestDto.globalInts && appCallRequestDto.globalInts > 0) {
+      globalStateSchema = {
+        ...(globalStateSchema ?? {}),
+        nui: Number(appCallRequestDto.globalInts),
+      } as StateSchema;
+    }
+    if (appCallRequestDto.globalByteSlices && appCallRequestDto.globalByteSlices > 0) {
+      globalStateSchema = {
+        ...(globalStateSchema ?? {}),
+        nbs: Number(appCallRequestDto.globalByteSlices),
+      } as StateSchema;
+    }
+    if (globalStateSchema) {
+      builder.addGlobalSchema(globalStateSchema);
+    }
+
+    let localStateSchema: StateSchema | undefined;
+    if (appCallRequestDto.localInts && appCallRequestDto.localInts > 0) {
+      localStateSchema = {
+        ...(localStateSchema ?? {}),
+        nui: Number(appCallRequestDto.localInts),
+      } as StateSchema;
+    }
+    if (appCallRequestDto.localByteSlices && appCallRequestDto.localByteSlices > 0) {
+      localStateSchema = {
+        ...(localStateSchema ?? {}),
+        nbs: Number(appCallRequestDto.localByteSlices),
+      } as StateSchema;
+    }
+    if (localStateSchema) {
+      builder.addLocalSchema(localStateSchema);
+    }
+
+    if (appCallRequestDto.foreignAssets?.length) {
+      builder.addForeignAssets(appCallRequestDto.foreignAssets.map((a: any) => BigInt(a)));
+    }
+    if (appCallRequestDto.foreignApps?.length) {
+      builder.addForeignApps(appCallRequestDto.foreignApps.map((a: any) => BigInt(a)));
+    }
+    if (appCallRequestDto.foreignAccounts?.length) {
+      builder.addAccounts(appCallRequestDto.foreignAccounts);
+    }
+
+    if (appCallRequestDto.boxes?.length) {
+      builder.addBoxes(appCallRequestDto.boxes);
+    }
+
+    if (appCallRequestDto.approvalProgram) builder.addApprovalProgram(base64ToBytes(appCallRequestDto.approvalProgram));
+    if (appCallRequestDto.clearProgram) builder.addClearStateProgram(base64ToBytes(appCallRequestDto.clearProgram));
+
+    if (appCallRequestDto.appId) builder.addApplicationId(BigInt(appCallRequestDto.appId));
+
+    const appArgs = await this.processAbiMethodArgs(appCallRequestDto.args);
+    if (appArgs.length > 0) builder.addApplicationArgs(appArgs);
+
+    return builder.get().encode();
+  }
+
+  /**
+   * Build ABI method selector + encoded arguments array suitable for addApplicationArgs.
+   * It uses the ABI specification and embedded `value` fields from AppCallRequestDto.args.
+   * It currently supports uint64, string, and address. Txn-typed args are ignored here
+   * and must be represented as separate transactions in the group.
+   */
+  async processAbiMethodArgs(spec: AppCallRequestDto['args']): Promise<Uint8Array[]> {
+    if (!spec) {
+      return [];
+    }
+
+    const methodName = spec.name;
+    const argSpecs = Array.isArray(spec.args) ? spec.args : [];
+    const returnType = spec.returns?.type ?? 'void';
+
+    const argTypes: string[] = argSpecs.map((s: any) => s.type).filter((t: any): t is string => typeof t === 'string');
+
+    const signature = `${methodName}(${argTypes.join(',')})${returnType}`;
+
+    const selector = new Uint8Array(sha512_256.array(Buffer.from(signature)).slice(0, 4));
+
+    const encodedArgs: Uint8Array[] = [];
+
+    argSpecs.forEach((argSpec: any) => {
+      const type = argSpec.type as string;
+      const value = argSpec.value;
+
+      // For now we skip txn typed args here; they are expected to be
+      // separate transactions in the group, not ABI-encoded scalars.
+      if (type === 'pay' || type === 'keyreg' || type === 'axfer' || type === 'acfg' || type === 'appl') {
+        return;
+      }
+
+      if (value === undefined || value === null) {
+        return;
+      }
+
+      const encoded = this.encodeAbiArgument(type, value);
+
+      if (encoded) {
+        encodedArgs.push(encoded);
+      }
+    });
+
+    return [selector, ...encodedArgs];
+  }
+
+  private encodeAbiArgument(type: string, value: any): Uint8Array | null {
+    switch (type) {
+      case 'uint64': {
+        return encodeUint64(BigInt(value));
+      }
+      case 'string': {
+        return encodeString(value);
+      }
+      case 'address': {
+        // Expecting a base32 Algorand address string; need its 32-byte public key bytes
+        const encoder = new AlgorandEncoder();
+        // decodeAddress returns the raw public key bytes for an address string
+        // @ts-ignore decodeAddress may not be typed on older versions
+        return encoder.decodeAddress(value);
+      }
+      default:
+        throw new Error(`Unsupported ABI argument type: ${type}`);
+    }
   }
 
   async makeAlgoNodeRequest(path: string, method: 'GET' | 'POST', data?: any): Promise<any> {

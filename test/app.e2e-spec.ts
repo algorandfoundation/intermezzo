@@ -763,4 +763,192 @@ describe('App E2E', () => {
       ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
     }, 60000);
   });
+
+  describe('App deploy', () => {
+    it('(OK) app deploy', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const appCallRequestData = {
+        approvalProgram:
+          'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
+        clearProgram: 'CoEBQw==',
+        globalByteSlices: 1,
+        globalInts: 1,
+        localByteSlices: 0,
+        localInts: 0,
+        onComplete: 0,
+        fromUserId: 'manager',
+      };
+
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+
+      expect(response.status).toBe(201);
+      expect(typeof response.data.transaction_id).toEqual('string');
+    }, 60000);
+  });
+
+  describe('App abi method call with string args', () => {
+    it('(OK) App abi method call with string args', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const appCallRequestData = {
+        appId: 754755349,
+        args: {
+          name: 'hello',
+          args: [
+            {
+              type: 'string',
+              value: 'world',
+            },
+          ],
+          returns: {
+            type: 'string',
+          },
+        },
+        fromUserId: 'manager',
+      };
+
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+
+      expect(response.status).toBe(201);
+      expect(typeof response.data.transaction_id).toEqual('string');
+    }, 60000);
+  });
+
+  describe('App abi method call with uint64 args', () => {
+    it('(OK) App abi method call with uint64 args', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const appCallRequestData = {
+        appId: 754755349,
+        args: {
+          name: 'add',
+          args: [
+            {
+              type: 'uint64',
+              value: 10,
+            },
+            {
+              type: 'uint64',
+              value: 20,
+            },
+          ],
+          returns: {
+            type: 'uint64',
+          },
+        },
+        fromUserId: 'manager',
+      };
+
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(response.status).toBe(201);
+      expect(typeof response.data.transaction_id).toEqual('string');
+    }, 60000);
+  });
+
+  describe('Group transaction (foreign Accounts and Assets)', () => {
+    it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const groupRequestData = {
+        transactions: [
+          {
+            type: 'payment',
+            payload: {
+              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
+              amount: 101000,
+              fromUserId: 'manager',
+              note: 'optional note',
+              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+            },
+          },
+          {
+            type: 'appCall',
+            payload: {
+              appId: 754755349,
+              onComplete: 0,
+              fromUserId: 'manager',
+              fee: 2000,
+              args: {
+                name: 'opt_in_token',
+                args: [
+                  { type: 'pay', value: null },
+                  { type: 'uint64', value: 723769800 },
+                ],
+                returns: { type: 'void' },
+              },
+              foreignAccounts: ['CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A'],
+              foreignAssets: [723769800],
+            },
+          },
+        ],
+      };
+
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+
+      expect(response.status).toBe(201);
+      expect(typeof response.data.group_id).toEqual('string');
+    }, 60000);
+  });
+
+  describe('Group transaction (foreign apps and boxes)', () => {
+    it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const groupRequestData = {
+        transactions: [
+          {
+            type: 'payment',
+            payload: {
+              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
+              amount: 100000,
+              fromUserId: 'manager',
+              note: 'optional note',
+              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+            },
+          },
+          {
+            type: 'appCall',
+            payload: {
+              appId: 754755349,
+              onComplete: 0,
+              fromUserId: 'manager',
+              fee: 2000,
+              args: {
+                name: 'create_box_paid',
+                args: [
+                  { type: 'string', value: 'abc' },
+                  { type: 'uint64', value: 123 },
+                  { type: 'pay', value: null },
+                ],
+                returns: { type: 'void' },
+              },
+              foreignApps: [754755349],
+              boxes: [{ n: 'Ym94X2ludA==' }, { n: 'Ym94X3N0cmluZ2FiYw==' }],
+            },
+          },
+        ],
+      };
+
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+
+      expect(response.status).toBe(201);
+      expect(typeof response.data.group_id).toEqual('string');
+    }, 60000);
+  });
 });

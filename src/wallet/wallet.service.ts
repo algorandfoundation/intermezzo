@@ -8,6 +8,8 @@ import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
+import { AppCallRequestDto } from './app-call-request.dto';
+import { GroupRequestDto } from './group-request.dto';
 @Injectable()
 export class WalletService {
   constructor(
@@ -366,5 +368,164 @@ export class WalletService {
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
 
     return transactionId;
+  }
+
+  async appCall(vault_token: string, appCallRequestDto: AppCallRequestDto) {
+    let signedTx: Uint8Array;
+    let fromAddress: string;
+
+    try {
+      if (appCallRequestDto.fromUserId === 'manager') {
+        const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+        fromAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+      } else {
+        fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
+      }
+    } catch (error) {
+      throw new Error(`Failed to get from address for user ${appCallRequestDto.fromUserId}: ${error.message}`);
+    }
+
+    const suggested_params = await this.chainService.getSuggestedParams();
+
+    const appTx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAppCallTx(
+      fromAddress,
+      appCallRequestDto,
+      suggested_params,
+      appCallRequestDto.fee,
+    );
+
+    try {
+      if (appCallRequestDto.fromUserId === 'manager') {
+        Logger.debug(`Signing transaction as manager: ${appTx.toString()}`);
+        // sign as manager
+        signedTx = await this.signTxAsManager(appTx, vault_token);
+      } else {
+        // sign as user
+        signedTx = await this.signTxAsUser(appCallRequestDto.fromUserId, appTx, vault_token);
+      }
+
+      // submit transaction
+      return (await this.chainService.submitTransaction(signedTx)).txid;
+    } catch (error) {
+      throw new Error(`Failed to sign transaction as user ${appCallRequestDto.fromUserId}: ${error.message}`);
+    }
+  }
+
+  async groupTransaction(vault_token: string, groupRequestDto: GroupRequestDto) {
+    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+
+    const suggested_params = await this.chainService.getSuggestedParams();
+
+    Logger.debug(`Group Request DTO: ${groupRequestDto}`);
+
+    if (!Array.isArray((groupRequestDto as any).transactions) || groupRequestDto.transactions.length === 0) {
+      throw new Error('transactions is required and must be a non-empty array');
+    }
+
+    const unSignedTxs: Uint8Array[] = [];
+    const addressToUserId: Record<string, string> = {};
+
+    for (const step of groupRequestDto.transactions) {
+      const key = (step as any).type as string;
+      const value = (step as any).payload;
+      if (!key || !value) {
+        throw new Error('Invalid transaction step');
+      }
+
+      switch (key) {
+        case 'appCall': {
+          let fromAddress: string;
+          if (value.fromUserId === 'manager') {
+            fromAddress = managerPublicAddress;
+          } else {
+            fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
+            addressToUserId[fromAddress] = value.fromUserId;
+          }
+
+          const tx = await this.chainService.craftAppCallTx(fromAddress, value, suggested_params, value.fee);
+          unSignedTxs.push(tx);
+          break;
+        }
+        case 'assetConfig': {
+          const tx = await this.chainService.craftAssetCreateTx(managerPublicAddress, value);
+          unSignedTxs.push(tx);
+          break;
+        }
+        case 'assetTransfer': {
+          const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
+          const tx = await this.chainService.craftAssetTransferTx(
+            managerPublicAddress,
+            userPublicAddress,
+            value.assetId,
+            value.amount,
+            value.lease,
+            value.note,
+            suggested_params,
+          );
+          unSignedTxs.push(tx);
+          break;
+        }
+        case 'payment': {
+          let fromAddress: string;
+          if (value.fromUserId === 'manager') {
+            fromAddress = managerPublicAddress;
+          } else {
+            fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
+            addressToUserId[fromAddress] = value.fromUserId;
+          }
+
+          const tx = await this.chainService.craftPaymentTx(
+            fromAddress,
+            value.toAddress,
+            value.amount,
+            suggested_params,
+          );
+          unSignedTxs.push(tx);
+          break;
+        }
+        case 'assetClawback': {
+          const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
+          const tx = await this.chainService.craftAssetClawbackTx(
+            managerPublicAddress,
+            userPublicAddress,
+            managerPublicAddress,
+            value.assetId,
+            value.amount,
+            value.lease,
+            value.note,
+            suggested_params,
+          );
+          unSignedTxs.push(tx);
+          break;
+        }
+        default:
+          throw new Error(`Unsupported transaction type: ${key}`);
+      }
+    }
+
+    if (unSignedTxs.length === 0) {
+      throw new Error('No transactions to group');
+    }
+
+    const encoder = new AlgorandEncoder();
+    const groupIdBytes: Uint8Array = encoder.computeGroupId(unSignedTxs);
+    const groupedTxns: Uint8Array[] = this.chainService.setGroupID(unSignedTxs);
+
+    const signedTxs: Uint8Array[] = [];
+    for (const tx of groupedTxns) {
+      const sender = encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd));
+      if (sender === managerPublicAddress) {
+        signedTxs.push(await this.signTxAsManager(tx, vault_token));
+      } else if (addressToUserId[sender]) {
+        signedTxs.push(await this.signTxAsUser(addressToUserId[sender], tx, vault_token));
+      } else {
+        throw new Error('Invalid sender');
+      }
+    }
+
+    const txid = (await this.chainService.submitTransaction(signedTxs)).txid;
+
+    return txid;
   }
 }

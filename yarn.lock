@@ -2,10 +2,10 @@
 # yarn lockfile v1
 
 
-"@algorandfoundation/algo-models@1.0.0-canary.4":
-  version "1.0.0-canary.4"
-  resolved "https://registry.yarnpkg.com/@algorandfoundation/algo-models/-/algo-models-1.0.0-canary.4.tgz#32972b273ad51abc0fa84e426abb9c6bc57a5a19"
-  integrity sha512-g9jySINjkaE8Z68tob9GAVoBeLDLBwIng4dM2Wp/l2qAHGfgob4hK0Bs2vqtxCs6PYdJdpWEAT746VTYljNuFQ==
+"@algorandfoundation/algo-models@1.0.0-canary.7":
+  version "1.0.0-canary.7"
+  resolved "https://registry.yarnpkg.com/@algorandfoundation/algo-models/-/algo-models-1.0.0-canary.7.tgz#0d328f350b92bdd59a6d756aece7cd67ff67c303"
+  integrity sha512-Ci4xe/mxAwIh6kZMygInvrmfCa5JTcpSkxohKTdMBhCNk313AahwVpxI/TEp6zR/+qK2H6yqR1xyOQx4PCbdNQ==
   dependencies:
     ajv "^8.12.0"
     ajv-formats "^3.0.1"
