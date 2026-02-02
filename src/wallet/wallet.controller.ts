@@ -259,6 +259,7 @@ export class Wallet {
     // throw new Error('createAppTx not implemented');
   }
 
+  // Group Transaction
   @Post('wallet/transactions/group-transaction/')
   @ApiOperation({
     summary: 'Group Transaction',

@@ -370,6 +370,15 @@ export class WalletService {
     return transactionId;
   }
 
+  /**
+   * Crafts and submits an application call transaction.
+   *
+   * @param vault_token The token used to authenticate with the vault.
+   * @param appCallRequestDto The request object containing the application call details.
+   *
+   * @returns The transaction ID of the submitted transaction.
+   */
+
   async appCall(vault_token: string, appCallRequestDto: AppCallRequestDto) {
     let signedTx: Uint8Array;
     let fromAddress: string;
@@ -411,6 +420,14 @@ export class WalletService {
     }
   }
 
+  /**
+   * Crafts and submits a group transaction.
+   *
+   * @param vault_token The token used to authenticate with the vault.
+   * @param groupRequestDto The request object containing the group transaction details.
+   *
+   * @returns The transaction ID of the submitted transaction.
+   */
   async groupTransaction(vault_token: string, groupRequestDto: GroupRequestDto) {
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
     const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
