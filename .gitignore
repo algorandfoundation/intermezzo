@@ -1,4 +1,4 @@
-node_modules/*
+.secrets/
 !node_modules/.gitkeep
 dist/*
 test/coverage
@@ -13,3 +13,4 @@ coverage/
 manager-role-and-secrets.json
 user-role-and-secrets.json
 prompt
+.env

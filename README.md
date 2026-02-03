@@ -48,6 +48,18 @@ This is mostly defined by Hashicorp Vault. The application will use the `approle
 
 For most information, you can refer to the [Hashicorp Vault ACL documentation](https://www.vaultproject.io/docs/auth/approle).
 
+## Liquid Auth (through Rocca) & Sponsor
+
+Liquid Auth (via Rocca) is a way for external clients to connect to Pawn and request operations (including signing) without handling account keys directly. Clients send messages or transaction bytes to Pawn which may, in turn, ask a trusted signing service to perform signing operations. This pattern is useful for developer flows where Intermezzo covers small fees on behalf of users so end-users don't need to manage Algorand balances.
+
+`Sponsor` is a small, developer-oriented service included in this repository that demonstrates how a separate process can be entrusted with Vault credentials and perform limited signing via Vault's Transit engine. Key points:
+
+- Sponsor stores the Vault AppRole helpers and sponsor helper files under `./.secrets/` on the host and reads them at runtime (the `sponsor` container mounts the host `./.secrets` at `/secrets`).
+- Sponsor exposes a minimal signing API and performs lightweight policy checks (for example: minimum fee, allowed transaction amounts, and sender address matching the sponsor key).
+- Sponsor has its own Algorand address (derived from the Vault public key). That address should be funded on testnet if you want Sponsor to cover fees.
+
+Security note: Do NOT use `Sponsor` in production as-is. Store AppRole credentials and any admin/root tokens using a secure secret store (Vault, cloud KMS, or OS-level secrets). Harden Vault and follow its best practices before any production use.
+
 
 # Setup Development Environment
 
@@ -62,7 +74,7 @@ Now you can open to see endpoint documentation at http://localhost:3000/docs/
 
 But before you can use the API, you need to unseal vault and / or set up the vault keys, if they are not already set up
 
-> **Note**: If you make any changes to the `.env` file, you must redeploy the application for the changes to take effect. You can do this by running:
+> **Note**: Create your own `.env` from `.env.example`. If you make any changes to the `.env` file, you must redeploy the application for the changes to take effect. You can do this by running:
 
 ```bash
 docker compose down pawn
@@ -94,6 +106,43 @@ This command's output will provide you 4 important pieces of information:
 5) Make sure Manager's address has enough ALGO for usage OR to run integration tests. You can use https://bank.testnet.algorand.network/ to dispense some ALGO.
 
 You can re-run `vault:development:init` whenever you want.
+
+### Sponsor secrets (post-init)
+
+After running `yarn run vault:development:init` the init helper will create AppRoles and helper files inside the `pawn` container under `/opt/app/.secrets`. The Sponsor service only requires a small subset of those helper files so you can safely extract just the Sponsor files to the host and mount them into the `sponsor` container.
+
+Files Sponsor needs (extract these after init):
+
+- `pawn_sponsor_approle_role_id`
+- `pawn_sponsor_approle_secret_id`
+- `sponsor_public_key_base64`
+- `sponsor_address` (the Algorand address to fund on testnet)
+
+Two ways to extract them:
+
+1) Let the included helper script copy only Sponsor files for you (recommended):
+
+```bash
+bash scripts/start_development.sh
+```
+
+2) Manually read/copy individual files from the `pawn` container:
+
+```bash
+# show contents directly from container
+docker compose exec pawn sh -c 'cat /opt/app/.secrets/pawn_sponsor_approle_role_id'
+docker compose exec pawn sh -c 'cat /opt/app/.secrets/pawn_sponsor_approle_secret_id'
+docker compose exec pawn sh -c 'cat /opt/app/.secrets/sponsor_address'
+
+# or copy files to the host
+CID=$(docker compose ps -q pawn)
+docker cp ${CID}:/opt/app/.secrets/pawn_sponsor_approle_role_id ./.secrets/
+docker cp ${CID}:/opt/app/.secrets/pawn_sponsor_approle_secret_id ./.secrets/
+docker cp ${CID}:/opt/app/.secrets/sponsor_public_key_base64 ./.secrets/
+docker cp ${CID}:/opt/app/.secrets/sponsor_address ./.secrets/
+```
+
+Once the files are present under host `./.secrets`, the `sponsor` container will be able to read them (the compose file mounts `./.secrets:/secrets:ro`).
 
 ## HTTP API mode
 

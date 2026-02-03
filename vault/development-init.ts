@@ -19,10 +19,30 @@ const USERS_POLICY_NAME = 'pawn_users_policy';
 const USERS_APP_ROLE_NAME = 'pawn_users_approle';
 const MANAGERS_POLICY_NAME = 'pawn_managers_policy';
 const MANAGERS_APP_ROLE_NAME = 'pawn_managers_approle';
+const SPONSOR_POLICY_NAME = 'pawn_sponsor_policy';
+const SPONSOR_APP_ROLE_NAME = 'pawn_sponsor_approle';
+const SPONSOR_ROLE_AND_SECRET_KEYS_FILE = 'sponsor-role-and-secrets.json';
+const SECRETS_DIR = '.secrets';
 
 // Function to initialize Vault
 async function initVault() {
   try {
+    // If Vault is already initialized, avoid calling /sys/init which returns 400.
+    try {
+      const sealStatus = await axios.get(`${VAULT_BASE_URL}/v1/sys/seal-status`);
+      if (sealStatus.data && sealStatus.data.initialized) {
+        console.log('Vault already initialized (detected via /sys/seal-status)');
+        if (fs.existsSync(VAULT_SEAL_KEYS_FILE)) {
+          const existing = JSON.parse(fs.readFileSync(VAULT_SEAL_KEYS_FILE).toString());
+          console.log(`Loaded existing ${VAULT_SEAL_KEYS_FILE}`);
+          return existing;
+        }
+        throw new Error('Vault already initialized but no local vault-seal-keys.json found.');
+      }
+    } catch (err) {
+      // If seal-status endpoint is not reachable, continue to attempt init and let init errors surface
+    }
+
     // Initialize Vault
     const response = await axios.post(`${VAULT_BASE_URL}${VAULT_INIT_ENDPOINT}`, {
       secret_shares: 1,
@@ -43,7 +63,30 @@ async function initVault() {
 
     return response.data;
   } catch (error) {
+    // Provide better diagnostics for common Vault init failures (e.g. already initialized)
+    if (axios.isAxiosError(error) && error.response) {
+      console.error('Failed to initialize Vault: received response', error.response.status, error.response.data);
+      // If Vault is already initialized, try to use local seal file if present
+      const msg = JSON.stringify(error.response.data || {});
+      if (msg.includes('already initialized') || msg.includes('already initialized')) {
+        console.log('Vault reports it is already initialized. Checking for local', VAULT_SEAL_KEYS_FILE);
+        if (fs.existsSync(VAULT_SEAL_KEYS_FILE)) {
+          try {
+            const existing = JSON.parse(fs.readFileSync(VAULT_SEAL_KEYS_FILE).toString());
+            console.log(`Loaded existing ${VAULT_SEAL_KEYS_FILE}`);
+            return existing;
+          } catch (err) {
+            console.error('Failed to parse existing seal keys file:', err);
+            throw error;
+          }
+        }
+
+        throw new Error('Vault is already initialized but no local vault-seal-keys.json found. Copy the seal keys file from the Vault host into this container or re-run init from the host.');
+      }
+    }
+
     console.error('Failed to initialize Vault:', error);
+    throw error;
   }
 }
 
@@ -201,6 +244,20 @@ async function createACLPolicies(token: string) {
           },
         },
       },
+      [SPONSOR_POLICY_NAME]: {
+        path: {
+          // Sponsor should only be able to sign with a single sponsor key
+          // transit sign operations generally require the `update` capability
+          // allow both create and update so sign operations succeed
+          [`${VAULT_TRANSIT_MANAGERS_PATH}/sign/sponsor`]: {
+            capabilities: ['create', 'update'],
+          },
+          // allow reading the public key for address derivation if needed
+          [`${VAULT_TRANSIT_MANAGERS_PATH}/keys/sponsor`]: {
+            capabilities: ['read'],
+          },
+        },
+      },
     };
 
     // Create the ACL policies
@@ -305,6 +362,10 @@ async function getOrCreateAppRoles(root_token: string) {
         name: MANAGERS_APP_ROLE_NAME,
         policies: [MANAGERS_POLICY_NAME],
       },
+      {
+        name: SPONSOR_APP_ROLE_NAME,
+        policies: [SPONSOR_POLICY_NAME],
+      },
     ];
 
     for (const appRole of appRoles) {
@@ -329,6 +390,71 @@ async function getOrCreateAppRoles(root_token: string) {
     }
   } catch (error) {
     console.error('Failed to create or check AppRoles:', error);
+  }
+}
+
+async function getOrCreateSponsorKey(token: string) {
+  try {
+    const url: string = `${VAULT_BASE_URL}/v1/${VAULT_TRANSIT_MANAGERS_PATH}/keys/sponsor`;
+    const response = await axios.post(
+      url,
+      {
+        type: 'ed25519',
+        derived: false,
+        allow_deletion: false,
+      },
+      {
+        headers: { 'X-Vault-Token': token },
+      },
+    );
+    if (response.status === 200) {
+      console.log('Sponsor key created or already exists');
+    }
+    // try to read the key to obtain the public key for the address
+    try {
+      const readResp = await axios.get(url, { headers: { 'X-Vault-Token': token } });
+      const pub = readResp.data?.data?.keys?.['1']?.public_key;
+      if (pub) {
+        const publicKey = new AlgorandEncoder().encodeAddress(Buffer.from(pub, 'base64'));
+        console.log('Sponsor public key: \n', publicKey);
+        try {
+          if (!fs.existsSync(SECRETS_DIR)) fs.mkdirSync(SECRETS_DIR, { recursive: true });
+          fs.writeFileSync(`${SECRETS_DIR}/sponsor_public_key_base64`, pub);
+          fs.writeFileSync(`${SECRETS_DIR}/sponsor_address`, publicKey);
+          console.log(`Wrote sponsor public key and address to ${SECRETS_DIR}/`);
+        } catch (err) {
+          console.error('Failed to write sponsor helper files:', err?.message || err);
+        }
+      } else {
+        console.log('Sponsor key exists but public key not available in response');
+      }
+    } catch (err) {
+      console.log('PASS/INFO: unable to read sponsor key after create:', err?.response?.data || err?.message || err);
+    }
+  } catch (error: any) {
+    // If create failed because key already exists, attempt to read it
+    console.log('PASS/INFO: sponsor key create check (create may have failed if already exists):', error?.response?.data || error?.message || error);
+    try {
+      const readUrl: string = `${VAULT_BASE_URL}/v1/${VAULT_TRANSIT_MANAGERS_PATH}/keys/sponsor`;
+      const readResp = await axios.get(readUrl, { headers: { 'X-Vault-Token': token } });
+      const pub = readResp.data?.data?.keys?.['1']?.public_key;
+      if (pub) {
+        const publicKey = new AlgorandEncoder().encodeAddress(Buffer.from(pub, 'base64'));
+        console.log('Sponsor public key: \n', publicKey);
+        try {
+          if (!fs.existsSync(SECRETS_DIR)) fs.mkdirSync(SECRETS_DIR, { recursive: true });
+          fs.writeFileSync(`${SECRETS_DIR}/sponsor_public_key_base64`, pub);
+          fs.writeFileSync(`${SECRETS_DIR}/sponsor_address`, publicKey);
+          console.log(`Wrote sponsor public key and address to ${SECRETS_DIR}/`);
+        } catch (err) {
+          console.error('Failed to write sponsor helper files:', err?.message || err);
+        }
+      } else {
+        console.log('Sponsor key exists but public key not available in response');
+      }
+    } catch (err) {
+      console.log('PASS/INFO: sponsor key read fallback failed:', err?.response?.data || err?.message || err);
+    }
   }
 }
 
@@ -361,6 +487,17 @@ async function logRoleIdAndSecretId(role_name: string, token: string, store_file
         secret_id,
       }),
     );
+
+    // Also write individual secret files for Docker secrets consumption
+    try {
+      if (!fs.existsSync(SECRETS_DIR)) fs.mkdirSync(SECRETS_DIR, { recursive: true });
+      // file names are simple and safe to reference when creating docker secrets
+      fs.writeFileSync(`${SECRETS_DIR}/${role_name}_role_id`, role_id);
+      fs.writeFileSync(`${SECRETS_DIR}/${role_name}_secret_id`, secret_id);
+      console.log(`Wrote Docker-secret helper files to ${SECRETS_DIR}/`);
+    } catch (err) {
+      console.error('Failed to write secret helper files:', err?.message || err);
+    }
 
     console.log(`\n${role_name}' - Role ID:    ->\t`, role_id);
     console.log(`'${role_name}' - Secret ID: ->\t`, secret_id);
@@ -407,6 +544,11 @@ async function main() {
     }
   }
 
+  if (!sealKeys || !sealKeys.root_token) {
+    console.error('\nERROR: vault init/unseal did not produce a root token.\nsealKeys:', sealKeys);
+    process.exit(1);
+  }
+
   console.log('\n\n------------\nVault Root Token:\n', sealKeys.root_token, '\n------------\n\n');
 
   await createACLPolicies(sealKeys.root_token);
@@ -416,8 +558,12 @@ async function main() {
   await logRoleIdAndSecretId(USERS_APP_ROLE_NAME, sealKeys.root_token, USERS_ROLE_AND_SECRET_KEYS_FILE);
   console.log('\n\n\nMANAGER SECRETS\n-----');
   await logRoleIdAndSecretId(MANAGERS_APP_ROLE_NAME, sealKeys.root_token, MANAGERS_ROLE_AND_SECRET_KEYS_FILE);
+  console.log('\n\n\nSPONSOR SECRETS\n-----');
+  await logRoleIdAndSecretId(SPONSOR_APP_ROLE_NAME, sealKeys.root_token, SPONSOR_ROLE_AND_SECRET_KEYS_FILE);
   console.log('\n\n\nMANAGER ALGORAND PUBLIC ADDRESS\n------');
   await getOrCreateManager(sealKeys.root_token);
+  // Ensure sponsor key exists for limited signing
+  await getOrCreateSponsorKey(sealKeys.root_token);
 }
 
 // Run main function

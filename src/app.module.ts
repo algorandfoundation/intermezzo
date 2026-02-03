@@ -4,10 +4,11 @@ import { ConfigModule } from '@nestjs/config';
 import { VaultModule } from './vault/vault.module';
 import { ChainModule } from './chain/chain.module';
 import { AuthModule } from './auth/auth.module';
+import { SignalClientModule } from './liquid-auth/signal-client.module';
 
 @Module({
-  imports: [ConfigModule.forRoot(), AuthModule, WalletModule, VaultModule, ChainModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), AuthModule, WalletModule, VaultModule, ChainModule, SignalClientModule],
   controllers: [],
   providers: [],
 })
-export class AppModule {}
+export class AppModule { }

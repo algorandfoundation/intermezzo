@@ -28,7 +28,7 @@ import { AssetHolding } from 'src/chain/algo-node-responses';
   description: 'Unauthorized',
 })
 export class Wallet {
-  constructor(private readonly walletService: WalletService) {}
+  constructor(private readonly walletService: WalletService) { }
 
   // Endpoint to get user details
   @Get('wallet/users/:user_id/')

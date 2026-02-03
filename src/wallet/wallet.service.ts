@@ -14,7 +14,7 @@ export class WalletService {
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
     private readonly configService: ConfigService,
-  ) {}
+  ) { }
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
