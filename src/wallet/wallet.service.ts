@@ -10,6 +10,8 @@ import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
+import { SponsorRequestDto } from './sponsor-request.dto';
+import { SponsorResponseDto } from './sponsor-response.dto';
 @Injectable()
 export class WalletService {
   constructor(
@@ -543,5 +545,75 @@ export class WalletService {
     const txid = (await this.chainService.submitTransaction(signedTxs)).txid;
 
     return txid;
+  }
+
+  /**
+   * Sponsors a transaction group by signing the manager's fee transaction.
+   *
+   * The client provides a complete transaction group where user transactions have fee=0
+   * and includes an unsigned manager fee transaction. This method validates the group
+   * and signs only the manager's transaction.
+   *
+   * @param vault_token The token used to authenticate with the vault
+   * @param sponsorRequestDto The request containing base64-encoded transactions
+   * @returns SponsorResponseDto with transactions and signed_by_manager flags
+   */
+  async sponsorTransactionGroup(
+    vault_token: string,
+    sponsorRequestDto: SponsorRequestDto,
+  ): Promise<SponsorResponseDto> {
+    const { transactions: base64Transactions } = sponsorRequestDto;
+
+    if (!base64Transactions || base64Transactions.length === 0) {
+      throw new Error('Transactions array is required and must not be empty');
+    }
+
+    // Decode transactions from base64
+    const transactions = this.chainService.decodeBase64Transactions(base64Transactions);
+
+    // Get manager address
+    const managerPublicKey = await this.vaultService.getManagerPublicKey(vault_token);
+    const managerAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+
+    // Validate all transactions have the same group ID
+    const groupIds = transactions.map((tx) => this.chainService.getTransactionGroupId(tx));
+    const firstGroupId = groupIds[0];
+    const allSameGroup = groupIds.every((id) => id === firstGroupId);
+
+    if (!allSameGroup) {
+      throw new Error('All transactions must belong to the same group');
+    }
+
+    if (!firstGroupId) {
+      throw new Error('Transactions must be grouped');
+    }
+
+    // Find manager transactions and sign them
+    const signedTransactions: string[] = [];
+    let managerTxFound = false;
+
+    for (const tx of transactions) {
+      const sender = this.chainService.getTransactionSender(tx);
+      const isManagerTx = sender === managerAddress;
+
+      if (isManagerTx) {
+        managerTxFound = true;
+        // Sign the manager transaction - signature is embedded in the transaction bytes
+        const signedTx = await this.signTxAsManager(tx, vault_token);
+        signedTransactions.push(Buffer.from(signedTx).toString('base64'));
+      } else {
+        // Return user transaction as-is (unsigned)
+        signedTransactions.push(Buffer.from(tx).toString('base64'));
+      }
+    }
+
+    if (!managerTxFound) {
+      throw new Error('No manager transaction found in the group');
+    }
+
+    return {
+      transactions: signedTransactions,
+      group_id: firstGroupId,
+    };
   }
 }

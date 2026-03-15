@@ -25,6 +25,8 @@ import { AppCallRequestDto } from './app-call-request.dto';
 import { AppCallResponseDto } from './app-call-response.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { GroupResponseDto } from './group-response.dto';
+import { SponsorRequestDto } from './sponsor-request.dto';
+import { SponsorResponseDto } from './sponsor-response.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -278,5 +280,29 @@ export class Wallet {
     return {
       group_id: await this.walletService.groupTransaction(request.vault_token, groupRequestDto),
     };
+  }
+
+  // Sponsor Transaction Group
+  @Post('wallet/transactions/sponsor/')
+  @ApiOperation({
+    summary: 'Sponsor Transaction Group',
+    description:
+      "Sponsor a transaction group by signing the manager's fee transaction. The client provides a complete transaction group where user transactions have fee=0 and includes an unsigned manager fee transaction. This endpoint validates the group and signs only the manager's transaction.",
+  })
+  @ApiCreatedResponse({
+    description: 'The manager fee transaction has been successfully signed.',
+    type: SponsorResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async sponsorTxGroup(
+    @Request() request: any,
+    @Body() sponsorRequestDto: SponsorRequestDto,
+  ): Promise<SponsorResponseDto> {
+    return await this.walletService.sponsorTransactionGroup(request.vault_token, sponsorRequestDto);
   }
 }
