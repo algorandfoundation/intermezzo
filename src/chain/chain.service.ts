@@ -67,6 +67,43 @@ export class ChainService {
     return grouped;
   }
 
+  /**
+   * Decodes an array of base64-encoded transactions to Uint8Array.
+   *
+   * @param txs Array of base64-encoded transaction strings
+   * @returns Array of Uint8Array transactions
+   */
+  decodeBase64Transactions(txs: string[]): Uint8Array[] {
+    return txs.map((tx) => new Uint8Array(Buffer.from(tx, 'base64')));
+  }
+
+  /**
+   * Extracts the sender address from a transaction.
+   *
+   * @param tx The transaction as Uint8Array
+   * @returns The sender address as a string
+   */
+  getTransactionSender(tx: Uint8Array): string {
+    const encoder = new AlgorandEncoder();
+    const decodedTx = encoder.decodeTransaction(tx);
+    return encoder.encodeAddress(Buffer.from(decodedTx.snd));
+  }
+
+  /**
+   * Extracts the group ID from a transaction.
+   *
+   * @param tx The transaction as Uint8Array
+   * @returns The group ID as a base64 string, or undefined if no group
+   */
+  getTransactionGroupId(tx: Uint8Array): string | undefined {
+    const encoder = new AlgorandEncoder();
+    const decodedTx = encoder.decodeTransaction(tx);
+    if (decodedTx.grp) {
+      return Buffer.from(decodedTx.grp).toString('base64');
+    }
+    return undefined;
+  }
+
   async craftAssetCreateTx(
     creatorAddress: string,
     options: {

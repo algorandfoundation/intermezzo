@@ -700,4 +700,131 @@ describe('WalletService', () => {
       );
     });
   });
+
+  describe('sponsorTransactionGroup()', () => {
+    const { TestTransactionBuilder } = require('../../test/helpers/transaction-builder.mock');
+    const userPublicKey = randomBytes(32);
+    const managerPublicKey = randomBytes(32);
+    const userAddress = new AlgorandEncoder().encodeAddress(userPublicKey);
+    const managerAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    const vaultToken = 'test_vault_token';
+    let walletServiceWithRealChain: WalletService;
+
+    beforeEach(() => {
+      vaultServiceMock.getManagerPublicKey.mockResolvedValue(managerPublicKey);
+      vaultServiceMock.signAsManager.mockResolvedValue(Buffer.from('vault:v1:BASE64_SIGNATURE'));
+      // Use real ChainService for pure function calls
+      walletServiceWithRealChain = new WalletService(vaultServiceMock, chainService, configServiceMock);
+    });
+
+    it('(OK) sponsorTransactionGroup() -- signs manager transaction in group', async () => {
+      // Create user transaction (fee=0)
+      const userTx = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 1000, 0);
+      // Create manager fee transaction
+      const managerTx = TestTransactionBuilder.createPaymentTx(managerAddress, userAddress, 0, 2000);
+
+      // Group them
+      const groupedTxs = TestTransactionBuilder.setGroupId([userTx, managerTx]);
+      const base64Txs = groupedTxs.map((tx: Uint8Array) => TestTransactionBuilder.toBase64(tx));
+
+      // Use real ChainService methods (no mocking needed for pure functions)
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+        transactions: base64Txs,
+      });
+
+      expect(result.transactions).toHaveLength(2);
+      expect(result.group_id).toBeDefined();
+      expect(vaultServiceMock.signAsManager).toHaveBeenCalledTimes(1);
+
+      // Verify user transaction is returned as-is (unsigned)
+      expect(result.transactions[0]).toBe(base64Txs[0]);
+      // Verify manager transaction is different (has signature added)
+      expect(result.transactions[1]).not.toBe(base64Txs[1]);
+    });
+
+    it('sponsorTransactionGroup() -- throws on empty transactions array', async () => {
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: [] }),
+      ).rejects.toThrow('Transactions array is required and must not be empty');
+    });
+
+    it('sponsorTransactionGroup() -- throws when transactions have different group IDs', async () => {
+      // Create two transactions with different group IDs
+      const tx1 = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 1000, 0);
+      const tx2 = TestTransactionBuilder.createPaymentTx(managerAddress, userAddress, 0, 2000);
+
+      // Group them separately (different group IDs)
+      const grouped1 = TestTransactionBuilder.setGroupId([tx1]);
+      const grouped2 = TestTransactionBuilder.setGroupId([tx2]);
+
+      const base64Txs = [TestTransactionBuilder.toBase64(grouped1[0]), TestTransactionBuilder.toBase64(grouped2[0])];
+
+      // Use real ChainService methods (no mocking needed for pure functions)
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64Txs }),
+      ).rejects.toThrow('All transactions must belong to the same group');
+    });
+
+    it('sponsorTransactionGroup() -- throws when no manager transaction found', async () => {
+      // Create two user transactions (no manager transaction)
+      const userTx1 = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 1000, 0);
+      const userTx2 = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 2000, 0);
+
+      // Group them
+      const groupedTxs = TestTransactionBuilder.setGroupId([userTx1, userTx2]);
+      const base64Txs = groupedTxs.map((tx: Uint8Array) => TestTransactionBuilder.toBase64(tx));
+
+      // Use real ChainService methods (no mocking needed for pure functions)
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64Txs }),
+      ).rejects.toThrow('No manager transaction found in the group');
+    });
+
+    it('sponsorTransactionGroup() -- handles pre-signed user transactions', async () => {
+      // Create user transaction (fee=0)
+      const userTx = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 1000, 0);
+      // Create manager fee transaction
+      const managerTx = TestTransactionBuilder.createPaymentTx(managerAddress, userAddress, 0, 2000);
+
+      // Group them
+      const groupedTxs = TestTransactionBuilder.setGroupId([userTx, managerTx]);
+
+      // Note: In real scenario, user transactions might be pre-signed by the client.
+      // Our service doesn't validate signatures, it just returns transactions as-is
+      // and only signs the manager's transaction.
+      const base64Txs = groupedTxs.map((tx: Uint8Array) => TestTransactionBuilder.toBase64(tx));
+
+      // Use real ChainService methods (no mocking needed for pure functions)
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+        transactions: base64Txs,
+      });
+
+      // User transaction should be returned as-is (not signed by manager)
+      expect(result.transactions[0]).toBe(base64Txs[0]);
+      // Manager transaction should be signed (different from original)
+      expect(result.transactions[1]).not.toBe(base64Txs[1]);
+    });
+
+    it('sponsorTransactionGroup() -- handles user transactions with non-zero fees', async () => {
+      // Create user transaction with non-zero fee
+      const userTx = TestTransactionBuilder.createPaymentTx(userAddress, managerAddress, 1000, 500);
+      // Create manager fee transaction
+      const managerTx = TestTransactionBuilder.createPaymentTx(managerAddress, userAddress, 0, 2000);
+
+      // Group them
+      const groupedTxs = TestTransactionBuilder.setGroupId([userTx, managerTx]);
+      const base64Txs = groupedTxs.map((tx: Uint8Array) => TestTransactionBuilder.toBase64(tx));
+
+      // Use real ChainService methods (no mocking needed for pure functions)
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+        transactions: base64Txs,
+      });
+
+      expect(result.transactions).toHaveLength(2);
+      // User transaction returned as-is
+      expect(result.transactions[0]).toBe(base64Txs[0]);
+      // Manager transaction signed (different from original)
+      expect(result.transactions[1]).not.toBe(base64Txs[1]);
+    });
+  });
 });

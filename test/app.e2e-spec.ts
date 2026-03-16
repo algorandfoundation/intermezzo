@@ -7,6 +7,7 @@ import { randomBytes } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
 import { HttpService } from '@nestjs/axios';
+import { AlgorandEncoder, AlgorandTransactionCrafter } from '@algorandfoundation/algo-models';
 
 const APP_BASE_URL = 'http://localhost:3000/v1';
 const VAULT_BASE_URL = 'http://localhost:8200';
@@ -949,6 +950,106 @@ describe('App E2E', () => {
 
       expect(response.status).toBe(201);
       expect(typeof response.data.group_id).toEqual('string');
+    }, 60000);
+  });
+
+  describe('Sponsor Transaction Group', () => {
+    let userAddress: string;
+    let managerAddress: string;
+    let accessToken: string;
+
+    beforeAll(async () => {
+      // Login as manager
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      accessToken = await signInToPawn(vaultToken);
+
+      // Create a user
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      userAddress = createUserResponse.data.public_address;
+
+      // Get manager address
+      const managerResponse = await axios.get(`${APP_BASE_URL}/wallet/manager/`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      managerAddress = managerResponse.data.public_address;
+    }, 60000);
+
+    it('(OK) Can sponsor a transaction group with manager fee', async () => {
+      // Inline helper functions for transaction building
+      const genesisId = 'testnet-v1.0';
+      const genesisHash = 'SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=';
+      const lastRound = BigInt(1000);
+      const encoder = new AlgorandEncoder();
+
+      // Create a payment transaction
+      const createPaymentTx = (
+        sender: string,
+        receiver: string,
+        amount: number,
+        fee: number = 0,
+        groupId?: Uint8Array,
+      ): Uint8Array => {
+        const crafter = new AlgorandTransactionCrafter(genesisId, genesisHash);
+        const transactionBuilder = crafter
+          .pay(amount, sender, receiver)
+          .addFee(fee)
+          .addFirstValidRound(lastRound)
+          .addLastValidRound(lastRound + BigInt(1000));
+        const tx = transactionBuilder.get();
+        if (groupId) {
+          tx.grp = groupId;
+        }
+        return encoder.encodeTransaction(tx);
+      };
+
+      // Group transactions together by computing and setting a group ID
+      const setGroupId = (txs: Uint8Array[]): Uint8Array[] => {
+        const groupId = encoder.computeGroupId(txs);
+        const grouped: Uint8Array[] = [];
+        for (const txn of txs) {
+          const decodedTx = encoder.decodeTransaction(txn);
+          decodedTx.grp = groupId;
+          grouped.push(encoder.encodeTransaction(decodedTx));
+        }
+        return grouped;
+      };
+
+      // Convert transaction to base64 string
+      const toBase64 = (tx: Uint8Array): string => Buffer.from(tx).toString('base64');
+
+      // Step 1: Create transaction group
+      // User transaction with fee=0
+      const userTx = createPaymentTx(userAddress, managerAddress, 1000, 0);
+      // Manager fee transaction to cover the fees
+      const managerFeeTx = createPaymentTx(managerAddress, userAddress, 0, 2000);
+
+      // Group them together
+      const groupedTxs = setGroupId([userTx, managerFeeTx]);
+      const base64Txs = groupedTxs.map((tx) => toBase64(tx));
+
+      // Step 2: Call sponsor endpoint
+      const response = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+        { transactions: base64Txs },
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+
+      // Step 3: Verify response
+      expect(response.status).toBe(201);
+      expect(response.data.transactions).toHaveLength(2);
+      expect(response.data.group_id).toBeDefined();
+
+      // Step 4: Verify manager transaction is now signed (different from original)
+      // The signed transaction will have different bytes due to the signature
+      expect(response.data.transactions[1]).not.toBe(base64Txs[1]);
+
+      // Step 5: Verify user transaction is unchanged (returned as-is)
+      expect(response.data.transactions[0]).toBe(base64Txs[0]);
     }, 60000);
   });
 });
