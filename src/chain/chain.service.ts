@@ -80,6 +80,7 @@ export class ChainService {
       reserveAddress?: string;
       freezeAddress?: string;
       clawbackAddress?: string;
+      assetId?: number;
     },
   ): Promise<Uint8Array> {
     const crafter = this.getCrafter();
@@ -95,6 +96,7 @@ export class ChainService {
     if (options.reserveAddress) paramsBuilder.addReserveAddress(options.reserveAddress);
     if (options.freezeAddress) paramsBuilder.addFreezeAddress(options.freezeAddress);
     if (options.clawbackAddress) paramsBuilder.addClawbackAddress(options.clawbackAddress);
+    
 
     const params = paramsBuilder.get();
     if (options.url) params.au = options.url;
@@ -104,6 +106,10 @@ export class ChainService {
       .addFee(suggested_params.minFee)
       .addFirstValidRound(suggested_params.lastRound)
       .addLastValidRound(suggested_params.lastRound + 1000n);
+
+    if (options.assetId) {
+      transactionBuilder.addAssetId(options.assetId);
+    }
 
     return transactionBuilder.get().encode();
   }
@@ -516,6 +522,7 @@ export class ChainService {
     const response = await this.makeAlgoNodeRequest('v2/status', 'GET');
     return BigInt(response['last-round']);
   }
+
 
   /**
    * Submits a transaction or transactions to the Algorand network.

@@ -72,10 +72,28 @@ describe('App E2E', () => {
     return manager_detail_response.data.public_address;
   };
 
+  const getUserAddress = async (userId: string) => {
+    const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+    const accessToken = await signInToPawn(vaultToken);
+
+    const user_detail_response = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return user_detail_response.data.public_address;
+  };
+
   // Function to get account detail
   const getAccountDetail = async (address: string) => {
     const chainService = new ChainService(new ConfigService(), new HttpService());
     return await chainService.getAccountDetail(address);
+  };
+
+  const getTransaction = async (transactionId: string) => {
+    const indexerBaseUrl = process.env.ALGORAND_INDEXER_BASE_URL ?? 'https://testnet-idx.4160.nodely.dev';
+    const response = await axios.get(`${indexerBaseUrl}/v2/transactions/${transactionId}`, {
+      headers: { accept: 'application/json' },
+    });
+    return response.data;
   };
 
   describe('AUTH', () => {
@@ -265,7 +283,7 @@ describe('App E2E', () => {
      * @property {string} freezeAddress - The address of the asset freeze.
      * @property {string} clawbackAddress - The address of the asset clawback.
      */
-    const assetData = {
+    var assetData = {
       total: 100000,
       decimals: 0,
       defaultFrozen: false,
@@ -276,12 +294,16 @@ describe('App E2E', () => {
       reserveAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       freezeAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       clawbackAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      fromUserId: '',
+      assetId: 0
     };
 
     // Test to verify that a user with the manager role can create an asset
     it('(OK) Can create with manager role', async () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'manager';
 
       try {
         const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
@@ -295,12 +317,34 @@ describe('App E2E', () => {
           `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
         );
       }
-    }, 60000);
-
-    // Test to verify that a user with the user role cannot create an asset
-    it('(FAIL) Can not create with user role', async () => {
+    }, 60000); 
+    
+    it('(OK) Can create with user role and user as signer', async () => {
       const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
       const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'test_user';
+
+      try {
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(201); // HTTP 201 Created
+        expect(typeof response.data.transaction_id).toEqual('string');
+      } catch {
+        throw new Error(
+          `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getUserAddress('test_user')}\nYou can use https://bank.testnet.algorand.network/`,
+        );
+      }
+    }, 60000); 
+
+    // Test to verify that a user with the user role cannot create an asset
+    it('(FAIL) Can not create with user role and manager as signer', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'manager';
 
       await expect(
         axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
@@ -308,6 +352,46 @@ describe('App E2E', () => {
         }),
       ).rejects.toMatchObject({ response: { status: 403 } }); // HTTP 403 Forbidden
     }, 60000);
+
+    it('(OK) Can manage asset ACL', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'manager';
+      assetData.managerAddress = await getManagerAddress();
+
+      try {
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(201); // HTTP 201 Created
+        expect(typeof response.data.transaction_id).toEqual('string');
+
+        const transaction = await getTransaction(response.data.transaction_id);
+
+        expect(typeof transaction.transaction['created-asset-index']).toEqual('number');
+        
+        assetData.assetId = transaction.transaction['created-asset-index'];
+        assetData.clawbackAddress = await getUserAddress('test_user');
+
+
+        const response2 = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response2.status).toBe(201); // HTTP 201 Created
+        expect(typeof response2.data.transaction_id).toEqual('string');
+        
+
+      } catch {
+        throw new Error(
+          `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
+        );
+      }
+
+      
+    }, 60000); 
   });
 
   describe('Transfer Algo', () => {

@@ -139,10 +139,13 @@ export class WalletService {
   }
 
   async createAsset(options: CreateAssetDto, vault_token: string) {
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
-    const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(managerPublicAddress, options);
-    const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(tx, vault_token);
+    const fromAddress = await this.getFromAddress(options.fromUserId, vault_token);
+    
+    const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(fromAddress, options);
+    const signedTx: Uint8Array<ArrayBufferLike> =
+      options.fromUserId === 'manager'
+        ? await this.signTxAsManager(tx, vault_token)
+        : await this.signTxAsUser(options.fromUserId, tx, vault_token);
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
 
     return transactionId;
@@ -543,5 +546,17 @@ export class WalletService {
     const txid = (await this.chainService.submitTransaction(signedTxs)).txid;
 
     return txid;
+  }
+
+  async getFromAddress(userId: any, vault_token: string): Promise<string> {
+    if (userId == 'manager') {
+      const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+      const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+      return managerPublicAddress;
+    } else {
+      const userPublicKey: Buffer = await this.vaultService.getUserPublicKey(userId, vault_token);
+      const userPublicAddress: string = new AlgorandEncoder().encodeAddress(userPublicKey);
+      return userPublicAddress;
+    }
   }
 }
