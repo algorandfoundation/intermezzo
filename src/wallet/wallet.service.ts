@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, HttpException } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { ChainService } from '../chain/chain.service';
 import { CreateAssetDto } from './create-asset.dto';
@@ -177,6 +177,9 @@ export class WalletService {
         fromAddress = (await this.getUserInfo(fromUserId, vault_token)).public_address;
       }
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       throw new Error(`Failed to get from address for user ${fromUserId}: ${error.message}`);
     }
 
@@ -202,6 +205,9 @@ export class WalletService {
       // submit transaction
       return (await this.chainService.submitTransaction(signedTx)).txid;
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
     }
   }
@@ -216,6 +222,7 @@ export class WalletService {
    *
    * @param assetId The ID of the asset to be transferred.
    * @param userId The ID of the user receiving the asset.
+   * @param fromUserId The ID of the user sending the asset.
    * @param amount The amount of the asset to be transferred.
    * @param lease An optional 32 byte lease encoded as base64.
    * @param note An optional transaction note.
@@ -226,13 +233,14 @@ export class WalletService {
     vault_token: string,
     assetId: bigint,
     userId: string,
+    fromUserId: string,
     amount: number,
     lease?: string,
     note?: string,
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    
+    const fromAddress = await this.getFromAddress(fromUserId, vault_token)
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -266,7 +274,7 @@ export class WalletService {
     if (willPaymentTx) {
       unSignedTxs.push(
         await this.chainService.craftPaymentTx(
-          managerPublicAddress,
+          fromAddress,
           userPublicAddress,
           userExtraAlgoNeed,
           suggested_params,
@@ -288,7 +296,7 @@ export class WalletService {
     }
     unSignedTxs.push(
       await this.chainService.craftAssetTransferTx(
-        managerPublicAddress,
+        fromAddress,
         userPublicAddress,
         assetId,
         amount,
@@ -309,16 +317,17 @@ export class WalletService {
       const encoder: AlgorandEncoder = new AlgorandEncoder();
       const isUserTx: boolean =
         encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == userPublicAddress;
-      const isManagerTx: boolean =
-        encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == managerPublicAddress;
+      // const isManagerTx: boolean =
+      //   encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == managerPublicAddress;
 
       if (isUserTx) {
         signedTxs.push(await this.signTxAsUser(userId, tx, vault_token));
-      } else if (isManagerTx) {
-        signedTxs.push(await this.signTxAsManager(tx, vault_token));
       } else {
-        throw new Error('Invalid sender');
-      }
+        signedTxs.push(fromUserId == 'manager'? await this.signTxAsManager(tx, vault_token) : await this.signTxAsUser(fromUserId, tx, vault_token));
+      } 
+      // else {
+      //   throw new Error('Invalid sender');
+      // }
     }
 
     return (await this.chainService.submitTransaction(signedTxs)).txid;

@@ -165,6 +165,7 @@ export class Wallet {
         request.vault_token,
         assetTransferRequestDto.assetId,
         assetTransferRequestDto.userId,
+        assetTransferRequestDto.fromUserId,
         assetTransferRequestDto.amount,
         assetTransferRequestDto.lease,
         assetTransferRequestDto.note,

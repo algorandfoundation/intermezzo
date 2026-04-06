@@ -17,6 +17,13 @@ export class AssetTransferRequestDto {
   })
   userId: string;
 
+  @IsString()
+  @ApiProperty({
+    example: '1234',
+    description: 'The id of the User / Manager who transfers the Asset',
+  })
+  fromUserId: string;
+
   @IsNumber()
   @ApiProperty({
     example: 10,
