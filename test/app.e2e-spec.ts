@@ -349,11 +349,14 @@ describe('App E2E', () => {
 
       try {
 
-          const fundUserWallet = await axios.post(
+        const fundUserWallet = await axios.post(
           `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
           { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 201000 },
           { headers: { Authorization: `Bearer ${managerAccessToken}` } },
         );
+
+        expect(fundUserWallet.status).toBe(201)
+        expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
 
         assetData.fromUserId = userId
 
@@ -425,7 +428,7 @@ describe('App E2E', () => {
     }, 60000); 
   });
 
-  describe('Transfer Algo', () => {
+  describe.only('Transfer Algo', () => {
     it('(OK) transfer algo to address from manager', async () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const managerAccessToken = await signInToPawn(vaultToken);
@@ -449,9 +452,55 @@ describe('App E2E', () => {
       expect(userDetailResponse.status).toBe(200);
       expect(userDetailResponse.data.algoBalance).toBe('1000000');
     }, 60000);
+
+    it('(FAIL) User role cannot transfer algo with manager as signer', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { createUserResponse } = await createNewUser(managerAccessToken);
+
+      await expect(
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+          { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 100000 },
+          { headers: { Authorization: `Bearer ${userAccessToken}` } },
+        ),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    }, 60000);
+
+    it('(OK) User role can transfer algo with user as signer', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { userId: senderUserId, createUserResponse: senderUser } = await createNewUser(managerAccessToken);
+      const { createUserResponse: receiverUser } = await createNewUser(managerAccessToken);
+
+      // Fund sender so they can pay the transfer fee and amount.
+      const fundResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: senderUser.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundResponse.status).toBe(201);
+
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: senderUserId, toAddress: receiverUser.data.public_address, amount: 100000 },
+        { headers: { Authorization: `Bearer ${userAccessToken}` } },
+      );
+
+      expect(transferResponse.status).toBe(201);
+      expect(typeof transferResponse.data.transaction_id).toEqual('string');
+    }, 60000);
   });
 
-  describe('Transfer Asset', () => {
+  describe('Transfer asset with the manager as the signer', () => {
     /**
      * Represents the data structure for an asset transfer.
      *
@@ -465,6 +514,7 @@ describe('App E2E', () => {
       userId: 'test-user-id',
       amount: 1,
       lease: undefined,
+      fromUserId: 'manager'
     };
 
     let assetId: bigint | number;
@@ -593,6 +643,179 @@ describe('App E2E', () => {
       assetTransferRequestData.assetId = Number(assetId);
       assetTransferRequestData.userId = userId;
       assetTransferRequestData.amount = 2;
+
+      // Adds a lease to the transaction to prevent replay and conflicting transactions.
+      // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
+      // ensuring only one transaction with that lease can be confirmed during that window.
+      // Use a consistent lease value if retrying or managing exclusivity; generating a new random lease each time
+      // prevents replay but won't prevent conflicting submissions.
+      // To generate a lease: Buffer.from(crypto.randomBytes(32)).toString('base64')
+      assetTransferRequestData.lease = Buffer.from(randomBytes(32)).toString('base64');
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+      assetTransferRequestData.amount = 3;
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 400 } });
+    }, 60000);
+  });
+
+  describe('Transfer asset with the user as the signer', () => {
+    /**
+     * Represents the data structure for an asset transfer.
+     *
+     * @property {bigint} assetId - The ID of the asset to be transferred.
+     * @property {string} userId - The ID of the user receiving the asset.
+     * @property {number} amount - The amount of the asset to be transferred
+     * @property {string} lease - The transaction lease to be attached to the asset transfer transaction.
+     */
+    const assetTransferRequestData = {
+      assetId: 1,
+      userId: 'test-user-id',
+      amount: 1,
+      lease: undefined,
+      fromUserId: 'user'
+    };
+
+    let assetId: bigint | number;
+    let managerAccessToken: string;
+
+    beforeAll(async () => {
+      // before all tests, create an asset and set assetId
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+
+      const fundUserWallet = await axios.post(
+          `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+          { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
+          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        );
+
+      expect(fundUserWallet.status).toBe(201)
+      expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
+
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        fromUserId: userId,
+        url: 'https://example.com',
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
+      
+
+      const userDetail = await getAccountDetail(createUserResponse.data.public_address);
+      assetId = userDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (assetId == 0) {
+        throw new Error('User does not have asset to testing transfer.');
+      }
+
+      assetTransferRequestData.fromUserId = userId;
+      
+
+    }, 60000);
+
+    afterAll(() => {
+      assetTransferRequestData.amount = 1;
+      assetTransferRequestData.lease = undefined;
+    });
+
+    it('(OK) transfer asset', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+      // assetTransferRequestData.fromUserId = fromUserId;
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+
+      const response2 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      );
+      expect(response2.status).toBe(201); // HTTP 201 Created
+      expect(typeof response2.data.transaction_id).toEqual('string');
+
+      // ############################################################
+      // Check if the asset is transferred to the user by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(`${APP_BASE_URL}/wallet/assets/${userId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0);
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(assetTransferRequestData.assetId);
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(assetTransferRequestData.amount * 2);
+      // ############################################################
+    }, 60000);
+
+
+    it('(FAIL) can not transfer asset twice with same lease', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+      assetTransferRequestData.amount = 2;
+      // assetTransferRequestData.fromUserId = fromUserId;
 
       // Adds a lease to the transaction to prevent replay and conflicting transactions.
       // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
