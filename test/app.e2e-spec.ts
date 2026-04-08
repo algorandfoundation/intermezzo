@@ -428,7 +428,7 @@ describe('App E2E', () => {
     }, 60000); 
   });
 
-  describe.only('Transfer Algo', () => {
+  describe('Transfer Algo', () => {
     it('(OK) transfer algo to address from manager', async () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const managerAccessToken = await signInToPawn(vaultToken);
@@ -859,6 +859,7 @@ describe('App E2E', () => {
     const assetClawbackRequestData = {
       assetId: 1,
       userId: 'test-user-id',
+      fromUserId: 'manager',
       amount: 1,
     };
 
@@ -979,6 +980,87 @@ describe('App E2E', () => {
       ).rejects.toMatchObject({ response: { status: 403 } });
     }, 60000);
 
+    it('(OK) clawback asset with user role and user as signer', async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create a user who will be set as the asset clawback address (and signer)
+      const { userId: clawbackUserId, createUserResponse: clawbackUser } = await createNewUser(managerAccessToken);
+      expect(clawbackUser.status).toBe(201);
+
+      // Create a target user who will receive the asset and then be clawed back
+      const { userId: targetUserId, createUserResponse: targetUser } = await createNewUser(managerAccessToken);
+      expect(targetUser.status).toBe(201);
+
+      // Ensure clawback user has enough ALGO to pay transaction fees
+      const fundClawbackUser = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: clawbackUser.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundClawbackUser.status).toBe(201);
+
+      const managerAddress = await getManagerAddress();
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        fromUserId: 'manager',
+        clawbackAddress: clawbackUser.data.public_address,
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201);
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      const newAssetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (newAssetId == 0) {
+        throw new Error('Manager does not have asset to testing clawback.');
+      }
+
+      // Ensure the clawback user is opted in (receiver must be opted-in for clawback to succeed)
+      const optInClawbackUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: clawbackUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(optInClawbackUserResponse.status).toBe(201);
+
+      // Transfer one unit of the asset to the target user
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(transferResponse.status).toBe(201);
+
+      // Login with user role and clawback as the clawback user
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const clawbackResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: clawbackUserId, amount: 1 },
+        { headers: { Authorization: `Bearer ${userAccessToken}` } },
+      );
+      expect(clawbackResponse.status).toBe(201);
+      expect(typeof clawbackResponse.data.transaction_id).toEqual('string');
+
+      // Verify the target user no longer holds the asset
+      const targetAssets = await axios.get(`${APP_BASE_URL}/wallet/assets/${targetUserId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(targetAssets.status).toBe(200);
+      const holding = (targetAssets.data.assets ?? []).find((a: any) => a['asset-id'] === Number(newAssetId));
+      expect(holding?.amount ?? 0).toEqual(0);
+    }, 60000);
+
     it('(FAIL) can not clawback asset without clawback address', async () => {
       // create asset without clawback address
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
@@ -1033,11 +1115,17 @@ describe('App E2E', () => {
   });
 
   describe('App deploy', () => {
-    it('(OK) app deploy', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
+    let managerAccessToken: string;
+    let deployedAppId = 0;
+    let userAccessToken: string;
+    let appUserId: string;
+    let userDeployedAppId = 0;
 
-      const appCallRequestData = {
+    beforeAll(async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(vaultToken);
+
+      const appCreateRequestData = {
         approvalProgram:
           'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
         clearProgram: 'CoEBQw==',
@@ -1049,22 +1137,64 @@ describe('App E2E', () => {
         fromUserId: 'manager',
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCreateRequestData, {
         headers: { Authorization: `Bearer ${managerAccessToken}` },
       });
-
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
+
+      const transaction = await getTransaction(response.data.transaction_id);
+      deployedAppId = transaction.transaction['created-application-index'] ?? 0;
+      expect(typeof deployedAppId).toEqual('number');
+      expect(deployedAppId).toBeGreaterThan(0);
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+      appUserId = userId;
+
+      const fundUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundUserResponse.status).toBe(201);
+
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      userAccessToken = await signInToPawn(userVaultToken);
+
+      const userAppCreateRequestData = {
+        approvalProgram:
+          'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
+        clearProgram: 'CoEBQw==',
+        globalByteSlices: 1,
+        globalInts: 1,
+        localByteSlices: 0,
+        localInts: 0,
+        onComplete: 0,
+        fromUserId: appUserId,
+      };
+
+      const userCreateResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, userAppCreateRequestData, {
+        headers: { Authorization: `Bearer ${userAccessToken}` },
+      });
+      expect(userCreateResponse.status).toBe(201);
+      expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
+
+      const userCreateTxn = await getTransaction(userCreateResponse.data.transaction_id);
+      userDeployedAppId = userCreateTxn.transaction['created-application-index'] ?? 0;
+      expect(typeof userDeployedAppId).toEqual('number');
+      expect(userDeployedAppId).toBeGreaterThan(0);
     }, 60000);
-  });
 
-  describe('App abi method call with string args', () => {
+    afterAll(() => {
+      deployedAppId = 0;
+      userDeployedAppId = 0;
+    });
+
     it('(OK) App abi method call with string args', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
+      expect(deployedAppId).toBeGreaterThan(0);
       const appCallRequestData = {
-        appId: 754755349,
+        appId: deployedAppId,
         args: {
           name: 'hello',
           args: [
@@ -1087,15 +1217,11 @@ describe('App E2E', () => {
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
     }, 60000);
-  });
 
-  describe('App abi method call with uint64 args', () => {
     it('(OK) App abi method call with uint64 args', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
+      expect(deployedAppId).toBeGreaterThan(0);
       const appCallRequestData = {
-        appId: 754755349,
+        appId: deployedAppId,
         args: {
           name: 'add',
           args: [
@@ -1121,102 +1247,277 @@ describe('App E2E', () => {
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
     }, 60000);
-  });
 
-  describe('Group transaction (foreign Accounts and Assets)', () => {
-    it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
-      const groupRequestData = {
-        transactions: [
-          {
-            type: 'payment',
-            payload: {
-              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
-              amount: 101000,
-              fromUserId: 'manager',
-              note: 'optional note',
-              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+    it('(OK) user should able to call abi methods', async () => {
+      expect(userDeployedAppId).toBeGreaterThan(0);
+      const appCallRequestData = {
+        appId: userDeployedAppId,
+        args: {
+          name: 'hello',
+          args: [
+            {
+              type: 'string',
+              value: 'world',
             },
+          ],
+          returns: {
+            type: 'string',
           },
-          {
-            type: 'appCall',
-            payload: {
-              appId: 754755349,
-              onComplete: 0,
-              fromUserId: 'manager',
-              fee: 2000,
-              args: {
-                name: 'opt_in_token',
-                args: [
-                  { type: 'pay', value: null },
-                  { type: 'uint64', value: 723769800 },
-                ],
-                returns: { type: 'void' },
-              },
-              foreignAccounts: ['CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A'],
-              foreignAssets: [723769800],
-            },
-          },
-        ],
+        },
+        fromUserId: appUserId,
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
-        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+        headers: { Authorization: `Bearer ${userAccessToken}` },
       });
 
       expect(response.status).toBe(201);
-      expect(typeof response.data.group_id).toEqual('string');
+      expect(typeof response.data.transaction_id).toEqual('string');
+    }, 60000);
+
+    it('(FAIL) user role should not be able to call any abi method as manager', async () => {
+      const appCallRequestData = {
+        appId: deployedAppId,
+        args: {
+          name: 'hello',
+          args: [
+            {
+              type: 'string',
+              value: 'world',
+            },
+          ],
+          returns: {
+            type: 'string',
+          },
+        },
+        fromUserId: 'manager',
+      };
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } });
     }, 60000);
   });
 
-  describe('Group transaction (foreign apps and boxes)', () => {
-    it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
+  describe.only('Group transactions', () => {
+    let managerAccessToken: string;
+    let deployedAppId = 0;
+    let deployedAppAddress: string;
+    let tokenAssetId = 0;
+    let userAccessToken: string;
+    let groupUserId: string;
+    let userDeployedAppId = 0;
 
-      const groupRequestData = {
-        transactions: [
-          {
-            type: 'payment',
-            payload: {
-              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
-              amount: 100000,
-              fromUserId: 'manager',
-              note: 'optional note',
-              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
-            },
-          },
-          {
-            type: 'appCall',
-            payload: {
-              appId: 754755349,
-              onComplete: 0,
-              fromUserId: 'manager',
-              fee: 2000,
-              args: {
-                name: 'create_box_paid',
-                args: [
-                  { type: 'string', value: 'abc' },
-                  { type: 'uint64', value: 123 },
-                  { type: 'pay', value: null },
-                ],
-                returns: { type: 'void' },
-              },
-              foreignApps: [754755349],
-              boxes: [{ n: 'Ym94X2ludA==' }, { n: 'Ym94X3N0cmluZ2FiYw==' }],
-            },
-          },
-        ],
+    beforeAll(async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(vaultToken);
+
+      deployedAppId = 754755349;
+      deployedAppAddress = 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A';
+      tokenAssetId = 723769800;
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+      groupUserId = userId;
+
+      const fundUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundUserResponse.status).toBe(201);
+
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      userAccessToken = await signInToPawn(userVaultToken);
+
+      const userAppCreateRequestData = {
+        approvalProgram:
+          'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
+        clearProgram: 'CoEBQw==',
+        globalByteSlices: 1,
+        globalInts: 1,
+        localByteSlices: 0,
+        localInts: 0,
+        onComplete: 0,
+        fromUserId: groupUserId,
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
-        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      const userCreateResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, userAppCreateRequestData, {
+        headers: { Authorization: `Bearer ${userAccessToken}` },
       });
+      expect(userCreateResponse.status).toBe(201);
+      expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
 
-      expect(response.status).toBe(201);
-      expect(typeof response.data.group_id).toEqual('string');
+      const userCreateTxn = await getTransaction(userCreateResponse.data.transaction_id);
+      userDeployedAppId = userCreateTxn.transaction['created-application-index'] ?? 0;
+      expect(typeof userDeployedAppId).toEqual('number');
+      expect(userDeployedAppId).toBeGreaterThan(0);
     }, 60000);
+
+    afterAll(() => {
+      deployedAppId = 0;
+      userDeployedAppId = 0;
+    });
+
+    describe('Group transaction (foreign Accounts and Assets)', () => {
+      it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 101000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'opt_in_token',
+                  args: [
+                    { type: 'pay', value: null },
+                    { type: 'uint64', value: tokenAssetId },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignAccounts: [deployedAppAddress],
+                foreignAssets: [tokenAssetId],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (foreign apps and boxes)', () => {
+      it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 100000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'create_box_paid',
+                  args: [
+                    { type: 'string', value: 'abc' },
+                    { type: 'uint64', value: 123 },
+                    { type: 'pay', value: null },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignApps: [deployedAppId],
+                boxes: [{ n: 'Ym94X2ludA==' }, { n: 'Ym94X3N0cmluZ2FiYw==' }],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (user scoped)', () => {
+      it('(FAIL) user role should not be able to sign any group transaction as manager', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 100000,
+                fromUserId: 'manager',
+              },
+            },
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 1000,
+                fromUserId: groupUserId,
+              },
+            },
+          ],
+        };
+
+        await expect(
+          axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+            headers: { Authorization: `Bearer ${userAccessToken}` },
+          }),
+        ).rejects.toMatchObject({ response: { status: 403 } });
+      }, 60000);
+
+      it('(OK) user role should be able to submit group transaction when all txns are user-signed', async () => {
+        expect(userDeployedAppId).toBeGreaterThan(0);
+
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 1000,
+                fromUserId: groupUserId,
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: userDeployedAppId,
+                onComplete: 0,
+                fromUserId: groupUserId,
+                args: {
+                  name: 'hello',
+                  args: [{ type: 'string', value: 'world' }],
+                  returns: { type: 'string' },
+                },
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
   });
 });

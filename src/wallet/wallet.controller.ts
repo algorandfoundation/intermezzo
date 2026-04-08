@@ -230,6 +230,7 @@ export class Wallet {
         request.vault_token,
         assetClawbackRequestDto.assetId,
         assetClawbackRequestDto.userId,
+        assetClawbackRequestDto.fromUserId,
         assetClawbackRequestDto.amount,
         assetClawbackRequestDto.lease,
         assetClawbackRequestDto.note,

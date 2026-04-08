@@ -352,21 +352,30 @@ export class WalletService {
     vault_token: string,
     assetId: bigint,
     userId: string,
+    fromUserId: string,
     amount: number,
     lease?: string,
     note?: string,
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    let fromAddress: string;
+
+    try {
+      fromAddress = await this.getFromAddress(fromUserId, vault_token);
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new Error(`Failed to get from address for user ${fromUserId}: ${error.message}`);
+    }
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
     // build unsigned tx
     const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetClawbackTx(
-      managerPublicAddress,
+      fromAddress,
       userPublicAddress,
-      managerPublicAddress,
+      fromAddress,
       assetId,
       amount,
       lease,
@@ -374,9 +383,19 @@ export class WalletService {
       suggested_params,
     );
 
-    // sign tx by manager
+    let signedTx: Uint8Array<ArrayBufferLike>;
+    try {
+      signedTx =
+        fromUserId === 'manager'
+          ? await this.signTxAsManager(tx, vault_token)
+          : await this.signTxAsUser(fromUserId, tx, vault_token);
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
+    }
 
-    const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(tx, vault_token);
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
 
     return transactionId;
@@ -403,7 +422,7 @@ export class WalletService {
         fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
       }
     } catch (error) {
-      throw new Error(`Failed to get from address for user ${appCallRequestDto.fromUserId}: ${error.message}`);
+      throw error
     }
 
     const suggested_params = await this.chainService.getSuggestedParams();

@@ -217,7 +217,7 @@ export class ChainService {
   }
 
   async craftAppCallTx(
-    managerPublicAddress: string,
+    fromAddress: string,
     appCallRequestDto: AppCallRequestDto,
     suggested_params: TruncatedSuggestedParamsResponse,
     fee?: number,
@@ -226,7 +226,7 @@ export class ChainService {
       this.configService.get('GENESIS_ID'),
       this.configService.get('GENESIS_HASH'),
     );
-    builder.addSender(managerPublicAddress);
+    builder.addSender(fromAddress);
     builder.addFee(fee ?? suggested_params.minFee);
     builder.addFirstValidRound(suggested_params.lastRound);
     builder.addLastValidRound(suggested_params.lastRound + 1000n);

@@ -142,7 +142,8 @@ describe('Wallet Controller', () => {
         unitName: 'UNIT',
         assetName: 'Test Asset',
         url: 'http://example.com/asset',
-        // optional properties like managerAddress, reserveAddress etc. can be added as needed
+        fromUserId: 'manager',
+        assetId: 0,
       };
       const expectedTransactionId = 'tx123456789';
 
@@ -164,6 +165,7 @@ describe('Wallet Controller', () => {
       const assetTransferRequest: AssetTransferRequestDto = {
         assetId: 123n,
         userId: 'user456',
+        fromUserId: 'manager',
         amount: 10,
         lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
         note: 'This is my note. I am not proud of it but it is what it is.',
@@ -183,6 +185,7 @@ describe('Wallet Controller', () => {
         vaultToken,
         assetTransferRequest.assetId,
         assetTransferRequest.userId,
+        assetTransferRequest.fromUserId,
         assetTransferRequest.amount,
         assetTransferRequest.lease,
         assetTransferRequest.note,
@@ -195,9 +198,10 @@ describe('Wallet Controller', () => {
     it('should clawback an asset and return the transaction id', async () => {
       const vaultToken = 'vault-token-jkl';
       const assetClawbackRequest: AssetClawbackRequestDto = {
-        assetId: 123n,
-        userId: 'user456',
-        amount: 10,
+        assetId: 10n,
+        userId: 'user_123',
+        fromUserId: 'manager',
+        amount: 100,
         lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
         note: 'This is my note. I am not proud of it but it is what it is.',
       };
@@ -212,6 +216,7 @@ describe('Wallet Controller', () => {
         vaultToken,
         assetClawbackRequest.assetId,
         assetClawbackRequest.userId,
+        assetClawbackRequest.fromUserId,
         assetClawbackRequest.amount,
         assetClawbackRequest.lease,
         assetClawbackRequest.note,

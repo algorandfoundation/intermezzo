@@ -17,6 +17,13 @@ export class AssetClawbackRequestDto {
   })
   userId: string;
 
+  @IsString()
+  @ApiProperty({
+    example: 'manager',
+    description: 'The id of the User / Manager who signs and submits the clawback transaction',
+  })
+  fromUserId: string;
+
   @IsNumber()
   @ApiProperty({
     example: 10,
