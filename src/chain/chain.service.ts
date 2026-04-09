@@ -96,7 +96,6 @@ export class ChainService {
     if (options.reserveAddress) paramsBuilder.addReserveAddress(options.reserveAddress);
     if (options.freezeAddress) paramsBuilder.addFreezeAddress(options.freezeAddress);
     if (options.clawbackAddress) paramsBuilder.addClawbackAddress(options.clawbackAddress);
-    
 
     const params = paramsBuilder.get();
     if (options.url) params.au = options.url;
@@ -522,7 +521,6 @@ export class ChainService {
     const response = await this.makeAlgoNodeRequest('v2/status', 'GET');
     return BigInt(response['last-round']);
   }
-
 
   /**
    * Submits a transaction or transactions to the Algorand network.

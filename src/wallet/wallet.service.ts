@@ -140,7 +140,7 @@ export class WalletService {
 
   async createAsset(options: CreateAssetDto, vault_token: string) {
     const fromAddress = await this.getFromAddress(options.fromUserId, vault_token);
-    
+
     const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(fromAddress, options);
     const signedTx: Uint8Array<ArrayBufferLike> =
       options.fromUserId === 'manager'
@@ -239,8 +239,8 @@ export class WalletService {
     note?: string,
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    
-    const fromAddress = await this.getFromAddress(fromUserId, vault_token)
+
+    const fromAddress = await this.getFromAddress(fromUserId, vault_token);
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -273,12 +273,7 @@ export class WalletService {
     const unSignedTxs: Uint8Array[] = [];
     if (willPaymentTx) {
       unSignedTxs.push(
-        await this.chainService.craftPaymentTx(
-          fromAddress,
-          userPublicAddress,
-          userExtraAlgoNeed,
-          suggested_params,
-        ),
+        await this.chainService.craftPaymentTx(fromAddress, userPublicAddress, userExtraAlgoNeed, suggested_params),
       );
     }
     if (willOptInTx) {
@@ -323,8 +318,12 @@ export class WalletService {
       if (isUserTx) {
         signedTxs.push(await this.signTxAsUser(userId, tx, vault_token));
       } else {
-        signedTxs.push(fromUserId == 'manager'? await this.signTxAsManager(tx, vault_token) : await this.signTxAsUser(fromUserId, tx, vault_token));
-      } 
+        signedTxs.push(
+          fromUserId == 'manager'
+            ? await this.signTxAsManager(tx, vault_token)
+            : await this.signTxAsUser(fromUserId, tx, vault_token),
+        );
+      }
       // else {
       //   throw new Error('Invalid sender');
       // }
@@ -422,7 +421,7 @@ export class WalletService {
         fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
       }
     } catch (error) {
-      throw error
+      throw error;
     }
 
     const suggested_params = await this.chainService.getSuggestedParams();
@@ -481,7 +480,7 @@ export class WalletService {
           const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
 
           senderIds.push(value.fromUserId);
-          
+
           const tx = await this.chainService.craftAppCallTx(fromAddress, value, suggested_params, value.fee);
           unSignedTxs.push(tx);
           break;
@@ -496,7 +495,7 @@ export class WalletService {
         case 'assetTransfer': {
           const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
           senderIds.push(value.fromUserId);
-          
+
           const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
           const tx = await this.chainService.craftAssetTransferTx(
             fromAddress,

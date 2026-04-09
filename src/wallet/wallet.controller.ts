@@ -278,8 +278,7 @@ export class Wallet {
   })
   async groupTx(@Request() request: any, @Body() groupRequestDto: GroupRequestDto) {
     return {
-      group_id: await this.walletService.groupTransaction(
-        request.vault_token, groupRequestDto ),
+      group_id: await this.walletService.groupTransaction(request.vault_token, groupRequestDto),
     };
   }
 }

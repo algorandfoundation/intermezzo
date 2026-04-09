@@ -96,22 +96,22 @@ describe('App E2E', () => {
     return response.data;
   };
 
-  const createNewUser = async(managerAccessToken: string) => {
+  const createNewUser = async (managerAccessToken: string) => {
     // Create new user
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
+    const userId = randomBytes(32).toString('hex');
+    const createUserResponse = await axios.post(
+      `${APP_BASE_URL}/wallet/user/`,
+      { user_id: userId },
+      {
+        headers: {
+          Authorization: `Bearer ${managerAccessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
         },
-      );
+      },
+    );
 
-      return { userId, createUserResponse };
+    return { userId, createUserResponse };
   };
 
   describe('AUTH', () => {
@@ -313,7 +313,7 @@ describe('App E2E', () => {
       freezeAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       clawbackAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       fromUserId: '',
-      assetId: 0
+      assetId: 0,
     };
 
     // Test to verify that a user with the manager role can create an asset
@@ -335,8 +335,8 @@ describe('App E2E', () => {
           `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
         );
       }
-    }, 60000); 
-    
+    }, 60000);
+
     it('(OK) Can create with user role and user as signer', async () => {
       const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
       const accessToken = await signInToPawn(vaultToken);
@@ -346,19 +346,17 @@ describe('App E2E', () => {
 
       const { userId, createUserResponse } = await createNewUser(managerAccessToken);
 
-
       try {
-
         const fundUserWallet = await axios.post(
           `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
           { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 201000 },
           { headers: { Authorization: `Bearer ${managerAccessToken}` } },
         );
 
-        expect(fundUserWallet.status).toBe(201)
+        expect(fundUserWallet.status).toBe(201);
         expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
 
-        assetData.fromUserId = userId
+        assetData.fromUserId = userId;
 
         const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
           headers: { Authorization: `Bearer ${accessToken}` },
@@ -371,7 +369,7 @@ describe('App E2E', () => {
           `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
         );
       }
-    }, 60000); 
+    }, 60000);
 
     // Test to verify that a user with the user role cannot create an asset
     it('(FAIL) Can not create with user role and manager as signer', async () => {
@@ -405,10 +403,9 @@ describe('App E2E', () => {
         const transaction = await getTransaction(response.data.transaction_id);
 
         expect(typeof transaction.transaction['created-asset-index']).toEqual('number');
-        
+
         assetData.assetId = transaction.transaction['created-asset-index'];
         assetData.clawbackAddress = await getUserAddress('test_user');
-
 
         const response2 = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
           headers: { Authorization: `Bearer ${accessToken}` },
@@ -416,16 +413,12 @@ describe('App E2E', () => {
 
         expect(response2.status).toBe(201); // HTTP 201 Created
         expect(typeof response2.data.transaction_id).toEqual('string');
-        
-
       } catch {
         throw new Error(
           `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
         );
       }
-
-      
-    }, 60000); 
+    }, 60000);
   });
 
   describe('Transfer Algo', () => {
@@ -514,7 +507,7 @@ describe('App E2E', () => {
       userId: 'test-user-id',
       amount: 1,
       lease: undefined,
-      fromUserId: 'manager'
+      fromUserId: 'manager',
     };
 
     let assetId: bigint | number;
@@ -689,7 +682,7 @@ describe('App E2E', () => {
       userId: 'test-user-id',
       amount: 1,
       lease: undefined,
-      fromUserId: 'user'
+      fromUserId: 'user',
     };
 
     let assetId: bigint | number;
@@ -706,12 +699,12 @@ describe('App E2E', () => {
       const { userId, createUserResponse } = await createNewUser(managerAccessToken);
 
       const fundUserWallet = await axios.post(
-          `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
-          { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
-          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
-        );
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
 
-      expect(fundUserWallet.status).toBe(201)
+      expect(fundUserWallet.status).toBe(201);
       expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
 
       const assetData = {
@@ -728,8 +721,6 @@ describe('App E2E', () => {
       });
       expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
 
-      
-
       const userDetail = await getAccountDetail(createUserResponse.data.public_address);
       assetId = userDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
         assetId: 0,
@@ -739,8 +730,6 @@ describe('App E2E', () => {
       }
 
       assetTransferRequestData.fromUserId = userId;
-      
-
     }, 60000);
 
     afterAll(() => {
@@ -801,7 +790,6 @@ describe('App E2E', () => {
       expect(responseAssetHoldings.data.assets[0].amount).toEqual(assetTransferRequestData.amount * 2);
       // ############################################################
     }, 60000);
-
 
     it('(FAIL) can not transfer asset twice with same lease', async () => {
       const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
@@ -907,7 +895,7 @@ describe('App E2E', () => {
 
       const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
-      
+
       assetClawbackRequestData.assetId = Number(assetId);
       assetClawbackRequestData.userId = userId;
       // Transfer the asset
@@ -1017,9 +1005,12 @@ describe('App E2E', () => {
       expect(createAssetResponse.status).toBe(201);
 
       const managerDetail = await getAccountDetail(managerAddress);
-      const newAssetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
-        assetId: 0,
-      }).assetId;
+      const newAssetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
       if (newAssetId == 0) {
         throw new Error('Manager does not have asset to testing clawback.');
       }
@@ -1174,9 +1165,13 @@ describe('App E2E', () => {
         fromUserId: appUserId,
       };
 
-      const userCreateResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, userAppCreateRequestData, {
-        headers: { Authorization: `Bearer ${userAccessToken}` },
-      });
+      const userCreateResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/app-call/`,
+        userAppCreateRequestData,
+        {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        },
+      );
       expect(userCreateResponse.status).toBe(201);
       expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
 
@@ -1323,7 +1318,8 @@ describe('App E2E', () => {
       expect(createUserResponse.status).toBe(201);
       groupUserId = userId;
 
-      const { userId: receiverUserId, createUserResponse: receiverCreateUserResponse } = await createNewUser(managerAccessToken);
+      const { userId: receiverUserId, createUserResponse: receiverCreateUserResponse } =
+        await createNewUser(managerAccessToken);
       expect(receiverCreateUserResponse.status).toBe(201);
       groupReceiverAddress = receiverCreateUserResponse.data.public_address;
 
@@ -1356,9 +1352,13 @@ describe('App E2E', () => {
         fromUserId: groupUserId,
       };
 
-      const userCreateResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, userAppCreateRequestData, {
-        headers: { Authorization: `Bearer ${userAccessToken}` },
-      });
+      const userCreateResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/app-call/`,
+        userAppCreateRequestData,
+        {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        },
+      );
       expect(userCreateResponse.status).toBe(201);
       expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
 
