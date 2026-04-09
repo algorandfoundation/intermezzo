@@ -549,7 +549,6 @@ export class WalletService {
       throw new Error('No transactions to group');
     }
 
-    const encoder = new AlgorandEncoder();
     const groupedTxns: Uint8Array[] = this.chainService.setGroupID(unSignedTxs);
 
     if (senderIds.length !== groupedTxns.length) {

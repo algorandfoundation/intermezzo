@@ -301,7 +301,7 @@ describe('App E2E', () => {
      * @property {string} freezeAddress - The address of the asset freeze.
      * @property {string} clawbackAddress - The address of the asset clawback.
      */
-    var assetData = {
+    const assetData = {
       total: 100000,
       decimals: 0,
       defaultFrozen: false,
@@ -819,7 +819,7 @@ describe('App E2E', () => {
         `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
         assetTransferRequestData,
         {
-          headers: { Authorization: `Bearer ${managerAccessToken}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         },
       );
       expect(response1.status).toBe(201); // HTTP 201 Created
@@ -830,7 +830,7 @@ describe('App E2E', () => {
 
       await expect(
         axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
-          headers: { Authorization: `Bearer ${managerAccessToken}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         }),
       ).rejects.toMatchObject({ response: { status: 400 } });
     }, 60000);
@@ -1318,8 +1318,7 @@ describe('App E2E', () => {
       expect(createUserResponse.status).toBe(201);
       groupUserId = userId;
 
-      const { userId: receiverUserId, createUserResponse: receiverCreateUserResponse } =
-        await createNewUser(managerAccessToken);
+      const { createUserResponse: receiverCreateUserResponse } = await createNewUser(managerAccessToken);
       expect(receiverCreateUserResponse.status).toBe(201);
       groupReceiverAddress = receiverCreateUserResponse.data.public_address;
 
