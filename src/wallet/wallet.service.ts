@@ -460,19 +460,14 @@ export class WalletService {
    * @returns The group transaction ID (the txid of the first transaction in the submitted group).
    */
   async groupTransaction(vault_token: string, groupRequestDto: GroupRequestDto) {
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
-
     const suggested_params = await this.chainService.getSuggestedParams();
-
-    Logger.debug(`Group Request DTO: ${groupRequestDto}`);
 
     if (!Array.isArray((groupRequestDto as any).transactions) || groupRequestDto.transactions.length === 0) {
       throw new Error('transactions is required and must be a non-empty array');
     }
 
     const unSignedTxs: Uint8Array[] = [];
-    const addressToUserId: Record<string, string> = {};
+    const senderIds: string[] = [];
 
     for (const step of groupRequestDto.transactions) {
       const key = (step as any).type as string;
@@ -483,27 +478,28 @@ export class WalletService {
 
       switch (key) {
         case 'appCall': {
-          let fromAddress: string;
-          if (value.fromUserId === 'manager') {
-            fromAddress = managerPublicAddress;
-          } else {
-            fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
-            addressToUserId[fromAddress] = value.fromUserId;
-          }
+          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
 
+          senderIds.push(value.fromUserId);
+          
           const tx = await this.chainService.craftAppCallTx(fromAddress, value, suggested_params, value.fee);
           unSignedTxs.push(tx);
           break;
         }
         case 'assetConfig': {
-          const tx = await this.chainService.craftAssetCreateTx(managerPublicAddress, value);
+          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
+          senderIds.push(value.fromUserId);
+          const tx = await this.chainService.craftAssetCreateTx(fromAddress, value);
           unSignedTxs.push(tx);
           break;
         }
         case 'assetTransfer': {
+          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
+          senderIds.push(value.fromUserId);
+          
           const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
           const tx = await this.chainService.craftAssetTransferTx(
-            managerPublicAddress,
+            fromAddress,
             userPublicAddress,
             value.assetId,
             value.amount,
@@ -515,13 +511,8 @@ export class WalletService {
           break;
         }
         case 'payment': {
-          let fromAddress: string;
-          if (value.fromUserId === 'manager') {
-            fromAddress = managerPublicAddress;
-          } else {
-            fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
-            addressToUserId[fromAddress] = value.fromUserId;
-          }
+          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
+          senderIds.push(value.fromUserId);
 
           const tx = await this.chainService.craftPaymentTx(
             fromAddress,
@@ -533,11 +524,14 @@ export class WalletService {
           break;
         }
         case 'assetClawback': {
+          const fromAddress = await this.getFromAddress('manager', vault_token);
+          senderIds.push(value.fromUserId);
+
           const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
           const tx = await this.chainService.craftAssetClawbackTx(
-            managerPublicAddress,
+            fromAddress,
             userPublicAddress,
-            managerPublicAddress,
+            fromAddress,
             value.assetId,
             value.amount,
             value.lease,
@@ -559,13 +553,18 @@ export class WalletService {
     const encoder = new AlgorandEncoder();
     const groupedTxns: Uint8Array[] = this.chainService.setGroupID(unSignedTxs);
 
+    if (senderIds.length !== groupedTxns.length) {
+      throw new Error('Invalid group signer mapping');
+    }
+
     const signedTxs: Uint8Array[] = [];
-    for (const tx of groupedTxns) {
-      const sender = encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd));
-      if (sender === managerPublicAddress) {
+    for (let i = 0; i < groupedTxns.length; i++) {
+      const tx = groupedTxns[i];
+      const senderId = senderIds[i];
+      if (senderId === 'manager') {
         signedTxs.push(await this.signTxAsManager(tx, vault_token));
-      } else if (addressToUserId[sender]) {
-        signedTxs.push(await this.signTxAsUser(addressToUserId[sender], tx, vault_token));
+      } else if (senderId) {
+        signedTxs.push(await this.signTxAsUser(senderId, tx, vault_token));
       } else {
         throw new Error('Invalid sender');
       }

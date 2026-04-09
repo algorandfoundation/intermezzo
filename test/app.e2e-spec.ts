@@ -1301,18 +1301,19 @@ describe('App E2E', () => {
     }, 60000);
   });
 
-  describe.only('Group transactions', () => {
+  describe('Group transactions', () => {
     let managerAccessToken: string;
     let deployedAppId = 0;
     let deployedAppAddress: string;
     let tokenAssetId = 0;
     let userAccessToken: string;
     let groupUserId: string;
+    let groupReceiverAddress: string;
     let userDeployedAppId = 0;
 
     beforeAll(async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      managerAccessToken = await signInToPawn(vaultToken);
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(managerVaultToken);
 
       deployedAppId = 754755349;
       deployedAppAddress = 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A';
@@ -1322,12 +1323,23 @@ describe('App E2E', () => {
       expect(createUserResponse.status).toBe(201);
       groupUserId = userId;
 
+      const { userId: receiverUserId, createUserResponse: receiverCreateUserResponse } = await createNewUser(managerAccessToken);
+      expect(receiverCreateUserResponse.status).toBe(201);
+      groupReceiverAddress = receiverCreateUserResponse.data.public_address;
+
       const fundUserResponse = await axios.post(
         `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
         { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 500000 },
         { headers: { Authorization: `Bearer ${managerAccessToken}` } },
       );
       expect(fundUserResponse.status).toBe(201);
+
+      const fundReceiverResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: groupReceiverAddress, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundReceiverResponse.status).toBe(201);
 
       const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
       userAccessToken = await signInToPawn(userVaultToken);
@@ -1453,21 +1465,21 @@ describe('App E2E', () => {
     });
 
     describe('Group transaction (user scoped)', () => {
-      it('(FAIL) user role should not be able to sign any group transaction as manager', async () => {
+      it('(FAIL) user role should not be able to submit group transaction with mixed signers', async () => {
         const groupRequestData = {
           transactions: [
             {
               type: 'payment',
               payload: {
-                toAddress: deployedAppAddress,
-                amount: 100000,
+                toAddress: groupReceiverAddress,
+                amount: 1000,
                 fromUserId: 'manager',
               },
             },
             {
               type: 'payment',
               payload: {
-                toAddress: deployedAppAddress,
+                toAddress: groupReceiverAddress,
                 amount: 1000,
                 fromUserId: groupUserId,
               },
@@ -1490,7 +1502,7 @@ describe('App E2E', () => {
             {
               type: 'payment',
               payload: {
-                toAddress: deployedAppAddress,
+                toAddress: groupReceiverAddress,
                 amount: 1000,
                 fromUserId: groupUserId,
               },
