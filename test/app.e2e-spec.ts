@@ -332,7 +332,7 @@ describe('App E2E', () => {
         expect(typeof response.data.transaction_id).toEqual('string');
       } catch {
         throw new Error(
-          `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
+          `Unexpected Error.\nYou have to add some algo to manager address: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
         );
       }
     }, 60000);
@@ -748,7 +748,6 @@ describe('App E2E', () => {
 
       assetTransferRequestData.assetId = Number(assetId);
       assetTransferRequestData.userId = userId;
-      // assetTransferRequestData.fromUserId = fromUserId;
 
       // Transfer the asset
 
@@ -1103,6 +1102,90 @@ describe('App E2E', () => {
         }),
       ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
     }, 60000);
+
+    it('(FAIL) can not clawback asset if user address is not clawback address', async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create a user who will be set as the asset clawback address (and signer)
+      const { userId: clawbackUserId, createUserResponse: clawbackUser } = await createNewUser(managerAccessToken);
+      expect(clawbackUser.status).toBe(201);
+
+      // Create a target user who will receive the asset and then be clawed back
+      const { userId: targetUserId, createUserResponse: targetUser } = await createNewUser(managerAccessToken);
+      expect(targetUser.status).toBe(201);
+
+      const { userId: userId, createUserResponse: user } = await createNewUser(managerAccessToken);
+      expect(user.status).toBe(201);
+
+      // Ensure clawback user has enough ALGO to pay transaction fees
+      const fundClawbackUser = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: clawbackUser.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundClawbackUser.status).toBe(201);
+
+      const managerAddress = await getManagerAddress();
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        fromUserId: 'manager',
+        clawbackAddress: clawbackUser.data.public_address,
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201);
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      const newAssetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
+      if (newAssetId == 0) {
+        throw new Error('Manager does not have asset to testing clawback.');
+      }
+
+      // Ensure the clawback user is opted in (receiver must be opted-in for clawback to succeed)
+      const optInClawbackUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: clawbackUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(optInClawbackUserResponse.status).toBe(201);
+
+      // Transfer one unit of the asset to the target user
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(transferResponse.status).toBe(201);
+
+      // Login with user role and clawback as the clawback user
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/clawback-asset`, {
+          assetId: Number(newAssetId),
+          userId: targetUserId,
+          fromUserId: userId,
+          amount: 1,
+        }, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
+
+    }, 60000);
+    
   });
 
   describe('App deploy', () => {

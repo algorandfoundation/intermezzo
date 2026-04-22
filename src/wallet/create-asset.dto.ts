@@ -78,17 +78,17 @@ export class CreateAssetDto {
   clawbackAddress?: string;
 
   @IsOptional()
-  @Transform((val) => BigInt(val.value))
   @ApiProperty({
     example: 1234567890,
     description: 'The id of the Asset to config',
   })
-  assetId: number;
+  assetId?: number;
 
   @IsString()
+  @IsOptional()
   @ApiProperty({
     example: '1234',
-    description: 'The User-Id or manager that is creating the Asset',
+    description: 'Optional id of the User / Manager who creates the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
   })
-  fromUserId: string;
+  fromUserId?: string = 'manager';
 }

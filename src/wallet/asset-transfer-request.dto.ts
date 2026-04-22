@@ -18,11 +18,12 @@ export class AssetTransferRequestDto {
   userId: string;
 
   @IsString()
+  @IsOptional()
   @ApiProperty({
     example: '1234',
-    description: 'The id of the User / Manager who transfers the Asset',
+    description: 'Optional id of the User / Manager who transfers the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
   })
-  fromUserId: string;
+  fromUserId?: string = 'manager';
 
   @IsNumber()
   @ApiProperty({

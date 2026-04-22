@@ -177,10 +177,7 @@ export class WalletService {
         fromAddress = (await this.getUserInfo(fromUserId, vault_token)).public_address;
       }
     } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new Error(`Failed to get from address for user ${fromUserId}: ${error.message}`);
+      this.throwHttpError(error, `Failed to get from address for user ${fromUserId}`);
     }
 
     Logger.debug(`Transferring ${amount} Algos from ${fromUserId} (${fromAddress}) to ${toAddress}`);
@@ -205,10 +202,7 @@ export class WalletService {
       // submit transaction
       return (await this.chainService.submitTransaction(signedTx)).txid;
     } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
+      this.throwHttpError(error, `Failed to sign/submit transaction as ${fromUserId}`);
     }
   }
 
@@ -312,8 +306,6 @@ export class WalletService {
       const encoder: AlgorandEncoder = new AlgorandEncoder();
       const isUserTx: boolean =
         encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == userPublicAddress;
-      // const isManagerTx: boolean =
-      //   encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == managerPublicAddress;
 
       if (isUserTx) {
         signedTxs.push(await this.signTxAsUser(userId, tx, vault_token));
@@ -324,9 +316,6 @@ export class WalletService {
             : await this.signTxAsUser(fromUserId, tx, vault_token),
         );
       }
-      // else {
-      //   throw new Error('Invalid sender');
-      // }
     }
 
     return (await this.chainService.submitTransaction(signedTxs)).txid;
@@ -362,10 +351,7 @@ export class WalletService {
     try {
       fromAddress = await this.getFromAddress(fromUserId, vault_token);
     } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new Error(`Failed to get from address for user ${fromUserId}: ${error.message}`);
+      this.throwHttpError(error, `Failed to get from address for user ${fromUserId}`);
     }
 
     const suggested_params = await this.chainService.getSuggestedParams();
@@ -374,7 +360,6 @@ export class WalletService {
     const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetClawbackTx(
       fromAddress,
       userPublicAddress,
-      fromAddress,
       assetId,
       amount,
       lease,
@@ -389,10 +374,7 @@ export class WalletService {
           ? await this.signTxAsManager(tx, vault_token)
           : await this.signTxAsUser(fromUserId, tx, vault_token);
     } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
+      this.throwHttpError(error, `Failed to sign clawback transaction as ${fromUserId}`);
     }
 
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
@@ -421,7 +403,7 @@ export class WalletService {
         fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
       }
     } catch (error) {
-      throw error;
+      this.throwHttpError(error, `Failed to get from address for user ${appCallRequestDto.fromUserId}`);
     }
 
     const suggested_params = await this.chainService.getSuggestedParams();
@@ -446,7 +428,7 @@ export class WalletService {
       // submit transaction
       return (await this.chainService.submitTransaction(signedTx)).txid;
     } catch (error) {
-      throw new Error(`Failed to sign transaction as user ${appCallRequestDto.fromUserId}: ${error.message}`);
+      this.throwHttpError(error, `Failed to sign/submit app call as ${appCallRequestDto.fromUserId}`);
     }
   }
 
@@ -475,27 +457,21 @@ export class WalletService {
         throw new Error('Invalid transaction step');
       }
 
+      const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
+      senderIds.push(value.fromUserId);
+
       switch (key) {
         case 'appCall': {
-          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
-
-          senderIds.push(value.fromUserId);
-
           const tx = await this.chainService.craftAppCallTx(fromAddress, value, suggested_params, value.fee);
           unSignedTxs.push(tx);
           break;
         }
         case 'assetConfig': {
-          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
-          senderIds.push(value.fromUserId);
           const tx = await this.chainService.craftAssetCreateTx(fromAddress, value);
           unSignedTxs.push(tx);
           break;
         }
         case 'assetTransfer': {
-          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
-          senderIds.push(value.fromUserId);
-
           const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
           const tx = await this.chainService.craftAssetTransferTx(
             fromAddress,
@@ -510,9 +486,6 @@ export class WalletService {
           break;
         }
         case 'payment': {
-          const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
-          senderIds.push(value.fromUserId);
-
           const tx = await this.chainService.craftPaymentTx(
             fromAddress,
             value.toAddress,
@@ -523,14 +496,10 @@ export class WalletService {
           break;
         }
         case 'assetClawback': {
-          const fromAddress = await this.getFromAddress('manager', vault_token);
-          senderIds.push(value.fromUserId);
-
           const userPublicAddress: string = (await this.getUserInfo(value.userId, vault_token)).public_address;
           const tx = await this.chainService.craftAssetClawbackTx(
             fromAddress,
             userPublicAddress,
-            fromAddress,
             value.assetId,
             value.amount,
             value.lease,
@@ -573,7 +542,7 @@ export class WalletService {
     return txid;
   }
 
-  async getFromAddress(userId: any, vault_token: string): Promise<string> {
+  async getFromAddress(userId: string, vault_token: string): Promise<string> {
     if (userId == 'manager') {
       const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
       const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
@@ -583,5 +552,29 @@ export class WalletService {
       const userPublicAddress: string = new AlgorandEncoder().encodeAddress(userPublicKey);
       return userPublicAddress;
     }
+  }
+
+  private getErrorStatus(error: unknown): number | undefined {
+    const maybeAny = error as any;
+    if (error instanceof HttpException) {
+      return error.getStatus();
+    }
+    if (typeof maybeAny?.status === 'number') return maybeAny.status;
+    if (typeof maybeAny?.statusCode === 'number') return maybeAny.statusCode;
+    if (typeof maybeAny?.response?.status === 'number') return maybeAny.response.status;
+    return undefined;
+  }
+
+  private throwHttpError(error: unknown, context: string): never {
+    if (error instanceof HttpException) {
+      throw error;
+    }
+
+    const status = this.getErrorStatus(error);
+    const maybeAny = error as any;
+    const message = `${context}${status !== undefined ? ` (status ${status})` : ''}: ${maybeAny?.message ?? String(error)}`;
+    const httpError = new HttpException(message, status ?? 500);
+    (httpError as any).cause = error;
+    throw httpError;
   }
 }

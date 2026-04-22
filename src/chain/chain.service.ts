@@ -106,7 +106,11 @@ export class ChainService {
       .addFirstValidRound(suggested_params.lastRound)
       .addLastValidRound(suggested_params.lastRound + 1000n);
 
-    if (options.assetId) {
+    if (options.assetId !== undefined && options.assetId !== 0) {
+      const invalidAssetId = options.assetId < 0;
+      if (invalidAssetId) {
+        throw new InternalServerErrorException('assetId must be greater than 0');
+      }
       transactionBuilder.addAssetId(options.assetId);
     }
 
@@ -175,7 +179,6 @@ export class ChainService {
   async craftAssetClawbackTx(
     clawbackAddress: string,
     from: string,
-    to: string,
     asset_id: bigint,
     amount: number | bigint,
     lease?: string,
@@ -191,7 +194,7 @@ export class ChainService {
     builder.addAssetId(asset_id);
     builder.addSender(clawbackAddress);
     builder.addAssetSender(from);
-    builder.addAssetReceiver(to);
+    builder.addAssetReceiver(clawbackAddress);
     builder.addFee(suggested_params.minFee);
     builder.addFirstValidRound(suggested_params.lastRound);
     builder.addLastValidRound(suggested_params.lastRound + 1000n);

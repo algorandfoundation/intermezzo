@@ -17,12 +17,13 @@ export class AssetClawbackRequestDto {
   })
   userId: string;
 
+  @IsOptional()
   @IsString()
   @ApiProperty({
     example: 'manager',
-    description: 'The id of the User / Manager who signs and submits the clawback transaction',
+    description: 'Optional id of the User / Manager who clawbacks the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
   })
-  fromUserId: string;
+  fromUserId?: string = 'manager';
 
   @IsNumber()
   @ApiProperty({
