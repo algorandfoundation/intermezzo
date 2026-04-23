@@ -457,6 +457,11 @@ export class WalletService {
         throw new Error('Invalid transaction step');
       }
 
+      const supportedTypes = new Set(['appCall', 'assetConfig', 'assetTransfer', 'payment', 'assetClawback']);
+      if (!supportedTypes.has(key)) {
+        throw new Error(`Unsupported transaction type: ${key}`);
+      }
+
       const fromAddress = await this.getFromAddress(value.fromUserId, vault_token);
       senderIds.push(value.fromUserId);
 
@@ -509,8 +514,6 @@ export class WalletService {
           unSignedTxs.push(tx);
           break;
         }
-        default:
-          throw new Error(`Unsupported transaction type: ${key}`);
       }
     }
 

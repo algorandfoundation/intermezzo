@@ -88,7 +88,8 @@ export class CreateAssetDto {
   @IsOptional()
   @ApiProperty({
     example: '1234',
-    description: 'Optional id of the User / Manager who creates the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
+    description:
+      'Optional id of the User / Manager who creates the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
   })
   fromUserId?: string = 'manager';
 }

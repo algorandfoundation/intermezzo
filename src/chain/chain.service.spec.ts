@@ -250,10 +250,8 @@ describe('ChainService', () => {
       // Use a valid dummy Algorand address for all address options.
       const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
-      const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
       const senderAddress = dummyAddress2;
-      const receiverAddress = dummyAddress3;
       const assetId = 1234n;
       const amount = 2n;
       const note = 'note: clawback note';
@@ -262,7 +260,6 @@ describe('ChainService', () => {
       const result = await chainService.craftAssetClawbackTx(
         clawbackAddress,
         senderAddress,
-        receiverAddress,
         assetId,
         amount,
         leaseB64,
@@ -271,7 +268,7 @@ describe('ChainService', () => {
       expect(result).toBeInstanceOf(Uint8Array);
       expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
         aamt: 2,
-        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
+        arcv: new AlgorandEncoder().decodeAddress(clawbackAddress),
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',
@@ -296,22 +293,14 @@ describe('ChainService', () => {
       // Use a valid dummy Algorand address for all address options.
       const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
-      const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
       const senderAddress = dummyAddress2;
-      const receiverAddress = dummyAddress3;
       const assetId = 1234n;
       const amount = 0n;
-      const result = await chainService.craftAssetClawbackTx(
-        clawbackAddress,
-        senderAddress,
-        receiverAddress,
-        assetId,
-        amount,
-      );
+      const result = await chainService.craftAssetClawbackTx(clawbackAddress, senderAddress, assetId, amount);
       expect(result).toBeInstanceOf(Uint8Array);
       expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
+        arcv: new AlgorandEncoder().decodeAddress(clawbackAddress),
         fee: 1000,
         fv: 1,
         gen: 'test-genesis-id',

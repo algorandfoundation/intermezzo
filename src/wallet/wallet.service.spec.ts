@@ -537,7 +537,6 @@ describe('WalletService', () => {
         1,
         managerPublicAddress,
         userPublicAddress,
-        managerPublicAddress,
         assetId,
         amount,
         lease,

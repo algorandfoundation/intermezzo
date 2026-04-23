@@ -1174,18 +1174,20 @@ describe('App E2E', () => {
       const userAccessToken = await signInToPawn(userVaultToken);
 
       await expect(
-        axios.post(`${APP_BASE_URL}/wallet/transactions/clawback-asset`, {
-          assetId: Number(newAssetId),
-          userId: targetUserId,
-          fromUserId: userId,
-          amount: 1,
-        }, {
-          headers: { Authorization: `Bearer ${managerAccessToken}` },
-        }),
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+          {
+            assetId: Number(newAssetId),
+            userId: targetUserId,
+            fromUserId: userId,
+            amount: 1,
+          },
+          {
+            headers: { Authorization: `Bearer ${userAccessToken}` },
+          },
+        ),
       ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
-
     }, 60000);
-    
   });
 
   describe('App deploy', () => {

@@ -21,7 +21,8 @@ export class AssetClawbackRequestDto {
   @IsString()
   @ApiProperty({
     example: 'manager',
-    description: 'Optional id of the User / Manager who clawbacks the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
+    description:
+      'Optional id of the User / Manager who clawbacks the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
   })
   fromUserId?: string = 'manager';
 
