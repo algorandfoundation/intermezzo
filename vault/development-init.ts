@@ -162,6 +162,10 @@ async function createACLPolicies(token: string) {
           [`${VAULT_TRANSIT_USERS_PATH}/keys/+/+`]: {
             capabilities: ['deny'],
           },
+          // 4 allow /sign path
+          [`${VAULT_TRANSIT_USERS_PATH}/sign/*`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
         },
       },
       [MANAGERS_POLICY_NAME]: {

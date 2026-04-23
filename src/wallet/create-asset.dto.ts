@@ -76,4 +76,20 @@ export class CreateAssetDto {
     description: 'The public address of the clawback',
   })
   clawbackAddress?: string;
+
+  @IsOptional()
+  @ApiProperty({
+    example: 1234567890,
+    description: 'The id of the Asset to config',
+  })
+  assetId?: number;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    example: '1234',
+    description:
+      'Optional id of the User / Manager who creates the Asset. If omitted, the implicit manager signer is used for backwards compatibility.',
+  })
+  fromUserId?: string = 'manager';
 }

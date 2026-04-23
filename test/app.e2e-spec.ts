@@ -72,10 +72,46 @@ describe('App E2E', () => {
     return manager_detail_response.data.public_address;
   };
 
+  const getUserAddress = async (userId: string) => {
+    const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+    const accessToken = await signInToPawn(vaultToken);
+
+    const user_detail_response = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return user_detail_response.data.public_address;
+  };
+
   // Function to get account detail
   const getAccountDetail = async (address: string) => {
     const chainService = new ChainService(new ConfigService(), new HttpService());
     return await chainService.getAccountDetail(address);
+  };
+
+  const getTransaction = async (transactionId: string) => {
+    const indexerBaseUrl = process.env.ALGORAND_INDEXER_BASE_URL ?? 'https://testnet-idx.4160.nodely.dev';
+    const response = await axios.get(`${indexerBaseUrl}/v2/transactions/${transactionId}`, {
+      headers: { accept: 'application/json' },
+    });
+    return response.data;
+  };
+
+  const createNewUser = async (managerAccessToken: string) => {
+    // Create new user
+    const userId = randomBytes(32).toString('hex');
+    const createUserResponse = await axios.post(
+      `${APP_BASE_URL}/wallet/user/`,
+      { user_id: userId },
+      {
+        headers: {
+          Authorization: `Bearer ${managerAccessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      },
+    );
+
+    return { userId, createUserResponse };
   };
 
   describe('AUTH', () => {
@@ -276,6 +312,8 @@ describe('App E2E', () => {
       reserveAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       freezeAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
       clawbackAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      fromUserId: '',
+      assetId: 0,
     };
 
     // Test to verify that a user with the manager role can create an asset
@@ -283,7 +321,43 @@ describe('App E2E', () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const accessToken = await signInToPawn(vaultToken);
 
+      assetData.fromUserId = 'manager';
+
       try {
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(201); // HTTP 201 Created
+        expect(typeof response.data.transaction_id).toEqual('string');
+      } catch {
+        throw new Error(
+          `Unexpected Error.\nYou have to add some algo to manager address: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
+        );
+      }
+    }, 60000);
+
+    it('(OK) Can create with user role and user as signer', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+
+      try {
+        const fundUserWallet = await axios.post(
+          `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+          { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 201000 },
+          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        );
+
+        expect(fundUserWallet.status).toBe(201);
+        expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
+
+        assetData.fromUserId = userId;
+
         const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
@@ -298,15 +372,52 @@ describe('App E2E', () => {
     }, 60000);
 
     // Test to verify that a user with the user role cannot create an asset
-    it('(FAIL) Can not create with user role', async () => {
+    it('(FAIL) Can not create with user role and manager as signer', async () => {
       const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
       const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'manager';
 
       await expect(
         axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
           headers: { Authorization: `Bearer ${accessToken}` },
         }),
       ).rejects.toMatchObject({ response: { status: 403 } }); // HTTP 403 Forbidden
+    }, 60000);
+
+    it('(OK) Can manage asset ACL', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      assetData.fromUserId = 'manager';
+      assetData.managerAddress = await getManagerAddress();
+
+      try {
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(201); // HTTP 201 Created
+        expect(typeof response.data.transaction_id).toEqual('string');
+
+        const transaction = await getTransaction(response.data.transaction_id);
+
+        expect(typeof transaction.transaction['created-asset-index']).toEqual('number');
+
+        assetData.assetId = transaction.transaction['created-asset-index'];
+        assetData.clawbackAddress = await getUserAddress('test_user');
+
+        const response2 = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response2.status).toBe(201); // HTTP 201 Created
+        expect(typeof response2.data.transaction_id).toEqual('string');
+      } catch {
+        throw new Error(
+          `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
+        );
+      }
     }, 60000);
   });
 
@@ -315,20 +426,8 @@ describe('App E2E', () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const managerAccessToken = await signInToPawn(vaultToken);
 
-      // Create new user
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
-      expect(createUserResponse.status).toBe(201);
+      // Create New user
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
 
       // transfer from manager to new user
       const response1 = await axios.post(
@@ -346,9 +445,55 @@ describe('App E2E', () => {
       expect(userDetailResponse.status).toBe(200);
       expect(userDetailResponse.data.algoBalance).toBe('1000000');
     }, 60000);
+
+    it('(FAIL) User role cannot transfer algo with manager as signer', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { createUserResponse } = await createNewUser(managerAccessToken);
+
+      await expect(
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+          { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 100000 },
+          { headers: { Authorization: `Bearer ${userAccessToken}` } },
+        ),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    }, 60000);
+
+    it('(OK) User role can transfer algo with user as signer', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { userId: senderUserId, createUserResponse: senderUser } = await createNewUser(managerAccessToken);
+      const { createUserResponse: receiverUser } = await createNewUser(managerAccessToken);
+
+      // Fund sender so they can pay the transfer fee and amount.
+      const fundResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: senderUser.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundResponse.status).toBe(201);
+
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: senderUserId, toAddress: receiverUser.data.public_address, amount: 100000 },
+        { headers: { Authorization: `Bearer ${userAccessToken}` } },
+      );
+
+      expect(transferResponse.status).toBe(201);
+      expect(typeof transferResponse.data.transaction_id).toEqual('string');
+    }, 60000);
   });
 
-  describe('Transfer Asset', () => {
+  describe('Transfer asset with the manager as the signer', () => {
     /**
      * Represents the data structure for an asset transfer.
      *
@@ -362,6 +507,7 @@ describe('App E2E', () => {
       userId: 'test-user-id',
       amount: 1,
       lease: undefined,
+      fromUserId: 'manager',
     };
 
     let assetId: bigint | number;
@@ -377,6 +523,7 @@ describe('App E2E', () => {
         defaultFrozen: false,
         unitName: 'Tas',
         assetName: 'Tennnnnnnnnnnnnnnnnn',
+        fromUserId: 'manager',
         url: 'https://example.com',
       };
       const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
@@ -405,18 +552,7 @@ describe('App E2E', () => {
 
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
 
       assetTransferRequestData.assetId = Number(assetId);
@@ -472,18 +608,8 @@ describe('App E2E', () => {
 
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+
       expect(createUserResponse.status).toBe(201);
 
       assetTransferRequestData.assetId = Number(assetId);
@@ -504,18 +630,7 @@ describe('App E2E', () => {
 
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
 
       assetTransferRequestData.assetId = Number(assetId);
@@ -553,6 +668,173 @@ describe('App E2E', () => {
     }, 60000);
   });
 
+  describe('Transfer asset with the user as the signer', () => {
+    /**
+     * Represents the data structure for an asset transfer.
+     *
+     * @property {bigint} assetId - The ID of the asset to be transferred.
+     * @property {string} userId - The ID of the user receiving the asset.
+     * @property {number} amount - The amount of the asset to be transferred
+     * @property {string} lease - The transaction lease to be attached to the asset transfer transaction.
+     */
+    const assetTransferRequestData = {
+      assetId: 1,
+      userId: 'test-user-id',
+      amount: 1,
+      lease: undefined,
+      fromUserId: 'user',
+    };
+
+    let assetId: bigint | number;
+    let managerAccessToken: string;
+
+    beforeAll(async () => {
+      // before all tests, create an asset and set assetId
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(managerVaultToken);
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+
+      const fundUserWallet = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+
+      expect(fundUserWallet.status).toBe(201);
+      expect(typeof fundUserWallet.data.transaction_id).toEqual('string');
+
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        fromUserId: userId,
+        url: 'https://example.com',
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
+      const userDetail = await getAccountDetail(createUserResponse.data.public_address);
+      assetId = userDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (assetId == 0) {
+        throw new Error('User does not have asset to testing transfer.');
+      }
+
+      assetTransferRequestData.fromUserId = userId;
+    }, 60000);
+
+    afterAll(() => {
+      assetTransferRequestData.amount = 1;
+      assetTransferRequestData.lease = undefined;
+    });
+
+    it('(OK) transfer asset', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+
+      const response2 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      );
+      expect(response2.status).toBe(201); // HTTP 201 Created
+      expect(typeof response2.data.transaction_id).toEqual('string');
+
+      // ############################################################
+      // Check if the asset is transferred to the user by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(`${APP_BASE_URL}/wallet/assets/${userId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0);
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(assetTransferRequestData.assetId);
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(assetTransferRequestData.amount * 2);
+      // ############################################################
+    }, 60000);
+
+    it('(FAIL) can not transfer asset twice with same lease', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+      assetTransferRequestData.amount = 2;
+      // assetTransferRequestData.fromUserId = fromUserId;
+
+      // Adds a lease to the transaction to prevent replay and conflicting transactions.
+      // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
+      // ensuring only one transaction with that lease can be confirmed during that window.
+      // Use a consistent lease value if retrying or managing exclusivity; generating a new random lease each time
+      // prevents replay but won't prevent conflicting submissions.
+      // To generate a lease: Buffer.from(crypto.randomBytes(32)).toString('base64')
+      assetTransferRequestData.lease = Buffer.from(randomBytes(32)).toString('base64');
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+      assetTransferRequestData.amount = 3;
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 400 } });
+    }, 60000);
+  });
+
   describe('Clawback Asset', () => {
     /**
      * Represents the data structure for an asset clawback.
@@ -564,6 +846,7 @@ describe('App E2E', () => {
     const assetClawbackRequestData = {
       assetId: 1,
       userId: 'test-user-id',
+      fromUserId: 'manager',
       amount: 1,
     };
 
@@ -582,6 +865,7 @@ describe('App E2E', () => {
         unitName: 'Tas',
         assetName: 'Tennnnnnnnnnnnnnnnnn',
         url: 'https://example.com',
+        fromUserId: 'manager',
         clawbackAddress: managerAddress, // Pawn assumes clawback address is the manager address but it's needs to be set explicitly when creating the asset
       };
       const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
@@ -608,19 +892,9 @@ describe('App E2E', () => {
 
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
+
       assetClawbackRequestData.assetId = Number(assetId);
       assetClawbackRequestData.userId = userId;
       // Transfer the asset
@@ -668,18 +942,7 @@ describe('App E2E', () => {
 
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
 
       assetClawbackRequestData.assetId = Number(assetId);
@@ -703,6 +966,91 @@ describe('App E2E', () => {
         }),
       ).rejects.toMatchObject({ response: { status: 403 } });
     }, 60000);
+
+    it('(OK) clawback asset with user role and user as signer', async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create a user who will be set as the asset clawback address (and signer)
+      const { userId: clawbackUserId, createUserResponse: clawbackUser } = await createNewUser(managerAccessToken);
+      expect(clawbackUser.status).toBe(201);
+
+      // Create a target user who will receive the asset and then be clawed back
+      const { userId: targetUserId, createUserResponse: targetUser } = await createNewUser(managerAccessToken);
+      expect(targetUser.status).toBe(201);
+
+      // Ensure clawback user has enough ALGO to pay transaction fees
+      const fundClawbackUser = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: clawbackUser.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundClawbackUser.status).toBe(201);
+
+      const managerAddress = await getManagerAddress();
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        fromUserId: 'manager',
+        clawbackAddress: clawbackUser.data.public_address,
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201);
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      const newAssetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
+      if (newAssetId == 0) {
+        throw new Error('Manager does not have asset to testing clawback.');
+      }
+
+      // Ensure the clawback user is opted in (receiver must be opted-in for clawback to succeed)
+      const optInClawbackUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: clawbackUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(optInClawbackUserResponse.status).toBe(201);
+
+      // Transfer one unit of the asset to the target user
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(transferResponse.status).toBe(201);
+
+      // Login with user role and clawback as the clawback user
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const clawbackResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: clawbackUserId, amount: 1 },
+        { headers: { Authorization: `Bearer ${userAccessToken}` } },
+      );
+      expect(clawbackResponse.status).toBe(201);
+      expect(typeof clawbackResponse.data.transaction_id).toEqual('string');
+
+      // Verify the target user no longer holds the asset
+      const targetAssets = await axios.get(`${APP_BASE_URL}/wallet/assets/${targetUserId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(targetAssets.status).toBe(200);
+      const holding = (targetAssets.data.assets ?? []).find((a: any) => a['asset-id'] === Number(newAssetId));
+      expect(holding?.amount ?? 0).toEqual(0);
+    }, 60000);
+
     it('(FAIL) can not clawback asset without clawback address', async () => {
       // create asset without clawback address
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
@@ -713,12 +1061,14 @@ describe('App E2E', () => {
         defaultFrozen: false,
         unitName: 'Tas',
         assetName: 'Tennnnnnnnnnnnnnnnnn',
+        fromUserId: 'manager',
         url: 'https://example.com',
       };
       const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
         headers: { Authorization: `Bearer ${managerAccessToken}` },
       });
       expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
       const managerAddress = await getManagerAddress();
       const managerDetail = await getAccountDetail(managerAddress);
       assetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
@@ -729,19 +1079,9 @@ describe('App E2E', () => {
       }
       // Create new user
 
-      const userId = randomBytes(32).toString('hex');
-      const createUserResponse = await axios.post(
-        `${APP_BASE_URL}/wallet/user/`,
-        { user_id: userId },
-        {
-          headers: {
-            Authorization: `Bearer ${managerAccessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        },
-      );
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
       expect(createUserResponse.status).toBe(201);
+
       assetClawbackRequestData.assetId = Number(assetId);
       assetClawbackRequestData.userId = userId;
       // Transfer the asset
@@ -762,14 +1102,106 @@ describe('App E2E', () => {
         }),
       ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
     }, 60000);
+
+    it('(FAIL) can not clawback asset if user address is not clawback address', async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create a user who will be set as the asset clawback address (and signer)
+      const { userId: clawbackUserId, createUserResponse: clawbackUser } = await createNewUser(managerAccessToken);
+      expect(clawbackUser.status).toBe(201);
+
+      // Create a target user who will receive the asset and then be clawed back
+      const { userId: targetUserId, createUserResponse: targetUser } = await createNewUser(managerAccessToken);
+      expect(targetUser.status).toBe(201);
+
+      const { userId: userId, createUserResponse: user } = await createNewUser(managerAccessToken);
+      expect(user.status).toBe(201);
+
+      // Ensure clawback user has enough ALGO to pay transaction fees
+      const fundClawbackUser = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: clawbackUser.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundClawbackUser.status).toBe(201);
+
+      const managerAddress = await getManagerAddress();
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        fromUserId: 'manager',
+        clawbackAddress: clawbackUser.data.public_address,
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201);
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      const newAssetId = managerDetail.assets.reduce(
+        (max, current) => (current.assetId > max.assetId ? current : max),
+        {
+          assetId: 0,
+        },
+      ).assetId;
+      if (newAssetId == 0) {
+        throw new Error('Manager does not have asset to testing clawback.');
+      }
+
+      // Ensure the clawback user is opted in (receiver must be opted-in for clawback to succeed)
+      const optInClawbackUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: clawbackUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(optInClawbackUserResponse.status).toBe(201);
+
+      // Transfer one unit of the asset to the target user
+      const transferResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        { assetId: Number(newAssetId), userId: targetUserId, fromUserId: 'manager', amount: 1 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(transferResponse.status).toBe(201);
+
+      // Login with user role and clawback as the clawback user
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      await expect(
+        axios.post(
+          `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+          {
+            assetId: Number(newAssetId),
+            userId: targetUserId,
+            fromUserId: userId,
+            amount: 1,
+          },
+          {
+            headers: { Authorization: `Bearer ${userAccessToken}` },
+          },
+        ),
+      ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
+    }, 60000);
   });
 
   describe('App deploy', () => {
-    it('(OK) app deploy', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
+    let managerAccessToken: string;
+    let deployedAppId = 0;
+    let userAccessToken: string;
+    let appUserId: string;
+    let userDeployedAppId = 0;
 
-      const appCallRequestData = {
+    beforeAll(async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(vaultToken);
+
+      const appCreateRequestData = {
         approvalProgram:
           'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
         clearProgram: 'CoEBQw==',
@@ -781,22 +1213,68 @@ describe('App E2E', () => {
         fromUserId: 'manager',
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCreateRequestData, {
         headers: { Authorization: `Bearer ${managerAccessToken}` },
       });
-
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
+
+      const transaction = await getTransaction(response.data.transaction_id);
+      deployedAppId = transaction.transaction['created-application-index'] ?? 0;
+      expect(typeof deployedAppId).toEqual('number');
+      expect(deployedAppId).toBeGreaterThan(0);
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+      appUserId = userId;
+
+      const fundUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundUserResponse.status).toBe(201);
+
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      userAccessToken = await signInToPawn(userVaultToken);
+
+      const userAppCreateRequestData = {
+        approvalProgram:
+          'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
+        clearProgram: 'CoEBQw==',
+        globalByteSlices: 1,
+        globalInts: 1,
+        localByteSlices: 0,
+        localInts: 0,
+        onComplete: 0,
+        fromUserId: appUserId,
+      };
+
+      const userCreateResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/app-call/`,
+        userAppCreateRequestData,
+        {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        },
+      );
+      expect(userCreateResponse.status).toBe(201);
+      expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
+
+      const userCreateTxn = await getTransaction(userCreateResponse.data.transaction_id);
+      userDeployedAppId = userCreateTxn.transaction['created-application-index'] ?? 0;
+      expect(typeof userDeployedAppId).toEqual('number');
+      expect(userDeployedAppId).toBeGreaterThan(0);
     }, 60000);
-  });
 
-  describe('App abi method call with string args', () => {
+    afterAll(() => {
+      deployedAppId = 0;
+      userDeployedAppId = 0;
+    });
+
     it('(OK) App abi method call with string args', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
+      expect(deployedAppId).toBeGreaterThan(0);
       const appCallRequestData = {
-        appId: 754755349,
+        appId: deployedAppId,
         args: {
           name: 'hello',
           args: [
@@ -819,15 +1297,11 @@ describe('App E2E', () => {
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
     }, 60000);
-  });
 
-  describe('App abi method call with uint64 args', () => {
     it('(OK) App abi method call with uint64 args', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
+      expect(deployedAppId).toBeGreaterThan(0);
       const appCallRequestData = {
-        appId: 754755349,
+        appId: deployedAppId,
         args: {
           name: 'add',
           args: [
@@ -853,102 +1327,293 @@ describe('App E2E', () => {
       expect(response.status).toBe(201);
       expect(typeof response.data.transaction_id).toEqual('string');
     }, 60000);
-  });
 
-  describe('Group transaction (foreign Accounts and Assets)', () => {
-    it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
-      const groupRequestData = {
-        transactions: [
-          {
-            type: 'payment',
-            payload: {
-              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
-              amount: 101000,
-              fromUserId: 'manager',
-              note: 'optional note',
-              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+    it('(OK) user should able to call abi methods', async () => {
+      expect(userDeployedAppId).toBeGreaterThan(0);
+      const appCallRequestData = {
+        appId: userDeployedAppId,
+        args: {
+          name: 'hello',
+          args: [
+            {
+              type: 'string',
+              value: 'world',
             },
+          ],
+          returns: {
+            type: 'string',
           },
-          {
-            type: 'appCall',
-            payload: {
-              appId: 754755349,
-              onComplete: 0,
-              fromUserId: 'manager',
-              fee: 2000,
-              args: {
-                name: 'opt_in_token',
-                args: [
-                  { type: 'pay', value: null },
-                  { type: 'uint64', value: 723769800 },
-                ],
-                returns: { type: 'void' },
-              },
-              foreignAccounts: ['CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A'],
-              foreignAssets: [723769800],
-            },
-          },
-        ],
+        },
+        fromUserId: appUserId,
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
-        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+        headers: { Authorization: `Bearer ${userAccessToken}` },
       });
 
       expect(response.status).toBe(201);
-      expect(typeof response.data.group_id).toEqual('string');
+      expect(typeof response.data.transaction_id).toEqual('string');
+    }, 60000);
+
+    it('(FAIL) user role should not be able to call any abi method as manager', async () => {
+      const appCallRequestData = {
+        appId: deployedAppId,
+        args: {
+          name: 'hello',
+          args: [
+            {
+              type: 'string',
+              value: 'world',
+            },
+          ],
+          returns: {
+            type: 'string',
+          },
+        },
+        fromUserId: 'manager',
+      };
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } });
     }, 60000);
   });
 
-  describe('Group transaction (foreign apps and boxes)', () => {
-    it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
+  describe('Group transactions', () => {
+    let managerAccessToken: string;
+    let deployedAppId = 0;
+    let deployedAppAddress: string;
+    let tokenAssetId = 0;
+    let userAccessToken: string;
+    let groupUserId: string;
+    let groupReceiverAddress: string;
+    let userDeployedAppId = 0;
 
-      const groupRequestData = {
-        transactions: [
-          {
-            type: 'payment',
-            payload: {
-              toAddress: 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A',
-              amount: 100000,
-              fromUserId: 'manager',
-              note: 'optional note',
-              lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
-            },
-          },
-          {
-            type: 'appCall',
-            payload: {
-              appId: 754755349,
-              onComplete: 0,
-              fromUserId: 'manager',
-              fee: 2000,
-              args: {
-                name: 'create_box_paid',
-                args: [
-                  { type: 'string', value: 'abc' },
-                  { type: 'uint64', value: 123 },
-                  { type: 'pay', value: null },
-                ],
-                returns: { type: 'void' },
-              },
-              foreignApps: [754755349],
-              boxes: [{ n: 'Ym94X2ludA==' }, { n: 'Ym94X3N0cmluZ2FiYw==' }],
-            },
-          },
-        ],
+    beforeAll(async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      managerAccessToken = await signInToPawn(managerVaultToken);
+
+      deployedAppId = 754755349;
+      deployedAppAddress = 'CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A';
+      tokenAssetId = 723769800;
+
+      const { userId, createUserResponse } = await createNewUser(managerAccessToken);
+      expect(createUserResponse.status).toBe(201);
+      groupUserId = userId;
+
+      const { createUserResponse: receiverCreateUserResponse } = await createNewUser(managerAccessToken);
+      expect(receiverCreateUserResponse.status).toBe(201);
+      groupReceiverAddress = receiverCreateUserResponse.data.public_address;
+
+      const fundUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundUserResponse.status).toBe(201);
+
+      const fundReceiverResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: groupReceiverAddress, amount: 500000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(fundReceiverResponse.status).toBe(201);
+
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      userAccessToken = await signInToPawn(userVaultToken);
+
+      const userAppCreateRequestData = {
+        approvalProgram:
+          'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==',
+        clearProgram: 'CoEBQw==',
+        globalByteSlices: 1,
+        globalInts: 1,
+        localByteSlices: 0,
+        localInts: 0,
+        onComplete: 0,
+        fromUserId: groupUserId,
       };
 
-      const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
-        headers: { Authorization: `Bearer ${managerAccessToken}` },
-      });
+      const userCreateResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/app-call/`,
+        userAppCreateRequestData,
+        {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        },
+      );
+      expect(userCreateResponse.status).toBe(201);
+      expect(typeof userCreateResponse.data.transaction_id).toEqual('string');
 
-      expect(response.status).toBe(201);
-      expect(typeof response.data.group_id).toEqual('string');
+      const userCreateTxn = await getTransaction(userCreateResponse.data.transaction_id);
+      userDeployedAppId = userCreateTxn.transaction['created-application-index'] ?? 0;
+      expect(typeof userDeployedAppId).toEqual('number');
+      expect(userDeployedAppId).toBeGreaterThan(0);
     }, 60000);
+
+    afterAll(() => {
+      deployedAppId = 0;
+      userDeployedAppId = 0;
+    });
+
+    describe('Group transaction (foreign Accounts and Assets)', () => {
+      it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 101000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'opt_in_token',
+                  args: [
+                    { type: 'pay', value: null },
+                    { type: 'uint64', value: tokenAssetId },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignAccounts: [deployedAppAddress],
+                foreignAssets: [tokenAssetId],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (foreign apps and boxes)', () => {
+      it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: deployedAppAddress,
+                amount: 100000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'create_box_paid',
+                  args: [
+                    { type: 'string', value: 'abc' },
+                    { type: 'uint64', value: 123 },
+                    { type: 'pay', value: null },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignApps: [deployedAppId],
+                boxes: [{ n: 'Ym94X2ludA==' }, { n: 'Ym94X3N0cmluZ2FiYw==' }],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (user scoped)', () => {
+      it('(FAIL) user role should not be able to submit group transaction with mixed signers', async () => {
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: groupReceiverAddress,
+                amount: 1000,
+                fromUserId: 'manager',
+              },
+            },
+            {
+              type: 'payment',
+              payload: {
+                toAddress: groupReceiverAddress,
+                amount: 1000,
+                fromUserId: groupUserId,
+              },
+            },
+          ],
+        };
+
+        await expect(
+          axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+            headers: { Authorization: `Bearer ${userAccessToken}` },
+          }),
+        ).rejects.toMatchObject({ response: { status: 403 } });
+      }, 60000);
+
+      it('(OK) user role should be able to submit group transaction when all txns are user-signed', async () => {
+        expect(userDeployedAppId).toBeGreaterThan(0);
+
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                toAddress: groupReceiverAddress,
+                amount: 1000,
+                fromUserId: groupUserId,
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: userDeployedAppId,
+                onComplete: 0,
+                fromUserId: groupUserId,
+                args: {
+                  name: 'hello',
+                  args: [{ type: 'string', value: 'world' }],
+                  returns: { type: 'string' },
+                },
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
   });
 });

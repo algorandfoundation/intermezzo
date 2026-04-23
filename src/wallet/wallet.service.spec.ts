@@ -149,6 +149,8 @@ describe('WalletService', () => {
       reserveAddress: address,
       freezeAddress: address,
       clawbackAddress: address,
+      fromUserId: 'manager',
+      assetId: 0,
     };
 
     const vaultToken = 'vault_token';
@@ -230,7 +232,7 @@ describe('WalletService', () => {
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(algoBalance);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, 'manager', amount);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -275,10 +277,10 @@ describe('WalletService', () => {
         dummySignedManagerTx2,
       ]);
 
-      expect(result).toBe('final_tx_id');
+      expect(result).toEqual('final_tx_id');
     });
 
-    it('transferAsset() -- user exists -- not opted in -- not enough algo', async () => {
+    it('clawbackAsset() -- user exists -- not opted in -- not enough algo', async () => {
       chainServiceMock.getAccountAsset.mockResolvedValueOnce(null); // user has not opted in
       chainServiceMock.getAccountDetail.mockResolvedValueOnce({
         amount: 100100n,
@@ -291,7 +293,7 @@ describe('WalletService', () => {
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(algoBalance);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, 'manager', amount);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -351,7 +353,7 @@ describe('WalletService', () => {
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(algoBalance);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, 'manager', amount);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -394,7 +396,7 @@ describe('WalletService', () => {
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(algoBalance);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount, lease, note);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, 'manager', amount, lease, note);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -437,7 +439,7 @@ describe('WalletService', () => {
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(algoBalance);
 
       // Call
-      const result = await walletService.transferAsset(vaultToken, assetId, userId, amount);
+      const result = await walletService.transferAsset(vaultToken, assetId, userId, 'manager', amount);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -524,7 +526,7 @@ describe('WalletService', () => {
     });
     it('clawbackAsset() -- test clawback', async () => {
       // Call
-      const result = await walletService.clawbackAsset(vaultToken, assetId, userId, amount, lease, note);
+      const result = await walletService.clawbackAsset(vaultToken, assetId, userId, 'manager', amount, lease, note);
 
       // Verify the flow.
       expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, vaultToken);
@@ -535,7 +537,6 @@ describe('WalletService', () => {
         1,
         managerPublicAddress,
         userPublicAddress,
-        managerPublicAddress,
         assetId,
         amount,
         lease,
