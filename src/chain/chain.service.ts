@@ -18,6 +18,7 @@ import {
   AppCallTransactionFields,
   AssetConfigTransactionFields,
   AssetTransferTransactionFields,
+  decodeSignedTransaction,
   decodeTransaction,
   encodeSignedTransaction,
   encodeTransaction,
@@ -38,7 +39,7 @@ export class ChainService {
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
-  ) {}
+  ) { }
 
   private parseLease(lease: string): Uint8Array {
     return new Uint8Array(Buffer.from(lease, 'base64'));
@@ -62,6 +63,48 @@ export class ChainService {
     const decodedTxns = txns.map(decodeTransaction);
     const groupedTxns = groupTransactions(decodedTxns);
     return groupedTxns.map(encodeTransaction);
+  }
+
+  /**
+   * Decodes an array of base64-encoded msgpack transaction strings to raw Uint8Array bytes.
+   */
+  decodeBase64Transactions(txs: string[]): Uint8Array[] {
+    return txs.map((tx) => new Uint8Array(Buffer.from(tx, 'base64')));
+  }
+
+  /**
+   * Decodes a transaction in various formats.
+   * Accepts either:
+   *   - an unsigned transaction prefixed with the "TX" tag (output of `encodeTransaction`), or
+   *   - a signed transaction msgpack object `{ txn, sig }` (output of `encodeSignedTransaction`).
+   *
+   * Returns the decoded transaction object, an optional signature, and the canonical
+   * unsigned-with-TX-tag bytes suitable for `addSignatureToTxn`.
+   * Check `sig` property to determine if the transaction is signed.
+   */
+  decodeTransaction(raw: Uint8Array): {
+    txn: Transaction;
+    sig?: Uint8Array;
+    unsignedEncoded: Uint8Array;
+  } {
+    // 'T' = 0x54, 'X' = 0x58 — unsigned transaction with TX prefix
+    if (raw.length >= 2 && raw[0] === 0x54 && raw[1] === 0x58) {
+      const txn = decodeTransaction(raw);
+      return { txn, unsignedEncoded: raw };
+    }
+
+    let decoded: { txn: Transaction; sig?: Uint8Array };
+    try {
+      decoded = decodeSignedTransaction(raw);
+    } catch (error) {
+      throw new HttpErrorByCode[400](`Failed to decode transaction: ${error.message}`);
+    }
+
+    return {
+      txn: decoded.txn,
+      sig: decoded.sig,
+      unsignedEncoded: encodeTransaction(decoded.txn),
+    };
   }
 
   async craftAssetCreateTx(

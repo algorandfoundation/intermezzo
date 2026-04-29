@@ -7,18 +7,20 @@ import { ConfigService } from '@nestjs/config';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
-import { Address } from '@algorandfoundation/algokit-utils';
+import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
-
+import { SponsorRequestDto } from './sponsor-request.dto';
+import { SponsorResponseDto } from './sponsor-response.dto';
+import { SponsorDetailDto } from './sponsor-detail.dto';
 @Injectable()
 export class WalletService {
   constructor(
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
     private readonly configService: ConfigService,
-  ) {}
+  ) { }
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
@@ -540,5 +542,132 @@ export class WalletService {
     const txid = (await this.chainService.submitTransaction(signedTxs)).txid;
 
     return txid;
+  }
+
+  /**
+   * Returns information about the **Sponsor** account that funds fee-sponsorship transactions.
+   *
+   * The sponsor address is what callers must use as both the sender and the receiver of the
+   * 0 ALGO sponsor fee transaction (index 0) of any group submitted to
+   * {@link sponsorTransactionGroup}. Today the sponsor account is the same as the manager
+   * account, but this is intentionally exposed as a separate concept so the two can diverge
+   * in the future without breaking clients.
+   */
+  async getSponsorInfo(vault_token: string): Promise<SponsorDetailDto> {
+    const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    return {
+      public_address: encodeAddress(sponsorPublicKey),
+    };
+  }
+
+  /**
+   * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
+   *
+   * Implements the protocol described in `sponsored-txns.txt`:
+   *   - Index 0 must be an unsigned `pay` transaction with sender = receiver = sponsor and amount = 0.
+   *   - Indices 1..N must already be signed by the user and have `fee = 0`.
+   *   - All transactions must share the same group id.
+   *   - The sponsor fee at index 0 must cover the whole group: `fee >= minFee * N * feeMultiplier`.
+   *
+   * The backend signs only the sponsor fee transaction and returns the full group; the caller
+   * is responsible for submitting it to the network.
+   */
+  async sponsorTransactionGroup(
+    vault_token: string,
+    sponsorRequestDto: SponsorRequestDto,
+  ): Promise<SponsorResponseDto> {
+    const { transactions: base64Transactions, feeMultiplier } = sponsorRequestDto;
+
+    if (!base64Transactions || base64Transactions.length === 0) {
+      throw new Error('Transactions array is required and must not be empty');
+    }
+    if (base64Transactions.length < 2) {
+      throw new Error('Sponsored group must contain at least the sponsor fee txn and one user txn');
+    }
+
+    const rawTxs: Uint8Array[] = this.chainService.decodeBase64Transactions(base64Transactions);
+    const envelopes = rawTxs.map((tx) => this.chainService.decodeTransaction(tx));
+
+    const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    const sponsorAddress: string = encodeAddress(sponsorPublicKey);
+
+    // ---- Group ID validation ----
+    const firstGroupBytes: Uint8Array | undefined = envelopes[0].txn.group;
+    if (!firstGroupBytes || firstGroupBytes.length === 0) {
+      throw new Error('Transactions must be grouped (missing group id)');
+    }
+    const firstGroupId: string = Buffer.from(firstGroupBytes).toString('base64');
+    for (const env of envelopes) {
+      const grp = env.txn.group;
+      if (!grp || Buffer.from(grp).toString('base64') !== firstGroupId) {
+        throw new Error('All transactions must belong to the same group');
+      }
+    }
+
+    // ---- Sponsor fee txn (index 0) validation ----
+    const sponsorEnv = envelopes[0];
+    const sponsorTxn = sponsorEnv.txn;
+
+    if (sponsorEnv.sig) {
+      throw new Error('Sponsor fee transaction (index 0) must be unsigned');
+    }
+    if (sponsorTxn.type !== 'pay') {
+      throw new Error('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
+    }
+    const sponsorTxnSender = sponsorTxn.sender.toString();
+    if (sponsorTxnSender !== sponsorAddress) {
+      throw new Error(`Sponsor fee transaction sender must be the sponsor address (${sponsorAddress})`);
+    }
+    if (!sponsorTxn.payment?.receiver || sponsorTxn.payment.receiver.toString() !== sponsorAddress) {
+      throw new Error(`Sponsor fee transaction receiver must be the sponsor address (${sponsorAddress})`);
+    }
+    const sponsorAmt: bigint = sponsorTxn.payment?.amount ?? 0n;
+    if (sponsorAmt !== 0n) {
+      throw new Error('Sponsor fee transaction amount must be 0');
+    }
+
+    // ---- User txns (indices 1..N) validation ----
+    for (let i = 1; i < envelopes.length; i++) {
+      const env = envelopes[i];
+      if (!env.sig) {
+        throw new Error(`User transaction at index ${i} must be signed by the user`);
+      }
+      const userFee: bigint = env.txn.fee ?? 0n;
+      if (userFee !== 0n) {
+        throw new Error(`User transaction at index ${i} must have fee = 0`);
+      }
+      const userSender = env.txn.sender.toString();
+      if (userSender === sponsorAddress) {
+        throw new Error(`User transaction at index ${i} must not be sent from the sponsor address`);
+      }
+    }
+
+    // ---- Fee coverage validation ----
+    const suggestedParams = await this.chainService.getSuggestedParams();
+    const minFee: bigint = BigInt(suggestedParams.minFee);
+    const multiplier: number = feeMultiplier ?? 1.0;
+    // Round up to the nearest microAlgo to be safe.
+    const requiredFee: bigint = BigInt(Math.ceil(Number(minFee) * envelopes.length * multiplier));
+    const sponsorFee: bigint = sponsorTxn.fee ?? 0n;
+    if (sponsorFee < requiredFee) {
+      throw new Error(
+        `Sponsor fee transaction fee (${sponsorFee}) is below required fee (${requiredFee}) for ${envelopes.length} transactions`,
+      );
+    }
+
+    // ---- Sign sponsor txn, return full group as base64 ----
+    const signedSponsor: Uint8Array = await this.signTxAsManager(sponsorEnv.unsignedEncoded, vault_token);
+
+    const responseTxs: string[] = new Array(base64Transactions.length);
+    responseTxs[0] = Buffer.from(signedSponsor).toString('base64');
+    for (let i = 1; i < base64Transactions.length; i++) {
+      // user txns are returned as-is (already signed by the caller)
+      responseTxs[i] = base64Transactions[i];
+    }
+
+    return {
+      transactions: responseTxs,
+      group_id: firstGroupId,
+    };
   }
 }
