@@ -1,8 +1,6 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { StateSchema } from '@algorandfoundation/algo-models';
 
-import { ApplicationCallTxBuilder } from './algorand.transaction.appl.temp';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import { HttpService } from '@nestjs/axios';
 import { AxiosResponse } from 'axios';
@@ -17,6 +15,8 @@ import {
   TruncatedSuggestedParamsResponse,
 } from './algo-node-responses';
 import {
+  AppCallTransactionFields,
+  AssetConfigTransactionFields,
   AssetTransferTransactionFields,
   decodeTransaction,
   encodeSignedTransaction,
@@ -25,9 +25,9 @@ import {
   PaymentTransactionFields,
   SignedTransaction,
   Transaction,
+  TransactionParams,
   TransactionType,
 } from '@algorandfoundation/algokit-utils/transact';
-import { AssetConfigTransactionFields, TransactionParams } from '@algorandfoundation/algokit-utils/transact';
 import { Address } from '@algorandfoundation/algokit-utils';
 import { AppCallRequestDto } from '../wallet/app-call-request.dto';
 import { base64ToBytes, encodeString, encodeUint64 } from './encoding';
@@ -210,77 +210,62 @@ export class ChainService {
     suggested_params: TruncatedSuggestedParamsResponse,
     fee?: number,
   ) {
-    const builder = new ApplicationCallTxBuilder(
-      this.configService.get('GENESIS_ID'),
-      this.configService.get('GENESIS_HASH'),
-    );
-    builder.addSender(managerPublicAddress);
-    builder.addFee(fee ?? suggested_params.minFee);
-    builder.addFirstValidRound(suggested_params.lastRound);
-    builder.addLastValidRound(suggested_params.lastRound + 1000n);
+    const appCall: AppCallTransactionFields = {
+      appId: appCallRequestDto.appId ? BigInt(appCallRequestDto.appId) : 0n,
+      onComplete: appCallRequestDto.onComplete ?? 0,
+    };
 
-    if (appCallRequestDto.note) builder.addNote(appCallRequestDto.note);
-    if (appCallRequestDto.lease) builder.addLease(this.parseLease(appCallRequestDto.lease));
-
-    if (appCallRequestDto.onComplete) builder.addOnComplete(appCallRequestDto.onComplete);
-
-    let globalStateSchema: StateSchema | undefined;
-    if (appCallRequestDto.globalInts && appCallRequestDto.globalInts > 0) {
-      globalStateSchema = {
-        ...(globalStateSchema ?? {}),
-        nui: Number(appCallRequestDto.globalInts),
-      } as StateSchema;
-    }
-    if (appCallRequestDto.globalByteSlices && appCallRequestDto.globalByteSlices > 0) {
-      globalStateSchema = {
-        ...(globalStateSchema ?? {}),
-        nbs: Number(appCallRequestDto.globalByteSlices),
-      } as StateSchema;
-    }
-    if (globalStateSchema) {
-      builder.addGlobalSchema(globalStateSchema);
+    if (appCallRequestDto.globalInts || appCallRequestDto.globalByteSlices) {
+      appCall.globalStateSchema = {
+        numUints: appCallRequestDto.globalInts ?? 0,
+        numByteSlices: appCallRequestDto.globalByteSlices ?? 0,
+      };
     }
 
-    let localStateSchema: StateSchema | undefined;
-    if (appCallRequestDto.localInts && appCallRequestDto.localInts > 0) {
-      localStateSchema = {
-        ...(localStateSchema ?? {}),
-        nui: Number(appCallRequestDto.localInts),
-      } as StateSchema;
-    }
-    if (appCallRequestDto.localByteSlices && appCallRequestDto.localByteSlices > 0) {
-      localStateSchema = {
-        ...(localStateSchema ?? {}),
-        nbs: Number(appCallRequestDto.localByteSlices),
-      } as StateSchema;
-    }
-    if (localStateSchema) {
-      builder.addLocalSchema(localStateSchema);
+    if (appCallRequestDto.localInts || appCallRequestDto.localByteSlices) {
+      appCall.localStateSchema = {
+        numUints: appCallRequestDto.localInts ?? 0,
+        numByteSlices: appCallRequestDto.localByteSlices ?? 0,
+      };
     }
 
     if (appCallRequestDto.foreignAssets?.length) {
-      builder.addForeignAssets(appCallRequestDto.foreignAssets.map((a: any) => BigInt(a)));
+      appCall.assetReferences = appCallRequestDto.foreignAssets.map((a: any) => BigInt(a));
     }
     if (appCallRequestDto.foreignApps?.length) {
-      builder.addForeignApps(appCallRequestDto.foreignApps.map((a: any) => BigInt(a)));
+      appCall.appReferences = appCallRequestDto.foreignApps.map((a: any) => BigInt(a));
     }
     if (appCallRequestDto.foreignAccounts?.length) {
-      builder.addAccounts(appCallRequestDto.foreignAccounts);
+      appCall.accountReferences = appCallRequestDto.foreignAccounts.map((a) => Address.fromString(a));
     }
 
     if (appCallRequestDto.boxes?.length) {
-      builder.addBoxes(appCallRequestDto.boxes);
+      appCall.boxReferences = appCallRequestDto.boxes.map((b) => ({
+        appId: BigInt(b.i),
+        name: new Uint8Array(Buffer.from(b.n, 'base64')),
+      }));
     }
 
-    if (appCallRequestDto.approvalProgram) builder.addApprovalProgram(base64ToBytes(appCallRequestDto.approvalProgram));
-    if (appCallRequestDto.clearProgram) builder.addClearStateProgram(base64ToBytes(appCallRequestDto.clearProgram));
-
-    if (appCallRequestDto.appId) builder.addApplicationId(BigInt(appCallRequestDto.appId));
+    if (appCallRequestDto.approvalProgram) appCall.approvalProgram = base64ToBytes(appCallRequestDto.approvalProgram);
+    if (appCallRequestDto.clearProgram) appCall.clearStateProgram = base64ToBytes(appCallRequestDto.clearProgram);
 
     const appArgs = await this.processAbiMethodArgs(appCallRequestDto.args);
-    if (appArgs.length > 0) builder.addApplicationArgs(appArgs);
+    if (appArgs.length > 0) appCall.args = appArgs;
 
-    return builder.get().encode();
+    const txnParams: TransactionParams = {
+      type: TransactionType.AppCall,
+      appCall: appCall,
+      sender: Address.fromString(managerPublicAddress),
+      fee: BigInt(fee ?? suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: appCallRequestDto.note ? Uint8Array.from(Buffer.from(appCallRequestDto.note)) : undefined,
+      lease: appCallRequestDto.lease ? this.parseLease(appCallRequestDto.lease) : undefined,
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
   }
 
   /**
@@ -340,7 +325,7 @@ export class ChainService {
       }
       case 'address': {
         // decodeAddress returns the raw public key bytes for an address string
-        return new Address(value).toString();
+        return new Address(value).publicKey;
       }
       default:
         throw new Error(`Unsupported ABI argument type: ${type}`);

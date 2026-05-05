@@ -305,8 +305,6 @@ export class WalletService {
     for (const tx of unSignedGroupedTxns) {
       const isUserTx: boolean = decodeTransaction(tx).sender.toString() == userPublicAddress;
       const isManagerTx: boolean = decodeTransaction(tx).sender.toString() == managerPublicAddress;
-      const isUserTx: boolean = decodeTransaction(tx).sender.toString() == userPublicAddress;
-      const isManagerTx: boolean = decodeTransaction(tx).sender.toString() == managerPublicAddress;
 
       if (isUserTx) {
         signedTxs.push(await this.signTxAsUser(userId, tx, vault_token));

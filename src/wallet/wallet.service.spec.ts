@@ -554,8 +554,8 @@ describe('WalletService', () => {
   describe('appCall()', () => {
     const managerPubKey = randomBytes(32);
     const userPubKey = randomBytes(32);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new Address(managerPubKey).toString();
+    const userPublicAddress = new Address(userPubKey).toString();
     const vaultToken = 'vault_token';
     const suggestedParams = { minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse;
     const dummyAppTx = new Uint8Array([10, 11, 12]);
@@ -619,8 +619,8 @@ describe('WalletService', () => {
   describe('groupTransaction()', () => {
     const managerPubKey = randomBytes(32);
     const userPubKey = randomBytes(32);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new Address(managerPubKey).toString();
+    const userPublicAddress = new Address(userPubKey).toString();
     const vaultToken = 'vault_token';
     const suggestedParams = { minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse;
     const dummyTx1 = new Uint8Array([1, 2, 3]);
@@ -664,9 +664,11 @@ describe('WalletService', () => {
       chainServiceMock.setGroupID.mockReturnValueOnce([dummyGroupedTx1, dummyGroupedTx2]);
 
       // Mock decodeTransaction to return manager sender for both grouped txs
-      const managerSndBytes = new AlgorandEncoder().decodeAddress(managerPublicAddress);
-      jest.spyOn(AlgorandEncoder.prototype, 'decodeTransaction').mockReturnValue({ snd: managerSndBytes } as any);
-      jest.spyOn(AlgorandEncoder.prototype, 'encodeAddress').mockReturnValue(managerPublicAddress);
+      const managerSndAddress = Address.fromString(managerPublicAddress);
+      jest
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        .spyOn(require('@algorandfoundation/algokit-utils/transact'), 'decodeTransaction')
+        .mockReturnValue({ sender: managerSndAddress } as any);
 
       const groupRequestDto = {
         transactions: [

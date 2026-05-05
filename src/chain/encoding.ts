@@ -1,5 +1,3 @@
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
-
 export const LENGTH_ENCODE_BYTE_SIZE = 2;
 /**
  * Check whether the environment is Node.js (as opposed to the browser)
@@ -95,7 +93,9 @@ export function decodeUint64(data: any, decodingMode: any = 'safe') {
 
   // insert 0s at the beginning if data is smaller than 8 bytes
   const padding = new Uint8Array(8 - data.byteLength);
-  const encoding = AlgorandEncoder.ConcatArrays(padding, data);
+  const encoding = new Uint8Array(8);
+  encoding.set(padding);
+  encoding.set(data, padding.length);
   const view = new DataView(encoding.buffer);
 
   const num = view.getBigUint64(0);
