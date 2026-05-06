@@ -241,7 +241,9 @@ export class ChainService {
 
     if (appCallRequestDto.boxes?.length) {
       appCall.boxReferences = appCallRequestDto.boxes.map((b) => ({
-        appId: BigInt(b.i),
+        // `i` is the index into the foreign-apps array (0 = the called app
+        // itself). Default to 0 when callers omit it.
+        appId: b.i !== undefined && b.i !== null ? BigInt(b.i) : 0n,
         name: new Uint8Array(Buffer.from(b.n, 'base64')),
       }));
     }
