@@ -8,7 +8,7 @@ import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
+import { Address } from '@algorandfoundation/algokit-utils';
 import {
   TruncatedAccountAssetResponse,
   TruncatedAccountResponse,
@@ -36,7 +36,7 @@ describe('WalletService', () => {
     configServiceMock.get.mockImplementation((key: string) => {
       const config = {
         GENESIS_ID: 'test-genesis-id',
-        GENESIS_HASH: 'test-genesis-hash',
+        GENESIS_HASH: 'SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
         NODE_HTTP_SCHEME: 'http',
         NODE_HOST: 'localhost',
         NODE_PORT: '4001',
@@ -60,9 +60,9 @@ describe('WalletService', () => {
     const result = await walletService.userCreate(userId, 'vault_token');
 
     // expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, 'vault_token');
-    // expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(new AlgorandEncoder().encodeAddress(pubKey));
+    // expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(new Address(pubKey).toString());
     expect(result).toStrictEqual({
-      public_address: new AlgorandEncoder().encodeAddress(pubKey),
+      public_address: new Address(pubKey).toString(),
       user_id: userId,
       algoBalance: '0',
     });
@@ -85,7 +85,7 @@ describe('WalletService', () => {
     const result = await walletService.getKeys('vault_token');
     expect(result).toStrictEqual([
       {
-        public_address: new AlgorandEncoder().encodeAddress(pubKey),
+        public_address: new Address(pubKey).toString(),
         user_id: userId,
       },
     ]);
@@ -105,7 +105,7 @@ describe('WalletService', () => {
       'vault_token',
     );
     expect(result).toStrictEqual({
-      public_address: new AlgorandEncoder().encodeAddress(pubKey),
+      public_address: new Address(pubKey).toString(),
       user_id: '123581253191824129481240513501928401928',
       algoBalance: algoBalanceMock.toString(),
     });
@@ -126,7 +126,7 @@ describe('WalletService', () => {
 
     expect(result).toStrictEqual(
       plainToClass(ManagerDetailDto, {
-        public_address: new AlgorandEncoder().encodeAddress(pubKey),
+        public_address: new Address(pubKey).toString(),
         algoBalance: algoBalanceMock.toString(),
         assets: [],
       }),
@@ -136,7 +136,7 @@ describe('WalletService', () => {
   it('\(OK) createAsset()', async () => {
     const pubKey = randomBytes(32);
 
-    const address = new AlgorandEncoder().encodeAddress(pubKey);
+    const address = new Address(pubKey).toString();
 
     const createAssetDto: CreateAssetDto = {
       total: 5,
@@ -183,8 +183,8 @@ describe('WalletService', () => {
     const lease = randomBytes(32).toString('base64');
     const note = 'Note to self: notes are recorded for all';
     const vaultToken = 'vault_token';
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
+    const userPublicAddress = new Address(userPubKey).toString();
+    const managerPublicAddress = new Address(managerPubKey).toString();
     const suggestedParams = {
       minFee: 1000,
       lastRound: 1n,
@@ -487,8 +487,8 @@ describe('WalletService', () => {
     const lease = randomBytes(32).toString('base64');
     const note = 'Note to self: notes are recorded for all';
     const vaultToken = 'vault_token';
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
+    const userPublicAddress = new Address(userPubKey).toString();
+    const managerPublicAddress = new Address(managerPubKey).toString();
     const suggestedParams = {
       minFee: 1000,
       lastRound: 1n,
@@ -554,8 +554,8 @@ describe('WalletService', () => {
   describe('appCall()', () => {
     const managerPubKey = randomBytes(32);
     const userPubKey = randomBytes(32);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new Address(managerPubKey).toString();
+    const userPublicAddress = new Address(userPubKey).toString();
     const vaultToken = 'vault_token';
     const suggestedParams = { minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse;
     const dummyAppTx = new Uint8Array([10, 11, 12]);
@@ -619,8 +619,8 @@ describe('WalletService', () => {
   describe('groupTransaction()', () => {
     const managerPubKey = randomBytes(32);
     const userPubKey = randomBytes(32);
-    const managerPublicAddress = new AlgorandEncoder().encodeAddress(managerPubKey);
-    const userPublicAddress = new AlgorandEncoder().encodeAddress(userPubKey);
+    const managerPublicAddress = new Address(managerPubKey).toString();
+    const userPublicAddress = new Address(userPubKey).toString();
     const vaultToken = 'vault_token';
     const suggestedParams = { minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse;
     const dummyTx1 = new Uint8Array([1, 2, 3]);
@@ -664,9 +664,11 @@ describe('WalletService', () => {
       chainServiceMock.setGroupID.mockReturnValueOnce([dummyGroupedTx1, dummyGroupedTx2]);
 
       // Mock decodeTransaction to return manager sender for both grouped txs
-      const managerSndBytes = new AlgorandEncoder().decodeAddress(managerPublicAddress);
-      jest.spyOn(AlgorandEncoder.prototype, 'decodeTransaction').mockReturnValue({ snd: managerSndBytes } as any);
-      jest.spyOn(AlgorandEncoder.prototype, 'encodeAddress').mockReturnValue(managerPublicAddress);
+      const managerSndAddress = Address.fromString(managerPublicAddress);
+      jest
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        .spyOn(require('@algorandfoundation/algokit-utils/transact'), 'decodeTransaction')
+        .mockReturnValue({ sender: managerSndAddress } as any);
 
       const groupRequestDto = {
         transactions: [

@@ -1,7 +1,7 @@
 services:
 
   vault:
-    image: hashicorp/vault:latest
+    image: hashicorp/vault:1.15.6
     container_name: vault
     ports:
       - "8200:8200"
@@ -26,7 +26,19 @@ services:
     container_name: pawn
     env_file:
       - .env
+    environment:
+      NODE_HOST: algod
+      NODE_PORT: "8080"
     volumes:
       - .:/opt/app/
+      - /opt/app/node_modules
     ports:
       - "3000:3000"
+    networks:
+      - default
+      - algokit_sandbox
+
+networks:
+  algokit_sandbox:
+    external: true
+    name: algokit_sandbox_default

@@ -10,7 +10,23 @@ jobs:
       checks: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
+
+      # Install AlgoKit at the top of the workflow so the LocalNet sandbox
+      # can be brought up as early as possible and warm up in the background
+      # while the rest of the build steps run.
+      - name: Install AlgoKit
+        run: pipx install algokit
+
+      - name: Start AlgoKit LocalNet
+        run: algokit localnet start
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Install dependencies
         run: yarn
@@ -21,9 +37,43 @@ jobs:
           test-script: yarn jest
 
       - name: Lint check
-        run: |
-          yarn lint
+        run: yarn lint
 
       - name: Format check
+        run: yarn format
+
+      # Sync GENESIS_ID / GENESIS_HASH from the running LocalNet into .env
+      # so pawn signs transactions with the correct genesis. LocalNet is
+      # already started above, so skip the start step inside the script.
+      - name: Sync LocalNet genesis into .env
+        run: SKIP_LOCALNET_START=1 ./scripts/setup_localnet.sh
+
+      # Reset Vault bind-mounted storage so Vault boots un-initialized.
+      # Vault writes its file storage as the in-image vault user (uid 100),
+      # so on the host the directory often ends up owned by root.
+      - name: Reset Vault bind-mounted storage
         run: |
-          yarn format
+          docker compose down -v --remove-orphans || true
+          if [ -e volumes/vault ]; then sudo rm -rf volumes/vault; fi
+          mkdir -p volumes/vault/file volumes/vault/logs
+          chmod -R 777 volumes/vault
+
+      - name: Start docker compose stack (vault + pawn)
+        run: docker compose up -d --wait
+
+      #  Chown /opt/app inside the container to
+      # `node:node` so the init process can write to the bind mount.
+      - name: Make workspace writable for pawn container
+        run: docker compose exec -T --user root pawn chown -R node:node /opt/app
+
+      - name: Initialize Vault (development)
+        run: docker compose exec -T pawn yarn vault:development:init
+
+      - name: Prefund manager account on LocalNet
+        run: ./scripts/fund_manager.sh
+
+        #TODO: Resolve the node modules overriding
+      - name: Re-install dependencies
+        run: yarn
+      - name: E2E tests
+        run: yarn test:e2e

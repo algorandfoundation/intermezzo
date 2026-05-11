@@ -4,12 +4,14 @@ import { ChainService } from '../chain/chain.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { UserInfoResponseDto } from './user-info-response.dto';
 import { ConfigService } from '@nestjs/config';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
+import { Address } from '@algorandfoundation/algokit-utils';
+import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
+
 @Injectable()
 export class WalletService {
   constructor(
@@ -22,7 +24,7 @@ export class WalletService {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
 
     // get algo balance
-    const encodedAddress = new AlgorandEncoder().encodeAddress(public_address);
+    const encodedAddress = new Address(public_address).toString();
     const algoBalance: bigint = await this.chainService.getAccountBalance(encodedAddress);
     Logger.debug(`User ${user_id} Algo Balance: ${algoBalance}`);
 
@@ -37,20 +39,18 @@ export class WalletService {
     const public_address = await this.vaultService.getManagerPublicKey(vault_token);
     // asset holdings
     const account: AssetHolding[] = await this.chainService.getAccountAssetHoldings(
-      new AlgorandEncoder().encodeAddress(public_address),
+      new Address(public_address).toString(),
     );
 
     // Log debug with stringify
     Logger.debug(`Manager account details: ${JSON.stringify(account)}`);
 
     // Get Algo Balance
-    const algoBalance: bigint = await this.chainService.getAccountBalance(
-      new AlgorandEncoder().encodeAddress(public_address),
-    );
+    const algoBalance: bigint = await this.chainService.getAccountBalance(new Address(public_address).toString());
     Logger.debug(`Manager Algo Balance: ${algoBalance}`);
 
     return plainToClass(ManagerDetailDto, {
-      public_address: new AlgorandEncoder().encodeAddress(public_address),
+      public_address: new Address(public_address).toString(),
       assets: account,
       algoBalance: algoBalance.toString(),
     });
@@ -61,7 +61,7 @@ export class WalletService {
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
     const public_key: Buffer = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
-    const public_address: string = new AlgorandEncoder().encodeAddress(public_key);
+    const public_address: string = new Address(public_key).toString();
     return { user_id, public_address, algoBalance: '0' }; // Initial balance is set to 0
   }
 
@@ -71,7 +71,7 @@ export class WalletService {
 
     // convert all public keys to algorand address
     keys.map((key) => {
-      key.public_address = new AlgorandEncoder().encodeAddress(Buffer.from(key.public_address, 'base64'));
+      key.public_address = new Address(Buffer.from(key.public_address, 'base64')).toString();
     });
 
     return keys;
@@ -140,7 +140,7 @@ export class WalletService {
 
   async createAsset(options: CreateAssetDto, vault_token: string) {
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    const managerPublicAddress: string = new Address(managerPublicKey).toString();
     const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(managerPublicAddress, options);
     const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(tx, vault_token);
     const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
@@ -169,7 +169,7 @@ export class WalletService {
     try {
       if (fromUserId === 'manager') {
         const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-        fromAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+        fromAddress = new Address(managerPublicKey).toString();
       } else {
         fromAddress = (await this.getUserInfo(fromUserId, vault_token)).public_address;
       }
@@ -229,7 +229,7 @@ export class WalletService {
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    const managerPublicAddress: string = new Address(managerPublicKey).toString();
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -303,11 +303,9 @@ export class WalletService {
 
     const signedTxs: Uint8Array[] = [];
     for (const tx of unSignedGroupedTxns) {
-      const encoder: AlgorandEncoder = new AlgorandEncoder();
-      const isUserTx: boolean =
-        encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == userPublicAddress;
-      const isManagerTx: boolean =
-        encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd)) == managerPublicAddress;
+      const senderAddress: string = decodeTransaction(tx).sender.toString();
+      const isUserTx: boolean = senderAddress == userPublicAddress;
+      const isManagerTx: boolean = senderAddress == managerPublicAddress;
 
       if (isUserTx) {
         signedTxs.push(await this.signTxAsUser(userId, tx, vault_token));
@@ -346,7 +344,7 @@ export class WalletService {
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    const managerPublicAddress: string = new Address(managerPublicKey).toString();
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -386,7 +384,7 @@ export class WalletService {
     try {
       if (appCallRequestDto.fromUserId === 'manager') {
         const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-        fromAddress = new AlgorandEncoder().encodeAddress(managerPublicKey);
+        fromAddress = new Address(managerPublicKey).toString();
       } else {
         fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
       }
@@ -430,7 +428,7 @@ export class WalletService {
    */
   async groupTransaction(vault_token: string, groupRequestDto: GroupRequestDto) {
     const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new AlgorandEncoder().encodeAddress(managerPublicKey);
+    const managerPublicAddress: string = new Address(managerPublicKey).toString();
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -525,12 +523,11 @@ export class WalletService {
       throw new Error('No transactions to group');
     }
 
-    const encoder = new AlgorandEncoder();
     const groupedTxns: Uint8Array[] = this.chainService.setGroupID(unSignedTxs);
 
     const signedTxs: Uint8Array[] = [];
     for (const tx of groupedTxns) {
-      const sender = encoder.encodeAddress(Buffer.from(encoder.decodeTransaction(tx).snd));
+      const sender = decodeTransaction(tx).sender.toString();
       if (sender === managerPublicAddress) {
         signedTxs.push(await this.signTxAsManager(tx, vault_token));
       } else if (addressToUserId[sender]) {

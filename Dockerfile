@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:24-alpine
 
 RUN apk add --no-cache python3 make g++ pkgconfig build-base linux-headers
 

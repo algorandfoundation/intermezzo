@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import axios from 'axios';
 import assert from 'assert';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 // Constants
 const VAULT_BASE_URL = 'http://vault:8200';
@@ -14,11 +14,59 @@ const VAULT_MANAGER_KEY = 'manager';
 const VAULT_SEAL_KEYS_FILE = 'vault-seal-keys.json';
 
 const MANAGERS_ROLE_AND_SECRET_KEYS_FILE = 'manager-role-and-secrets.json';
+const MANAGER_ADDRESS_FILE = 'manager-address.txt';
 const USERS_ROLE_AND_SECRET_KEYS_FILE = 'user-role-and-secrets.json';
 const USERS_POLICY_NAME = 'pawn_users_policy';
 const USERS_APP_ROLE_NAME = 'pawn_users_approle';
 const MANAGERS_POLICY_NAME = 'pawn_managers_policy';
 const MANAGERS_APP_ROLE_NAME = 'pawn_managers_approle';
+
+// Vault `/v1/sys/health` status codes — see
+// https://developer.hashicorp.com/vault/api-docs/system/health
+type VaultHealth = {
+  initialized: boolean;
+  sealed: boolean;
+};
+
+// Query Vault's health endpoint to determine the actual server state, rather
+// than inferring it from the local presence of `vault-seal-keys.json`. The
+// health endpoint intentionally returns non-2xx codes for not-initialized /
+// sealed / standby — we explicitly accept any status so we can read the body.
+async function getVaultHealth(): Promise<VaultHealth> {
+  // Vault may not be listening yet when this script first runs (the container
+  // is up but the HTTP server hasn't bound the port). Retry transient
+  // connection errors for up to ~60s before giving up.
+  const maxAttempts = 60;
+  const delayMs = 1000;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await axios.get(`${VAULT_BASE_URL}/v1/sys/health`, {
+        validateStatus: () => true,
+        timeout: 2000,
+      });
+      return {
+        initialized: !!response.data?.initialized,
+        sealed: !!response.data?.sealed,
+      };
+    } catch (error) {
+      lastError = error;
+      const code = (error as { code?: string }).code;
+      const isTransient =
+        code === 'ECONNREFUSED' ||
+        code === 'ENOTFOUND' ||
+        code === 'EAI_AGAIN' ||
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT';
+      if (!isTransient) throw error;
+      if (attempt === 1 || attempt % 5 === 0) {
+        console.log(`Waiting for Vault to be reachable (attempt ${attempt}/${maxAttempts})...`);
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastError;
+}
 
 // Function to initialize Vault
 async function initVault() {
@@ -44,6 +92,7 @@ async function initVault() {
     return response.data;
   } catch (error) {
     console.error('Failed to initialize Vault:', error);
+    throw error;
   }
 }
 
@@ -387,24 +436,46 @@ async function getOrCreateManager(token: string) {
   );
   assert(response.status == 200);
 
-  const publicKey = new AlgorandEncoder().encodeAddress(Buffer.from(response.data.data.keys['1'].public_key, 'base64'));
+  const publicKey = new Address(Buffer.from(response.data.data.keys['1'].public_key, 'base64')).toString();
+  // Persist the manager Algorand address so external tooling (e.g. CI) can
+  // prefund it from a LocalNet dispenser without having to re-derive it.
+  fs.writeFileSync(MANAGER_ADDRESS_FILE, publicKey);
   console.log('Manager public key: \n', publicKey);
 }
 
 // Main function
 async function main() {
+  // Decide what to do based on Vault's actual server state, not on the
+  // local presence of `vault-seal-keys.json`. Inferring from the file alone
+  // is fragile: if Vault file storage was persisted from a previous run
+  // (e.g. `volumes/vault/file/`) but the seal-keys file isn't on disk,
+  // `POST /v1/sys/init` returns 400 "Vault is already initialized" and the
+  // script crashes downstream trying to read `sealKeys.root_token`.
+  const health = await getVaultHealth();
+  const sealKeysFileExists = fs.existsSync(VAULT_SEAL_KEYS_FILE);
+
   let sealKeys: any;
-  // Check if Vault seal keys file exists
-  if (!fs.existsSync(VAULT_SEAL_KEYS_FILE)) {
+  if (!health.initialized) {
+    // Fresh Vault — initialize and persist seal keys.
     sealKeys = await initVault();
-  } else {
-    try {
-      sealKeys = JSON.parse(fs.readFileSync(VAULT_SEAL_KEYS_FILE).toString());
+  } else if (sealKeysFileExists) {
+    // Already initialized and we have the seal keys locally — just unseal
+    // (idempotent if already unsealed) and proceed.
+    sealKeys = JSON.parse(fs.readFileSync(VAULT_SEAL_KEYS_FILE).toString());
+    if (health.sealed) {
       await unsealVault(sealKeys.keys[0], sealKeys.root_token);
-    } catch (error) {
-      console.error('Failed to unseal Vault:', error);
-      // TODO raise error
     }
+  } else {
+    // Initialized but seal keys are missing — we cannot unseal or
+    // authenticate. This usually means stale Vault file storage was
+    // carried over from a previous run. Surface a clear error instead of
+    // crashing on `undefined.root_token`.
+    throw new Error(
+      `Vault is already initialized but '${VAULT_SEAL_KEYS_FILE}' is not present. ` +
+        `This typically means stale Vault file storage exists from a previous run. ` +
+        `Reset by removing the persisted storage (e.g. 'rm -rf volumes/vault') and ` +
+        `recreating the vault container, then re-run this script.`,
+    );
   }
 
   console.log('\n\n------------\nVault Root Token:\n', sealKeys.root_token, '\n------------\n\n');
@@ -421,4 +492,7 @@ async function main() {
 }
 
 // Run main function
-main();
+main().catch((error) => {
+  console.error('Vault development init failed:', error);
+  process.exit(1);
+});

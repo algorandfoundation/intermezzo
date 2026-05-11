@@ -1,12 +1,10 @@
 import { Controller, Logger } from '@nestjs/common';
 
-import { ConfigService } from '@nestjs/config';
-import { Crafter } from '@algorandfoundation/algo-models/dist/types/crafter.role';
-import { AlgorandEncoder, AlgorandTransactionCrafter } from '@algorandfoundation/algo-models';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
 import { AuthService } from '../auth/auth.service';
 import { TruncatedPostTransactionsResponse } from 'src/chain/algo-node-responses';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 @Controller()
 export class WalletCLI {
@@ -16,7 +14,6 @@ export class WalletCLI {
     private readonly authService: AuthService,
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
-    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -60,7 +57,7 @@ export class WalletCLI {
     keyName: string = process.env.VAULT_MANAGER_KEY,
   ): Promise<string> {
     const publicKey: Buffer = await this.vaultService.getKey(keyName, keyPath, this.latestVaultToken);
-    return new AlgorandEncoder().encodeAddress(publicKey);
+    return new Address(publicKey).toString();
   }
 
   /**
@@ -103,13 +100,5 @@ export class WalletCLI {
    */
   async getLastRound(): Promise<bigint> {
     return this.chainService.getLastRound();
-  }
-
-  /**
-   *
-   * @returns
-   */
-  craft(): Crafter {
-    return new AlgorandTransactionCrafter(this.configService.get('GENESIS_ID'), this.configService.get('GENESIS_HASH'));
   }
 }

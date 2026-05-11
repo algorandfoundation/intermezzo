@@ -1,3 +1,4 @@
+manager-address.txt
 node_modules/*
 !node_modules/.gitkeep
 dist/*
@@ -13,3 +14,4 @@ coverage/
 manager-role-and-secrets.json
 user-role-and-secrets.json
 prompt
+*.tgz

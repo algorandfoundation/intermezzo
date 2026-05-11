@@ -1,10 +1,18 @@
 import { ChainService } from './chain.service';
 import { ConfigService } from '@nestjs/config';
-import { AlgorandEncoder } from '@algorandfoundation/algo-models';
 import createMockInstance from 'jest-create-mock-instance';
 import { HttpService } from '@nestjs/axios';
 import { Axios } from 'axios';
 import { TruncatedAccountResponse } from 'src/chain/algo-node-responses';
+import {
+  decodeTransaction,
+  encodeTransaction,
+  PaymentTransactionFields,
+  Transaction,
+  TransactionParams,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 describe('ChainService', () => {
   let chainService: ChainService;
@@ -17,7 +25,7 @@ describe('ChainService', () => {
     configServiceMock.get.mockImplementation((key: string) => {
       const config = {
         GENESIS_ID: 'test-genesis-id',
-        GENESIS_HASH: 'test-genesis-hash',
+        GENESIS_HASH: 'SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
         NODE_HTTP_SCHEME: 'http',
         NODE_HOST: 'localhost',
         NODE_PORT: '4001',
@@ -36,7 +44,23 @@ describe('ChainService', () => {
 
   describe('addSignatureToTxn', () => {
     it('should add a signature to a given transaction', () => {
-      const txn = Uint8Array.of(1, 2, 3);
+      const payment: PaymentTransactionFields = {
+        receiver: Address.fromString('I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU'),
+        amount: 0n,
+      };
+
+      const txnFields: TransactionParams = {
+        type: TransactionType.Payment,
+        sender: Address.fromString('I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU'),
+        fee: 1000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')),
+        payment,
+      };
+
+      const txn = encodeTransaction(new Transaction(txnFields));
       const sig = Uint8Array.of(4, 5, 6);
 
       const result = chainService.addSignatureToTxn(txn, sig);
@@ -76,11 +100,13 @@ describe('ChainService', () => {
       const groupedTxns: Uint8Array[] = chainService.setGroupID(txns);
 
       expect(groupedTxns.length).toBe(txns.length);
-      const groupId = new AlgorandEncoder().computeGroupId(txns);
-      for (const txn of groupedTxns) {
-        const decodedTx = new AlgorandEncoder().decodeTransaction(txn);
-        expect(decodedTx.grp).toEqual(groupId);
-      }
+
+      const decodedGroupTxns = groupedTxns.map(decodeTransaction);
+      const groupIds = decodedGroupTxns.map((tx) => tx.group);
+
+      expect(groupIds).toHaveLength(txns.length);
+      expect(groupIds[0]).toBeDefined();
+      expect(groupIds.every((groupId) => groupId && groupIds[0]!.toString() === groupId!.toString())).toBe(true);
     });
   });
 
@@ -95,7 +121,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const dummyAddress4 = '6L7ABTLU2BZOZPTNO7FT3F35622CLGBCMMQGLOFUNDTSEZHIL62IARTTR4';
@@ -118,26 +144,25 @@ describe('ChainService', () => {
       const result = await chainService.craftAssetCreateTx(creatorAddress, options);
 
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        apar: {
-          an: 'Asset',
-          au: 'http://example.com',
-          c: new AlgorandEncoder().decodeAddress(dummyAddress5),
-          dc: 2,
-          f: new AlgorandEncoder().decodeAddress(dummyAddress4),
-          m: new AlgorandEncoder().decodeAddress(dummyAddress2),
-          r: new AlgorandEncoder().decodeAddress(dummyAddress3),
-          t: 1000,
-          un: 'UNIT',
-        },
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lv: 1001,
-        snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
-        type: 'acfg',
-      });
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.AssetConfig);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(dummyAddress1));
+      expect(decoded.assetConfig).toBeDefined();
+      expect(decoded.assetConfig?.assetId).toEqual(0n);
+      expect(decoded.assetConfig?.total).toEqual(1000n);
+      expect(decoded.assetConfig?.decimals).toEqual(2);
+      expect(decoded.assetConfig?.unitName).toEqual('UNIT');
+      expect(decoded.assetConfig?.assetName).toEqual('Asset');
+      expect(decoded.assetConfig?.url).toEqual('http://example.com');
+      expect(decoded.assetConfig?.manager).toEqual(Address.fromString(dummyAddress2));
+      expect(decoded.assetConfig?.reserve).toEqual(Address.fromString(dummyAddress3));
+      expect(decoded.assetConfig?.freeze).toEqual(Address.fromString(dummyAddress4));
+      expect(decoded.assetConfig?.clawback).toEqual(Address.fromString(dummyAddress5));
     });
   });
 
@@ -152,22 +177,23 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
 
       const result = await chainService.craftPaymentTx(dummyAddress1, dummyAddress2, 2);
 
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        amt: 2,
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lv: 1001,
-        rcv: new AlgorandEncoder().decodeAddress(dummyAddress2),
-        snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
-        type: 'pay',
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.Payment);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(dummyAddress1));
+      expect(decoded.payment).toEqual({
+        amount: BigInt(2),
+        receiver: Address.fromString(dummyAddress2),
       });
     });
   });
@@ -183,7 +209,7 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const lease = 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD';
       const leaseB64 = Buffer.from(lease).toString('base64');
@@ -192,19 +218,20 @@ describe('ChainService', () => {
       const result = await chainService.craftAssetTransferTx(dummyAddress1, dummyAddress2, 1234n, 2, leaseB64, note);
 
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        aamt: 2,
-        arcv: new AlgorandEncoder().decodeAddress(dummyAddress2),
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lx: new Uint8Array(Buffer.from(lease)),
-        lv: 1001,
-        note: new Uint8Array(Buffer.from(note)),
-        snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
-        type: 'axfer',
-        xaid: 1234,
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.AssetTransfer);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(dummyAddress1));
+      expect(decoded.lease).toEqual(new Uint8Array(Buffer.from(lease)));
+      expect(decoded.note).toEqual(new Uint8Array(Buffer.from(note)));
+      expect(decoded.assetTransfer).toEqual({
+        assetId: 1234n,
+        amount: BigInt(2),
+        receiver: Address.fromString(dummyAddress2),
       });
     });
 
@@ -218,22 +245,24 @@ describe('ChainService', () => {
       });
 
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
 
       const result = await chainService.craftAssetTransferTx(dummyAddress1, dummyAddress2, 1234n, 0);
 
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        arcv: new AlgorandEncoder().decodeAddress(dummyAddress2),
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lv: 1001,
-        snd: new AlgorandEncoder().decodeAddress(dummyAddress1),
-        type: 'axfer',
-        xaid: 1234,
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.AssetTransfer);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(dummyAddress1));
+      expect(decoded.assetTransfer).toEqual({
+        assetId: 1234n,
+        amount: BigInt(0),
+        receiver: Address.fromString(dummyAddress2),
       });
     });
   });
@@ -248,7 +277,7 @@ describe('ChainService', () => {
         status: 200,
       });
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
@@ -269,20 +298,21 @@ describe('ChainService', () => {
         note,
       );
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        aamt: 2,
-        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lx: new Uint8Array(Buffer.from(lease)),
-        lv: 1001,
-        note: new Uint8Array(Buffer.from(note)),
-        snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
-        type: 'axfer',
-        xaid: 1234,
-        asnd: new AlgorandEncoder().decodeAddress(senderAddress),
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.AssetTransfer);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(clawbackAddress));
+      expect(decoded.lease).toEqual(new Uint8Array(Buffer.from(lease)));
+      expect(decoded.note).toEqual(new Uint8Array(Buffer.from(note)));
+      expect(decoded.assetTransfer).toEqual({
+        assetId: 1234n,
+        amount: BigInt(2),
+        receiver: Address.fromString(receiverAddress),
+        assetSender: Address.fromString(senderAddress),
       });
     });
     it('if amount is zero, should not include amount in asset clawback transaction', async () => {
@@ -294,7 +324,7 @@ describe('ChainService', () => {
         status: 200,
       });
       // Use a valid dummy Algorand address for all address options.
-      const dummyAddress1 = 'IXQNL3EO457FGY2IWRCNP6ZZW45KCTFBEAYZN337ZJ4NB4VZ5OG62WX2ZE';
+      const dummyAddress1 = 'URJBIC3Q6VU2ZOCUHVUWQGLYUIPAHORKPAQWHF2EO22GU3NCJXVN2OHDE4';
       const dummyAddress2 = 'MONEYMBRSMUAM2NGL6PCEQEDVHFWAQB6DU47NUS6P5DJM4OJFN7E7DSVBA';
       const dummyAddress3 = 'DMYOIEE6HAIQF5QUF4XGNBL4GUZOZF6RFQCCB2NXP35AKK2674HBILQQLA';
       const clawbackAddress = dummyAddress1;
@@ -310,17 +340,19 @@ describe('ChainService', () => {
         amount,
       );
       expect(result).toBeInstanceOf(Uint8Array);
-      expect(new AlgorandEncoder().decodeTransaction(result)).toStrictEqual({
-        arcv: new AlgorandEncoder().decodeAddress(receiverAddress),
-        fee: 1000,
-        fv: 1,
-        gen: 'test-genesis-id',
-        gh: new Uint8Array([181, 235, 45, 250, 7, 167, 122, 200, 172, 250, 22, 172]),
-        lv: 1001,
-        snd: new AlgorandEncoder().decodeAddress(clawbackAddress),
-        type: 'axfer',
-        xaid: 1234,
-        asnd: new AlgorandEncoder().decodeAddress(senderAddress),
+      const decoded = decodeTransaction(result);
+      expect(decoded.type).toEqual(TransactionType.AssetTransfer);
+      expect(decoded.fee).toEqual(BigInt(1000));
+      expect(decoded.firstValid).toEqual(BigInt(1));
+      expect(decoded.lastValid).toEqual(BigInt(1001));
+      expect(decoded.genesisId).toEqual('test-genesis-id');
+      expect(decoded.genesisHash).toEqual(new Uint8Array(Buffer.from(configServiceMock.get('GENESIS_HASH'), 'base64')));
+      expect(decoded.sender).toEqual(Address.fromString(clawbackAddress));
+      expect(decoded.assetTransfer).toEqual({
+        assetId: 1234n,
+        amount: BigInt(0),
+        receiver: Address.fromString(receiverAddress),
+        assetSender: Address.fromString(senderAddress),
       });
     });
   });
