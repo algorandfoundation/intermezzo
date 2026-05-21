@@ -31,16 +31,16 @@ jobs:
       - name: Install dependencies
         run: yarn --frozen-lockfile --ignore-engines
 
-      - uses: ArtiomTr/jest-coverage-report-action@v2
-        with:
-          package-manager: yarn
-          test-script: yarn jest
-
       - name: Lint check
         run: yarn lint
 
       - name: Format check
         run: yarn format
+
+      - uses: ArtiomTr/jest-coverage-report-action@v2
+        with:
+          package-manager: yarn
+          test-script: yarn jest
 
       # Reset Vault bind-mounted storage so Vault boots un-initialized.
       # Vault writes its file storage as the in-image vault user (uid 100),
