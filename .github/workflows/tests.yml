@@ -42,12 +42,6 @@ jobs:
       - name: Format check
         run: yarn format
 
-      # Sync GENESIS_ID / GENESIS_HASH from the running LocalNet into .env
-      # so pawn signs transactions with the correct genesis. LocalNet is
-      # already started above, so skip the start step inside the script.
-      - name: Sync LocalNet genesis into .env
-        run: SKIP_LOCALNET_START=1 ./scripts/setup_localnet.sh
-
       # Reset Vault bind-mounted storage so Vault boots un-initialized.
       # Vault writes its file storage as the in-image vault user (uid 100),
       # so on the host the directory often ends up owned by root.
@@ -68,9 +62,6 @@ jobs:
 
       - name: Initialize Vault (development)
         run: docker compose exec -T pawn yarn vault:development:init
-
-      - name: Prefund manager account on LocalNet
-        run: ./scripts/fund_manager.sh
 
         #TODO: Resolve the node modules overriding
       - name: Re-install dependencies
