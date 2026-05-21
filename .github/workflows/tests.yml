@@ -51,6 +51,7 @@ jobs:
           if [ -e volumes/vault ]; then sudo rm -rf volumes/vault; fi
           mkdir -p volumes/vault/file volumes/vault/logs
           chmod -R 777 volumes/vault
+          cp .env.template .env
 
       - name: Start docker compose stack (vault + pawn)
         run: docker compose up -d --wait
