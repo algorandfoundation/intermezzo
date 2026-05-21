@@ -16,6 +16,8 @@ const VAULT_SEAL_KEYS_FILE = 'vault-seal-keys.json';
 const MANAGERS_ROLE_AND_SECRET_KEYS_FILE = 'manager-role-and-secrets.json';
 const MANAGER_ADDRESS_FILE = 'manager-address.txt';
 const USERS_ROLE_AND_SECRET_KEYS_FILE = 'user-role-and-secrets.json';
+const ENV_FILE = '.env';
+const ENV_TEMPLATE_FILE = '.env.template';
 const USERS_POLICY_NAME = 'pawn_users_policy';
 const USERS_APP_ROLE_NAME = 'pawn_users_approle';
 const MANAGERS_POLICY_NAME = 'pawn_managers_policy';
@@ -158,6 +160,38 @@ async function initUsersTransitEngine(token: string) {
   }
 }
 
+// Idempotently mount the KV-v2 secret engine at `secret/`. The service
+// reads/writes operational state (e.g. DID app id, OID4VC sessions)
+// via `VaultService.kv*`, which always targets `secret/data/...` and
+// `secret/metadata/...`. Vault returns 400 with `path is already in
+// use` if the mount exists — we treat that as success.
+async function initKvSecretEngine(token: string) {
+  try {
+    const mountResponse = await axios.post(
+      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/secret`,
+      {
+        type: 'kv',
+        options: { version: '2' },
+      },
+      {
+        headers: {
+          'X-Vault-Token': token,
+        },
+      },
+    );
+    console.log('Mount kv-v2 secret engine response status:', mountResponse.status);
+  } catch (error: any) {
+    const status = error?.response?.status;
+    const message: string = error?.response?.data?.errors?.[0] ?? '';
+    if (status === 400 && message.includes('path is already in use')) {
+      console.log('PASS: kv-v2 secret engine already mounted at secret/');
+      return;
+    }
+    console.error('Failed to mount kv-v2 secret engine:', error);
+    throw error;
+  }
+}
+
 // Function to initialize manager transit engine
 async function initManagersTransitEngine(token: string) {
   try {
@@ -248,29 +282,39 @@ async function createACLPolicies(token: string) {
           [`${VAULT_TRANSIT_USERS_PATH}/sign/*`]: {
             capabilities: ['create', 'read', 'update'],
           },
+
+          // KV-v2 (`secret/` mount) — operational state the service
+          // owns, namespaced under `intermezzo/`. Both `data/` (versions)
+          // and `metadata/` (list/delete) paths are required for full
+          // KV-v2 read/write/list/delete via `VaultService.kv*`.
+          [`secret/data/intermezzo/*`]: {
+            capabilities: ['create', 'read', 'update', 'delete'],
+          },
+          [`secret/metadata/intermezzo/*`]: {
+            capabilities: ['list', 'read', 'delete'],
+          },
         },
       },
     };
 
-    // Create the ACL policies
+    // Upsert the ACL policies. We always PUT (Vault treats this as
+    // upsert) so existing dev vaults pick up policy changes — e.g.
+    // newly granted `secret/data/intermezzo/*` capabilities — without
+    // needing a full reset.
     for (const [policyName, policy] of Object.entries(policies)) {
       const policyExists = await checkACLPoliciesExists(policyName, token);
-      if (!policyExists) {
-        await axios.put(
-          `${VAULT_BASE_URL}/v1/sys/policies/acl/${policyName}`,
-          {
-            policy: JSON.stringify(policy),
+      await axios.put(
+        `${VAULT_BASE_URL}/v1/sys/policies/acl/${policyName}`,
+        {
+          policy: JSON.stringify(policy),
+        },
+        {
+          headers: {
+            'X-Vault-Token': token,
           },
-          {
-            headers: {
-              'X-Vault-Token': token,
-            },
-          },
-        );
-        console.log(`ACL policy '${policyName}' created successfully`);
-      } else {
-        console.log(`PASS: ACL policy '${policyName}' already exists`);
-      }
+        },
+      );
+      console.log(policyExists ? `ACL policy '${policyName}' updated` : `ACL policy '${policyName}' created`);
     }
   } catch (error) {
     console.error('Failed to create ACL policies:', error);
@@ -381,7 +425,11 @@ async function getOrCreateAppRoles(root_token: string) {
   }
 }
 
-async function logRoleIdAndSecretId(role_name: string, token: string, store_file_name: string) {
+async function logRoleIdAndSecretId(
+  role_name: string,
+  token: string,
+  store_file_name: string,
+): Promise<{ role_id: string; secret_id: string } | undefined> {
   try {
     // Get role_id
     const roleIdResponse = await axios.get(`${VAULT_BASE_URL}/v1/auth/approle/role/${role_name}/role-id`, {
@@ -416,9 +464,102 @@ async function logRoleIdAndSecretId(role_name: string, token: string, store_file
     console.log(
       `You can get vault token ('auth.client_token') using \n\nPOST http://localhost:8200/v1/auth/approle/login\n{\n  "role_id": "${role_id}",\n  "secret_id": "${secret_id}"\n}\n`,
     );
+    return { role_id, secret_id };
   } catch (error) {
     console.error(`Failed to login with AppRole '${role_name}':`, error);
+    return undefined;
   }
+}
+
+// Ensure `.env` exists by seeding it from `.env.template` when missing.
+// The application reads its runtime configuration from `.env`, and the
+// manager AppRole credentials this script provisions need to land there
+// so the service can authenticate to Vault without a manual copy step.
+function ensureEnvFile(): void {
+  if (fs.existsSync(ENV_FILE)) return;
+  if (!fs.existsSync(ENV_TEMPLATE_FILE)) {
+    console.warn(`'${ENV_TEMPLATE_FILE}' not found — skipping '${ENV_FILE}' seeding.`);
+    return;
+  }
+  fs.copyFileSync(ENV_TEMPLATE_FILE, ENV_FILE);
+  console.log(`Seeded '${ENV_FILE}' from '${ENV_TEMPLATE_FILE}'.`);
+}
+
+// Parse `.env` into a flat key/value map. Comments and blank lines are
+// skipped; surrounding single/double quotes on values are stripped so
+// callers see the raw value the application would observe at runtime.
+function readEnvFile(): Record<string, string> {
+  if (!fs.existsSync(ENV_FILE)) return {};
+  const out: Record<string, string> = {};
+  for (const line of fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[match[1]] = value;
+  }
+  return out;
+}
+
+// Fetch the network's `genesis-id` / `genesis-hash` directly from the
+// configured algod node and persist them into `.env`. Without this step
+// the operator has to copy the values from `goal node status` (or the
+// LocalNet docker logs) by hand every time the sandbox is re-created —
+// and a stale `GENESIS_HASH` produces opaque algod `transaction <id>:
+// bad genesis hash` rejections at submit time.
+async function fetchAndPersistGenesis(): Promise<void> {
+  const env = readEnvFile();
+  const scheme = env.NODE_HTTP_SCHEME || 'http';
+  // The script runs on the host, so prefer NODE_HOST as written; fall
+  // back to localhost if the file uses the in-container default.
+  const host = env.NODE_HOST || 'localhost';
+  const port = env.NODE_PORT || '4001';
+  const token = env.NODE_TOKEN || '';
+  const url = `${scheme}://${host}:${port}/v2/transactions/params`;
+  try {
+    const response = await axios.get(url, {
+      headers: { 'X-Algo-API-Token': token },
+    });
+    const genesisId: string | undefined = response.data?.['genesis-id'];
+    const genesisHash: string | undefined = response.data?.['genesis-hash'];
+    if (!genesisId || !genesisHash) {
+      console.warn(`algod at ${url} did not return genesis-id/genesis-hash — leaving '${ENV_FILE}' values unchanged.`);
+      return;
+    }
+    updateEnvFile({ GENESIS_ID: genesisId, GENESIS_HASH: genesisHash });
+    console.log(`Fetched genesis from ${url}: id='${genesisId}'`);
+  } catch (error: any) {
+    const detail = error?.response?.status ? `HTTP ${error.response.status}` : (error?.message ?? error);
+    console.warn(`Failed to fetch genesis from ${url} (${detail}); leaving '${ENV_FILE}' values unchanged.`);
+  }
+}
+
+// Replace `KEY=...` entries in `.env` with the provided values. Keys that
+// are missing from the file are appended. Existing comments / ordering are
+// preserved so the file remains readable after subsequent script runs.
+function updateEnvFile(updates: Record<string, string>): void {
+  if (!fs.existsSync(ENV_FILE)) {
+    console.warn(`'${ENV_FILE}' not found — cannot persist updates: ${Object.keys(updates).join(', ')}`);
+    return;
+  }
+  const original = fs.readFileSync(ENV_FILE, 'utf8');
+  const lines = original.split(/\r?\n/);
+  const remaining = new Set(Object.keys(updates));
+  const next = lines.map((line) => {
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+    if (!match) return line;
+    const key = match[1];
+    if (!remaining.has(key)) return line;
+    remaining.delete(key);
+    return `${key}=${updates[key]}`;
+  });
+  for (const key of remaining) {
+    next.push(`${key}=${updates[key]}`);
+  }
+  fs.writeFileSync(ENV_FILE, next.join('\n'));
+  console.log(`Updated '${ENV_FILE}' with: ${Object.keys(updates).join(', ')}`);
 }
 
 async function getOrCreateManager(token: string) {
@@ -480,13 +621,40 @@ async function main() {
 
   console.log('\n\n------------\nVault Root Token:\n', sealKeys.root_token, '\n------------\n\n');
 
+  // Idempotently ensure the KV-v2 secret engine is mounted on every
+  // run. The transit engines are mounted by `initVault` on first-init;
+  // KV-v2 is mounted here so existing dev vaults (initialized before
+  // this script learned about KV) pick it up without a full reset.
+  await initKvSecretEngine(sealKeys.root_token);
   await createACLPolicies(sealKeys.root_token);
   await enableAppRoleIfNotEnabledAuth(sealKeys.root_token);
   await getOrCreateAppRoles(sealKeys.root_token);
+  // Seed `.env` from `.env.template` before we have credentials so the
+  // file is always present when the service starts; the AppRole values
+  // below then overwrite the placeholder `VAULT_ROLE_ID` / `VAULT_SECRET_ID`
+  // entries in-place.
+  ensureEnvFile();
   console.log('\n\n\nUSER SECRETS\n-----');
   await logRoleIdAndSecretId(USERS_APP_ROLE_NAME, sealKeys.root_token, USERS_ROLE_AND_SECRET_KEYS_FILE);
   console.log('\n\n\nMANAGER SECRETS\n-----');
-  await logRoleIdAndSecretId(MANAGERS_APP_ROLE_NAME, sealKeys.root_token, MANAGERS_ROLE_AND_SECRET_KEYS_FILE);
+  const managerCreds = await logRoleIdAndSecretId(
+    MANAGERS_APP_ROLE_NAME,
+    sealKeys.root_token,
+    MANAGERS_ROLE_AND_SECRET_KEYS_FILE,
+  );
+  // Persist the manager AppRole into `.env` — this is the AppRole the
+  // service (and the OID4VC subsystem, which reuses it) authenticates
+  // with at runtime.
+  if (managerCreds) {
+    updateEnvFile({
+      VAULT_ROLE_ID: managerCreds.role_id,
+      VAULT_SECRET_ID: managerCreds.secret_id,
+    });
+  }
+  // Refresh `GENESIS_ID` / `GENESIS_HASH` from the live algod node so
+  // signed transactions pick up the current LocalNet genesis (these
+  // change every time the sandbox is reset).
+  await fetchAndPersistGenesis();
   console.log('\n\n\nMANAGER ALGORAND PUBLIC ADDRESS\n------');
   await getOrCreateManager(sealKeys.root_token);
 }
