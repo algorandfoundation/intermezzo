@@ -50,8 +50,10 @@ jobs:
           docker compose down -v --remove-orphans || true
           if [ -e volumes/vault ]; then sudo rm -rf volumes/vault; fi
           mkdir -p volumes/vault/file volumes/vault/logs
-          chmod -R 777 volumes/vault
+          chmod -R 777 volumes/vault node_modules
           cp .env.template .env
+          sed -i 's#^NODE_HOST=.*#NODE_HOST=algod#' .env
+          sed -i 's#^NODE_PORT=.*#NODE_PORT=8080#' .env
 
       - name: Start docker compose stack (vault + pawn)
         run: docker compose up -d --wait
