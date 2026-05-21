@@ -1,6 +1,11 @@
 import { Address, AlgorandClient, microAlgos } from '@algorandfoundation/algokit-utils';
 import { BoxReference } from '@algorandfoundation/algokit-utils/types/app-manager';
-import { Transaction, decodeTransaction, encodeTransaction, groupTransactions } from '@algorandfoundation/algokit-utils/transact';
+import {
+  Transaction,
+  decodeTransaction,
+  encodeTransaction,
+  groupTransactions,
+} from '@algorandfoundation/algokit-utils/transact';
 import { APP_SPEC, DidAlgoStorageClient, Metadata } from './contracts/DidAlgoStorageClient';
 import { APP_ACCOUNT_BASE_MBR_MICROALGOS } from './algorand';
 import { encodeUint64 } from './util';
@@ -85,9 +90,7 @@ function encodeGroup(transactions: Transaction[], roleFor: (i: number) => DidTxn
   const txnGroup = transactions.map((txn) => Buffer.from(encodeTransaction(txn)).toString('base64'));
   const signers = transactions.map((_, i) => roleFor(i));
   const kinds = transactions.map((txn) => txn.type as string);
-  const indexesToSign = signers
-    .map((role, i) => (role === 'user' ? i : -1))
-    .filter((i) => i >= 0);
+  const indexesToSign = signers.map((role, i) => (role === 'user' ? i : -1)).filter((i) => i >= 0);
   return { groupIdB64, txnGroup, indexesToSign, signers, kinds };
 }
 
@@ -186,16 +189,9 @@ export async function buildUploadDIDDocumentGroups(
   pubKey: Uint8Array,
   opts: { appCallSender: Address; mbrPaymentSender: Address },
 ): Promise<DidUnsignedGroup[]> {
-  const ops = planUploadOps(
-    appClient,
-    algorand,
-    data,
-    appId,
-    pubKey,
-    opts,
-    await currentBoxIndex(appClient),
-    { includeAppAccountBaseFund: true },
-  );
+  const ops = planUploadOps(appClient, algorand, data, appId, pubKey, opts, await currentBoxIndex(appClient), {
+    includeAppAccountBaseFund: true,
+  });
   return await packOpsIntoGroups(algorand, ops, opts.mbrPaymentSender);
 }
 /**
@@ -293,16 +289,9 @@ export async function buildReplaceDIDDocumentGroups(
     // account MBR (100,000 µAlgo) before the contract can hold any
     // boxes. Subsequent updates skip this — the base MBR persists
     // for the lifetime of the contract.
-    const ops = planUploadOps(
-      appClient,
-      algorand,
-      data,
-      appId,
-      pubKey,
-      opts,
-      await currentBoxIndex(appClient),
-      { includeAppAccountBaseFund: true },
-    );
+    const ops = planUploadOps(appClient, algorand, data, appId, pubKey, opts, await currentBoxIndex(appClient), {
+      includeAppAccountBaseFund: true,
+    });
     return {
       groups: await packOpsIntoGroups(algorand, ops, opts.mbrPaymentSender),
       oldMbrMicroAlgos: 0n,
@@ -613,9 +602,7 @@ function planDeleteOps(
   // funder so the user still pays zero fees out of pocket.
   const { repaymentReceiver, repaymentMicroAlgos } = repayment;
   if (repaymentMicroAlgos <= 0n) {
-    throw new Error(
-      `Refusing to plan delete without a positive manager repayment (got ${repaymentMicroAlgos} µAlgo)`,
-    );
+    throw new Error(`Refusing to plan delete without a positive manager repayment (got ${repaymentMicroAlgos} µAlgo)`);
   }
   ops.push({
     kind: 'repayManagerMbr',

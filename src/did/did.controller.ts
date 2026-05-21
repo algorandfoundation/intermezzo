@@ -229,9 +229,9 @@ export class DidController {
     summary: 'Build tx groups to update the caller-owned did:algo document',
     description:
       'Requires a verified device-attestation credential in `X-Credential-Presentation`. The ' +
-      'credential\'s bound `did:key` identifies which per-user `DIDAlgoStorage` contract is ' +
+      "credential's bound `did:key` identifies which per-user `DIDAlgoStorage` contract is " +
       'mutated. The supplied DID document must be self-owned: its `id` must equal the ' +
-      '`did:algo:...` derived from the credential-bound `did:key` and the user\'s app id. The ' +
+      "`did:algo:...` derived from the credential-bound `did:key` and the user's app id. The " +
       'manager-role MBR `pay` is pre-signed by the Vault Transit key in-band; app-calls are ' +
       'returned unsigned for the wallet to Ed25519-sign with its `did:key`. Returns a flat list ' +
       'of atomic groups: every operation required to swap the on-chain document (`startDelete`, ' +

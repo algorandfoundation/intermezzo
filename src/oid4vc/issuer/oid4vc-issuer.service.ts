@@ -137,12 +137,16 @@ export class Oid4vcIssuerService implements OnModuleInit {
             // Validation: SD-JWT must have a VCT
             const isSdJwt = cfg.format === OpenId4VciCredentialFormatProfile.SdJwtVc;
             if (isSdJwt && !cfg.vct) {
-              this.logger.warn(`Skipping credential configuration ${id} from Vault: missing "vct" property for SdJwtVc format`);
+              this.logger.warn(
+                `Skipping credential configuration ${id} from Vault: missing "vct" property for SdJwtVc format`,
+              );
               continue;
             }
             out[id] = cfg as any;
           } else if (cfg) {
-            this.logger.warn(`Skipping credential configuration ${id} from Vault: missing or invalid "format" property`);
+            this.logger.warn(
+              `Skipping credential configuration ${id} from Vault: missing or invalid "format" property`,
+            );
           }
         } catch (e) {
           this.logger.warn(`Failed to read credential configuration ${id} from Vault: ${(e as Error).message}`);

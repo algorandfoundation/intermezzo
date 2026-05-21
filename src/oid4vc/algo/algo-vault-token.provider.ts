@@ -47,8 +47,7 @@ export class AlgoVaultTokenProvider {
    */
   isConfigured(): boolean {
     return Boolean(
-      this.configService.get<string>('VAULT_ROLE_ID') &&
-        this.configService.get<string>('VAULT_SECRET_ID'),
+      this.configService.get<string>('VAULT_ROLE_ID') && this.configService.get<string>('VAULT_SECRET_ID'),
     );
   }
 
@@ -86,9 +85,7 @@ export class AlgoVaultTokenProvider {
     const roleId = this.configService.get<string>('VAULT_ROLE_ID');
     const secretId = this.configService.get<string>('VAULT_SECRET_ID');
     if (!roleId || !secretId) {
-      throw new Error(
-        'VAULT_ROLE_ID and VAULT_SECRET_ID must be configured to use the did:algo registrar/issuer.',
-      );
+      throw new Error('VAULT_ROLE_ID and VAULT_SECRET_ID must be configured to use the did:algo registrar/issuer.');
     }
     const token = await this.vaultService.getTokenWithRole(roleId, secretId);
     this.cachedToken = token;

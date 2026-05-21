@@ -628,7 +628,6 @@ export class DidService {
     return { did, network, appId, document };
   }
 
-
   // ─────────────────────────────────────────────────────────────────
   // User-owned per-user `DIDAlgoStorage` contracts.
   //
@@ -653,10 +652,7 @@ export class DidService {
    * txns only at submit time after validating the wallet's
    * signature is over the exact bytes we emitted.
    */
-  async buildUserContractCreate(params: {
-    didKey: string;
-    vaultToken: string;
-  }): Promise<UserContractCreatePlan> {
+  async buildUserContractCreate(params: { didKey: string; vaultToken: string }): Promise<UserContractCreatePlan> {
     const { didKey, vaultToken } = params;
     const existing = await this.getUserAppId(didKey, vaultToken);
     if (existing !== undefined) {
@@ -716,9 +712,7 @@ export class DidService {
     const { didKey, signedTxns, vaultToken } = params;
     const existing = await this.getUserAppId(didKey, vaultToken);
     if (existing !== undefined) {
-      throw new ConflictException(
-        `Per-user DIDAlgoStorage already deployed for ${didKey} (appId=${existing}).`,
-      );
+      throw new ConflictException(`Per-user DIDAlgoStorage already deployed for ${didKey} (appId=${existing}).`);
     }
     const plan = await this.buildUserContractCreate({ didKey, vaultToken });
     const merged = await this.mergeAndSignGroup(plan.group, signedTxns, vaultToken);
@@ -925,9 +919,7 @@ export class DidService {
     const sim = await algorand.client.algod.simulateRawTransactions(merged);
     const result = sim.txnGroups?.[0];
     if (!result?.failureMessage) return;
-    const positions = expected.kinds
-      .map((kind, i) => `#${i}:${kind}/${expected.signers[i]}`)
-      .join(' ');
+    const positions = expected.kinds.map((kind, i) => `#${i}:${kind}/${expected.signers[i]}`).join(' ');
     const failedAt = result.failedAt ? result.failedAt.join('.') : '<unknown>';
     const innerHints: string[] = [];
     result.txnResults?.forEach((tr, i) => {
@@ -1032,7 +1024,6 @@ function serializeUnsignedGroup(group: DidUnsignedGroup): SerializedUserDidUpdat
     kinds: group.kinds,
   };
 }
-
 
 /**
  * Serialized **unsigned** atomic group on the `build…` response,

@@ -5,7 +5,6 @@ import { Oid4vcVerificationSessionRepository } from '../sessions/vault-repositor
 import { Oid4vcVerifierService } from './oid4vc-verifier.service';
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
-import { Oid4vcVerificationSession } from '../entities/oid4vc-verification-session.entity';
 
 describe('Oid4vcVerifierService', () => {
   const mockRepo = {
