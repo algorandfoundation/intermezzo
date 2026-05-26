@@ -51,6 +51,14 @@ export class VaultRepository<T extends BaseEntity> {
     // Update secondary index if configured
     if (this.indexField && data[this.indexField]) {
       const indexValue = String(data[this.indexField]);
+      // If the indexed field changed between versions, remove the stale index entry
+      // so that lookups by the old value no longer resolve to this id.
+      if (existing && existing[this.indexField] !== undefined) {
+        const oldIndexValue = String(existing[this.indexField]);
+        if (oldIndexValue !== indexValue) {
+          await this.vault.kvDelete(`${this.folder}/index/${String(this.indexField)}/${oldIndexValue}`, token);
+        }
+      }
       await this.vault.kvWrite(`${this.folder}/index/${String(this.indexField)}/${indexValue}`, { id } as any, token);
     }
 
@@ -99,6 +107,11 @@ export class VaultRepository<T extends BaseEntity> {
       results.sort((a, b) => {
         const valA = (a as any)[field];
         const valB = (b as any)[field];
+        // Push undefined to the end regardless of direction so ordering is deterministic.
+        if (valA === undefined && valB === undefined) return 0;
+        if (valA === undefined) return 1;
+        if (valB === undefined) return -1;
+        if (valA === valB) return 0;
         if (direction === 'ASC') {
           return valA > valB ? 1 : -1;
         } else {

@@ -35,6 +35,6 @@ export async function topUpFromSender(
   await algorand.send.payment({
     sender: sender.toString(),
     receiver,
-    amount: microAlgo(Number(shortfall)),
+    amount: microAlgo(shortfall),
   });
 }

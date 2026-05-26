@@ -9,8 +9,18 @@ import { VaultService } from '../vault/vault.service';
  * 64-byte ed25519 signature material.
  */
 export function decodeVaultSignature(vaultRawSig: Buffer): Uint8Array {
-  const signature = vaultRawSig.toString().split(':')[2];
-  return new Uint8Array(Buffer.from(signature, 'base64'));
+  const raw = vaultRawSig?.toString() ?? '';
+  const parts = raw.split(':');
+  // Expected envelope: `vault:v1:<base64-sig>`
+  if (parts.length < 3 || parts[0] !== 'vault' || !parts[1]?.startsWith('v') || !parts[2]) {
+    throw new Error(`Invalid Vault signature envelope: expected "vault:v<n>:<base64>", got "${raw}"`);
+  }
+  const sig = new Uint8Array(Buffer.from(parts[2], 'base64'));
+  // Ed25519 signatures are exactly 64 bytes.
+  if (sig.length !== 64) {
+    throw new Error(`Invalid Vault signature length: expected 64 bytes, got ${sig.length}`);
+  }
+  return sig;
 }
 
 /**

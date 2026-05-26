@@ -12,7 +12,12 @@ const useSpy = jest.fn();
 
 // Stubs for the OID4VC providers fetched via `app.get(...)` during bootstrap.
 const oid4vcAgentStub = { issuerRouter: jest.fn(), verifierRouter: jest.fn() };
-const oid4vcConfigStub = { issuerPath: '/oid4vci', verifierPath: '/oid4vp' };
+const oid4vcConfigStub = {
+  issuerPath: '/oid4vci',
+  verifierPath: '/oid4vp',
+  issuerMountPath: '/v1/oid4vci',
+  verifierMountPath: '/v1/oid4vp',
+};
 
 // Create a fake app that mimics the Nest application
 const appMock = {
@@ -103,5 +108,10 @@ describe('Main bootstrap', () => {
 
   it('should call app.listen with port 3000', () => {
     expect(listenSpy).toHaveBeenCalledWith(3000);
+  });
+
+  it('should mount the OID4VC issuer and verifier routers at their configured mount paths', () => {
+    expect(useSpy).toHaveBeenCalledWith('/v1/oid4vci', expect.anything());
+    expect(useSpy).toHaveBeenCalledWith('/v1/oid4vp', expect.anything());
   });
 });

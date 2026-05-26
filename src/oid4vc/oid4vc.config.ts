@@ -8,9 +8,9 @@ import { ConfigService } from '@nestjs/config';
  * can stay agnostic of how Credo expects its configuration.
  *
  * Env vars (all optional, sensible defaults provided for local dev):
- * - OID4VC_LABEL              Human readable agent label                         (default: `pawn-oid4vc`)
- * - OID4VC_BASE_URL           Public base URL of this service (no trailing /)   (default: `http://localhost:3000`)
- * - OID4VC_WALLET_ID          Askar wallet id                                    (default: `pawn-oid4vc`)
+ * - OID4VC_LABEL              Human readable agent label                         (default: `intermezzo`)
+ * - OID4VC_BASE_URL           Public base URL of this service (no trailing /)   (default: `http://localhost:3000/v1`)
+ * - OID4VC_WALLET_ID          Askar wallet id                                    (default: `intermezzo`)
  * - OID4VC_WALLET_KEY         Askar wallet master key                            (default: `pawn-oid4vc-key`)
  * - OID4VC_ISSUER_PATH        URL path mounted for OID4VCI endpoints             (default: `/oid4vci`)
  * - OID4VC_VERIFIER_PATH      URL path mounted for OID4VP endpoints              (default: `/oid4vp`)

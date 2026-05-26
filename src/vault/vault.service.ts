@@ -246,7 +246,7 @@ export class VaultService {
     } catch (error) {
       const status = error?.response?.status;
       if (status === 404) return undefined;
-      throw new HttpErrorByCode[status]('VaultException');
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
     }
   }
 
@@ -271,7 +271,8 @@ export class VaultService {
         },
       );
     } catch (error) {
-      throw new HttpErrorByCode[error.response.status]('VaultException');
+      const status = error?.response?.status ?? 500;
+      throw new HttpErrorByCode[status]('VaultException');
     }
   }
 
@@ -295,7 +296,7 @@ export class VaultService {
     } catch (error) {
       const status = error?.response?.status;
       if (status === 404) return;
-      throw new HttpErrorByCode[status]('VaultException');
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
     }
   }
 
@@ -321,7 +322,7 @@ export class VaultService {
     } catch (error) {
       const status = error?.response?.status;
       if (status === 404) return [];
-      throw new HttpErrorByCode[status]('VaultException');
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
     }
   }
 
@@ -346,7 +347,8 @@ export class VaultService {
         headers: { 'X-Vault-Token': token },
       });
     } catch (error) {
-      throw new HttpErrorByCode[error.response.status]('VaultException');
+      const status = error?.response?.status ?? 500;
+      throw new HttpErrorByCode[status]('VaultException');
     }
 
     const users: string[] = result.data.data.keys;
