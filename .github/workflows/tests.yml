@@ -81,8 +81,10 @@ jobs:
         run: ./scripts/fund_manager.sh
 
         #TODO: Resolve the node modules overriding
-      - name: Restore workspace ownership to runner
-        run: sudo chown -R "$(id -u):$(id -g)" .
+      - name: Restore workspace ownership to runner, allow vault to write
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . 
+          sudo chmod -R 777 volumes/vault
       - name: Re-install dependencies
         run: yarn
       - name: E2E tests
