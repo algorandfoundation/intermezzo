@@ -42,15 +42,9 @@ jobs:
           package-manager: yarn
           test-script: yarn jest
 
-      # Seed .env from the template before any docker compose / sed step
-      # touches it. docker-compose.yml references `.env` via `env_file:`,
-      # so `docker compose down` below fails with "env file ... not found"
-      # if this is skipped.
+      # Seed .env from the template before any docker compose step
       - name: Seed .env from template
-        run: |
-          cp .env.template .env
-          sed -i 's#^NODE_HOST=.*#NODE_HOST=algod#' .env
-          sed -i 's#^NODE_PORT=.*#NODE_PORT=8080#' .env
+        run: cp .env.template .env
 
       # Sync GENESIS_ID / GENESIS_HASH from the running LocalNet into .env
       # so pawn signs transactions with the correct genesis. LocalNet is
