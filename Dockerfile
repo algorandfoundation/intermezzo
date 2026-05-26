@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ pkg-config build-essential ca-certificates \
@@ -22,7 +22,7 @@ EXPOSE 9200
 # Dont run as root
 USER node
 
-RUN yarn
+RUN yarn --ignore-engines
 RUN yarn build
 
 CMD [ "yarn", "start:dev" ]
