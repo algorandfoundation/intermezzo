@@ -60,7 +60,7 @@ jobs:
           docker compose down -v --remove-orphans || true
           if [ -e volumes/vault ]; then sudo rm -rf volumes/vault; fi
           mkdir -p volumes/vault/file volumes/vault/logs
-          chmod -R 777 volumes/vault
+          sudo chmod -R 777 volumes/vault
 
       - name: Start docker compose stack (vault + pawn)
         run: docker compose up -d --wait
@@ -79,11 +79,6 @@ jobs:
 
       - name: Prefund manager account on LocalNet
         run: ./scripts/fund_manager.sh
-
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: true
 
         #TODO: Resolve the node modules overriding
       - name: Restore workspace ownership to runner
