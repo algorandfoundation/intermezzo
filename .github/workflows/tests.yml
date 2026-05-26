@@ -79,6 +79,10 @@ jobs:
       - name: Initialize Vault (development)
         run: docker compose exec -T pawn yarn vault:development:init
 
+      - name: Recreate pawn to pick up updated .env
+        run: |
+          docker compose up -d --force-recreate --no-deps --wait pawn
+
       - name: Prefund manager account on LocalNet
         run: ./scripts/fund_manager.sh
 
