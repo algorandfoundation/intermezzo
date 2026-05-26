@@ -80,6 +80,11 @@ jobs:
       - name: Prefund manager account on LocalNet
         run: ./scripts/fund_manager.sh
 
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
         #TODO: Resolve the node modules overriding
       - name: Restore workspace ownership to runner
         run: sudo chown -R "$(id -u):$(id -g)" .
