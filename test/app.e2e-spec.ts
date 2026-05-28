@@ -1078,9 +1078,7 @@ describe('App E2E', () => {
    *
    * The test is designed to run against a live dev stack
    * (`yarn start:dev`, Vault initialised via `yarn vault:development:init`,
-   * and the LocalNet sandbox already funded). `DEVICE_ATTESTATION`
-   * should be `disabled` (or unset and a long stub passed below) so
-   * the placeholder attestation check accepts the dummy blob.
+   * and the LocalNet sandbox already funded).
    */
   describe('Manager identity → self-custody credential issuance', () => {
     const PRE_AUTH_GRANT = 'urn:ietf:params:oauth:grant-type:pre-authorized_code';
@@ -1189,31 +1187,27 @@ describe('App E2E', () => {
 
     it('issues a device-attestation SD-JWT VC to a self-custody did:key wallet', async () => {
       const wallet = buildWallet();
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
 
-      // 1. Server-issued challenge bound to the wallet did:key.
-      const challenge = await axios.post(`${APP_BASE_URL}/link/challenge`, { didKey: wallet.didKey });
-      expect(challenge.status).toBe(201);
-      expect(typeof challenge.data.nonce).toBe('string');
-
-      // 2. Sign the nonce + supply a stub device-attestation blob and
-      //    redeem for an OID4VCI credential offer URI.
-      const signature = crypto
-        .sign(null, Buffer.from(challenge.data.nonce, 'utf8'), wallet.privateKey)
-        .toString('base64');
-      const redeemed = await axios.post(`${APP_BASE_URL}/link/response`, {
-        didKey: wallet.didKey,
-        nonce: challenge.data.nonce,
-        signature,
-        // Long enough to pass the placeholder length check; the
-        // server-side verifier is also pass-through when
-        // `DEVICE_ATTESTATION=disabled`.
-        deviceAttestation: 'e2e-stub-device-attestation-blob',
-      });
+      // 1. Manager creates a pre-authorized offer for the wallet did:key.
+      // (The manager is assumed to have verified the user/device out-of-band).
+      const redeemed = await axios.post(
+        `${APP_BASE_URL}/credential/issuer/offers`,
+        {
+          credentialConfigurationIds: ['device-attestation-credential'],
+          holderDidKey: wallet.didKey,
+          issuanceMetadata: {
+            attested_at: new Date().toISOString(),
+          },
+        },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
       expect(redeemed.status).toBe(201);
-      expect(typeof redeemed.data.credentialOfferUri).toBe('string');
+      expect(typeof redeemed.data.credentialOffer).toBe('string');
 
-      // 3. Drive the OID4VCI pre-authorized-code flow as the wallet.
-      const offer = await resolveCredentialOffer(redeemed.data.credentialOfferUri);
+      // 2. Drive the OID4VCI pre-authorized-code flow as the wallet.
+      const offer = await resolveCredentialOffer(redeemed.data.credentialOffer);
       expect(Array.isArray(offer.credential_configuration_ids)).toBe(true);
       const preAuthCode = offer.grants?.[PRE_AUTH_GRANT]?.['pre-authorized_code'];
       expect(typeof preAuthCode).toBe('string');

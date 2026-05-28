@@ -4,9 +4,8 @@ import { OpenId4VciCredentialConfigurationsSupported, OpenId4VciCredentialFormat
 /**
  * Default credential configurations exposed by this issuer.
  *
- * A dedicated `device-attestation-credential` SD-JWT VC issued at
- * the end of the `/v1/link/{challenge,response}` handshake to bind the wallet-local
- * `did:key` to the on-chain `did:algo` the manager minted for it.
+ * A dedicated `device-attestation-credential` SD-JWT VC issued by the
+ * manager to bind the wallet-local `did:key` to the on-chain `did:algo`.
  *
  * Kept in its own module so consumers can import the default set
  * without pulling in `Oid4vcIssuerService` (and the agent provider

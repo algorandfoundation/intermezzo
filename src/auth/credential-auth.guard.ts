@@ -28,8 +28,8 @@ export interface CredentialAuthRequest {
  * Authoritative wallet-login guard.
  *
  * The only proof of identity for routine wallet-authenticated routes
- * is the `device-attestation-credential` SD-JWT VC the manager minted
- * during `/v1/link/response`. The device-platform attestation
+ * is the `device-attestation-credential` SD-JWT VC the manager issued
+ * to the wallet. The device-platform attestation
  * (Apple App Attest / Play Integrity) and the `did:key` possession
  * proof are both performed *once*, inside the attestation flow, and
  * then vouched for by the credential the wallet now presents on every

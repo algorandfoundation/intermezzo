@@ -6,8 +6,8 @@ The service exposes three logical surfaces:
 
 - **`/v1/did/*`** — per-user `did:algo` contract deploy + document update,
   driven by the wallet itself and gated by a device-attestation credential.
-- **`/v1/link/*`** — device-attestation handshake that mints the SD-JWT VC
-  consumed by `CredentialAuthGuard`.
+- **Manager-issued credentials** — pre-authorized OID4VCI offers created by the 
+  manager (optionally after device attestation) to mint credentials.
 - **`/v1/credential/{issuer,verifier}/*`** — generic OID4VCI / OID4VP
   orchestration over a Credo agent. Credo's own protocol routes are
   mounted under `/oid4vci` and `/oid4vp` (outside the `/v1` prefix).
@@ -48,39 +48,37 @@ sequenceDiagram
     Pawn-->>Manager: { user_id, public_address, algoBalance: "0" }
 ```
 
-## 3. Device-attestation handshake → device-attestation credential
+## 3. Manager-issued pre-authorized credential
 
 > [!NOTE]
-> - The wallet holds a local `did:key` (never leaves the device). The
->   handshake proves both **possession of that `did:key`** (by signing
->   a server nonce) and **device integrity** (Apple App Attest /
->   Play Integrity blob), then mints an SD-JWT VC bound to the
->   `did:key` via OID4VCI.
-> - The credential configuration is `device-attestation-credential`.
->   It is what every subsequent `CredentialAuthGuard`-protected route
->   accepts in `X-Credential-Presentation`.
+> - The wallet holds a local `did:key` (never leaves the device). 
+> - The manager performs any required out-of-band verification (e.g. 
+>   device attestation, KYC, or email proof) and then issues a 
+>   **pre-authorized OID4VCI offer** pinned to the user's `did:key`.
+> - The default credential configuration is `device-attestation-credential`,
+>   which is what the `CredentialAuthGuard` expects by default.
 > - No on-chain operations occur in this flow.
 
 ```mermaid
 sequenceDiagram
     actor User
     participant Wallet as Self-Custody Wallet<br/>(device, holds did:key)
-    participant Pawn as Pawn<br/>(LinkService)
+    actor Manager
+    participant Pawn as Pawn<br/>(Oid4vcIssuerController)
     participant Issuer as OID4VC Issuer<br/>(Credo agent + Vault signer)
 
-    Wallet->>Pawn: POST /v1/link/challenge { didKey }
-    Pawn-->>Wallet: { nonce, expiresAt }
+    User->>Manager: request credential (supply didKey + attestation)
+    Manager->>Manager: verify user / device
+    
+    Manager->>Pawn: POST /v1/credential/issuer/offers<br/>{ credentialConfigurationIds: ['device-attestation-credential'], holderDidKey: didKey }
+    Pawn->>Issuer: createOffer(holderDidKey=didKey)
+    Issuer-->>Pawn: issuanceSession (credentialOffer)
+    Pawn-->>Manager: { credentialOffer, ... }
 
-    Wallet->>Wallet: sign(nonce) with did:key<br/>+ produce device attestation
+    Manager-->>User: deliver credentialOffer (URL / QR)
 
-    Wallet->>Pawn: POST /v1/link/response<br/>{ didKey, nonce, signature, deviceAttestation }
-    Pawn->>Pawn: verify nonce signature (did:key)<br/>verify device attestation
-    Pawn->>Issuer: createOffer(device-attestation-credential, holderDidKey=didKey)
-    Issuer-->>Pawn: issuanceSession (credentialOfferUri)
-    Pawn-->>Wallet: { didKey, issuanceSessionId, credentialOfferUri }
-
-    Wallet->>Issuer: redeem offer via OID4VCI<br/>(/oid4vci/* protocol routes)
-    Issuer-->>Wallet: SD-JWT VC<br/>(device-attestation-credential, cnf.kid = did:key)
+    User->>Issuer: redeem offer via OID4VCI<br/>(/oid4vci/* protocol routes)
+    Issuer-->>User: SD-JWT VC<br/>(device-attestation-credential, cnf.kid = did:key)
 ```
 
 ## 4. Generic OID4VC issuance & verification

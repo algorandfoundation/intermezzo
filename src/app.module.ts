@@ -6,7 +6,6 @@ import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from '@nestjs/config';
 import { DidModule } from './did/did.module';
 import { Oid4vcModule } from './oid4vc/oid4vc.module';
-import { LinkModule } from './link/link.module';
 
 @Module({
   imports: [
@@ -17,7 +16,6 @@ import { LinkModule } from './link/link.module';
     ChainModule,
     DidModule,
     Oid4vcModule,
-    LinkModule,
   ],
   controllers: [],
   providers: [],
