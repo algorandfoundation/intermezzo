@@ -1,6 +1,8 @@
-FROM node:24-alpine
+FROM node:22-bookworm-slim
 
-RUN apk add --no-cache python3 make g++ pkgconfig build-base linux-headers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ pkg-config build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/app && \
     mkdir -p /data/db && \
@@ -20,7 +22,7 @@ EXPOSE 9200
 # Dont run as root
 USER node
 
-RUN yarn
+RUN yarn --ignore-engines
 RUN yarn build
 
 CMD [ "yarn", "start:dev" ]

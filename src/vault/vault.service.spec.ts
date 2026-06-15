@@ -348,4 +348,190 @@ describe('VaultService', () => {
       expect(result.toString('base64')).toBe(fakePublicKeyBase64);
     });
   });
+
+  describe('kv helpers', () => {
+    const baseUrl = 'http://vault';
+    const defaultMount = 'secret';
+
+    const configWith = (overrides: Record<string, string | undefined> = {}) => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        if (key in overrides) return overrides[key];
+        return undefined;
+      });
+    };
+
+    describe('kvRead', () => {
+      it('(OK) should return the inner data payload', async () => {
+        configWith();
+        const payload = { appId: '123' };
+        (httpService.axiosRef.get as jest.Mock).mockResolvedValueOnce({
+          data: { data: { data: payload } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        const result = await vaultService.kvRead('intermezzo/manager/app-id', 'token');
+
+        expect(httpService.axiosRef.get).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/data/intermezzo/manager/app-id`,
+          { headers: { 'X-Vault-Token': 'token' } },
+        );
+        expect(result).toEqual(payload);
+      });
+
+      it('(OK) should honor VAULT_KV_MOUNT and VAULT_NAMESPACE overrides', async () => {
+        configWith({ VAULT_KV_MOUNT: 'kv', VAULT_NAMESPACE: 'tenant-a' });
+        (httpService.axiosRef.get as jest.Mock).mockResolvedValueOnce({
+          data: { data: { data: { ok: true } } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        await vaultService.kvRead('foo/bar', 'token');
+
+        expect(httpService.axiosRef.get).toHaveBeenCalledWith(`${baseUrl}/v1/kv/data/foo/bar`, {
+          headers: { 'X-Vault-Token': 'token', 'X-Vault-Namespace': 'tenant-a' },
+        });
+      });
+
+      it('(OK) should return undefined when payload is soft-deleted (data: null)', async () => {
+        configWith();
+        (httpService.axiosRef.get as jest.Mock).mockResolvedValueOnce({
+          data: { data: { data: null } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        const result = await vaultService.kvRead('foo', 'token');
+        expect(result).toBeUndefined();
+      });
+
+      it('(OK) should return undefined on 404', async () => {
+        configWith();
+        (httpService.axiosRef.get as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        const result = await vaultService.kvRead('missing', 'token');
+        expect(result).toBeUndefined();
+      });
+
+      it('(FAIL) should throw HttpErrorByCode on non-404 errors', async () => {
+        configWith();
+        (httpService.axiosRef.get as jest.Mock).mockRejectedValue({ response: { status: 500 } });
+
+        await expect(vaultService.kvRead('foo', 'token')).rejects.toThrow(HttpErrorByCode[500]);
+        await expect(vaultService.kvRead('foo', 'token')).rejects.toThrow('VaultException');
+      });
+    });
+
+    describe('kvWrite', () => {
+      it('(OK) should POST the data wrapped under `data`', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({
+          data: {},
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        await vaultService.kvWrite('intermezzo/manager/app-id', { appId: '123' }, 'token');
+
+        expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/data/intermezzo/manager/app-id`,
+          { data: { appId: '123' } },
+          {
+            headers: {
+              'X-Vault-Token': 'token',
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+      });
+
+      it('(FAIL) should throw HttpErrorByCode when vault rejects the write', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+        await expect(vaultService.kvWrite('foo', { x: 1 }, 'token')).rejects.toThrow(HttpErrorByCode[403]);
+      });
+    });
+
+    describe('kvDelete', () => {
+      it('(OK) should DELETE the metadata endpoint', async () => {
+        configWith();
+        (httpService.axiosRef.delete as jest.Mock).mockResolvedValueOnce({
+          data: {},
+          status: 204,
+          statusText: 'No Content',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        await vaultService.kvDelete('intermezzo/challenges/abc', 'token');
+
+        expect(httpService.axiosRef.delete).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/metadata/intermezzo/challenges/abc`,
+          { headers: { 'X-Vault-Token': 'token' } },
+        );
+      });
+
+      it('(OK) should swallow 404 (already-gone is success)', async () => {
+        configWith();
+        (httpService.axiosRef.delete as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        await expect(vaultService.kvDelete('missing', 'token')).resolves.toBeUndefined();
+      });
+
+      it('(FAIL) should throw HttpErrorByCode on non-404 errors', async () => {
+        configWith();
+        (httpService.axiosRef.delete as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
+
+        await expect(vaultService.kvDelete('foo', 'token')).rejects.toThrow(HttpErrorByCode[500]);
+      });
+    });
+
+    describe('kvList', () => {
+      it('(OK) should return the array of immediate child keys', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce({
+          data: { data: { keys: ['a', 'b', 'c'] } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        const result = await vaultService.kvList('intermezzo/challenges', 'token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${defaultMount}/metadata/intermezzo/challenges`,
+          method: 'LIST',
+          headers: { 'X-Vault-Token': 'token' },
+        });
+        expect(result).toEqual(['a', 'b', 'c']);
+      });
+
+      it('(OK) should return [] on 404', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        const result = await vaultService.kvList('missing', 'token');
+        expect(result).toEqual([]);
+      });
+
+      it('(FAIL) should throw HttpErrorByCode on non-404 errors', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
+
+        await expect(vaultService.kvList('foo', 'token')).rejects.toThrow(HttpErrorByCode[500]);
+      });
+    });
+  });
 });

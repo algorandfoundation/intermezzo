@@ -23,24 +23,28 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24.x'
+          node-version: '22.x'
 
       - name: Enable Corepack
         run: corepack enable
 
       - name: Install dependencies
-        run: yarn
-
-      - uses: ArtiomTr/jest-coverage-report-action@v2
-        with:
-          package-manager: yarn
-          test-script: yarn jest
+        run: yarn --frozen-lockfile --ignore-engines
 
       - name: Lint check
         run: yarn lint
 
       - name: Format check
         run: yarn format
+
+      - uses: ArtiomTr/jest-coverage-report-action@v2
+        with:
+          package-manager: yarn
+          test-script: yarn jest
+
+      # Seed .env from the template before any docker compose step
+      - name: Seed .env from template
+        run: cp .env.template .env
 
       # Sync GENESIS_ID / GENESIS_HASH from the running LocalNet into .env
       # so pawn signs transactions with the correct genesis. LocalNet is
@@ -56,7 +60,7 @@ jobs:
           docker compose down -v --remove-orphans || true
           if [ -e volumes/vault ]; then sudo rm -rf volumes/vault; fi
           mkdir -p volumes/vault/file volumes/vault/logs
-          chmod -R 777 volumes/vault
+          sudo chmod -R 777 volumes/vault
 
       - name: Start docker compose stack (vault + pawn)
         run: docker compose up -d --wait
@@ -69,10 +73,18 @@ jobs:
       - name: Initialize Vault (development)
         run: docker compose exec -T pawn yarn vault:development:init
 
+      - name: Recreate pawn to pick up updated .env
+        run: |
+          docker compose up -d --force-recreate --no-deps --wait pawn
+
       - name: Prefund manager account on LocalNet
         run: ./scripts/fund_manager.sh
 
         #TODO: Resolve the node modules overriding
+      - name: Restore workspace ownership to runner, allow vault to write
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . 
+          sudo chmod -R 777 volumes/vault
       - name: Re-install dependencies
         run: yarn
       - name: E2E tests

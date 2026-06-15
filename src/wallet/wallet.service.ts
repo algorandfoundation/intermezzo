@@ -1,10 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { ChainService } from '../chain/chain.service';
+import { DidService } from '../did/did.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { UserInfoResponseDto } from './user-info-response.dto';
 import { ConfigService } from '@nestjs/config';
 import { ManagerDetailDto } from './manager-detail.dto';
+import { ManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
+import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
@@ -20,7 +23,95 @@ export class WalletService {
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
     private readonly configService: ConfigService,
-  ) { }
+    private readonly didService: DidService,
+    private readonly oid4vcAgentProvider: Oid4vcAgentProvider,
+  ) {}
+
+  async getManagerIdentity(): Promise<ManagerIdentityDto> {
+    await this.didService.ensureAppIdLoaded();
+    if (!this.didService.hasAppId()) {
+      throw new NotFoundException(
+        'Manager identity is not deployed. Call `POST /v1/wallet/manager/identity` ' +
+          'with the manager Vault JWT to deploy a `DIDAlgoStorage` contract and ' +
+          'provision the issuer `did:algo`.',
+      );
+    }
+    const issuer = await this.oid4vcAgentProvider.ensureIssuerDid();
+    const agent = await this.oid4vcAgentProvider.getAgent();
+    const resolved = await agent.dids.resolve(issuer.did);
+    if (!resolved.didDocument) {
+      throw new Error(
+        `WalletService.getManagerIdentity: did:algo "${issuer.did}" resolved with no DID Document ` +
+          `(error=${resolved.didResolutionMetadata?.error ?? 'unknown'}).`,
+      );
+    }
+    const appId = this.didService.getAppIdIfDeployed()!;
+    const appAddress = this.didService.getAppAddress();
+    const appBalance = await this.chainService.getAccountBalance(appAddress);
+    return plainToClass(ManagerIdentityDto, {
+      deployed: true,
+      did: issuer.did,
+      verificationMethodId: issuer.verificationMethodId,
+      didDocument: resolved.didDocument.toJSON() as Record<string, unknown>,
+      appId: appId.toString(),
+      appAddress,
+      appBalance: appBalance.toString(),
+    });
+  }
+
+  async deployManagerIdentity(
+    vaultToken: string,
+    options: { force?: boolean } = {},
+  ): Promise<DeployManagerIdentityResponseDto> {
+    let deployment: Awaited<ReturnType<DidService['deployStorage']>>;
+    try {
+      deployment = await this.didService.deployStorage(vaultToken, { force: options.force });
+    } catch (error) {
+      // `algokit-utils` surfaces an unfunded-sender failure as a
+      // generic `Error` whose message embeds algod's simulate output,
+      // e.g. `... overspend (account ABC..., tried to spend {1000})`.
+      // Surface it as a clear 422 so the operator knows the next
+      // action is to fund the manager account rather than retry or
+      // file a bug.
+      const message = (error as Error)?.message ?? '';
+      if (/overspend/i.test(message)) {
+        Logger.warn(`deployManagerIdentity: manager account is underfunded — ${message}`);
+        throw new UnprocessableEntityException(
+          'Manager account is underfunded and cannot pay for the DIDAlgoStorage contract deployment. ' +
+            'Fund the manager Algorand account and retry `POST /v1/wallet/manager/identity`.',
+        );
+      }
+      throw error;
+    }
+    // Reset the cached issuer DID so `ensureIssuerDid` re-provisions
+    // against the new contract on the next call.
+    this.oid4vcAgentProvider.resetCachedIssuerDid();
+    const issuer = await this.oid4vcAgentProvider.ensureIssuerDid();
+    const agent = await this.oid4vcAgentProvider.getAgent();
+    const resolved = await agent.dids.resolve(issuer.did);
+    if (!resolved.didDocument) {
+      throw new Error(
+        `WalletService.deployManagerIdentity: did:algo "${issuer.did}" resolved with no DID Document ` +
+          `(error=${resolved.didResolutionMetadata?.error ?? 'unknown'}).`,
+      );
+    }
+    const appBalance = await this.chainService.getAccountBalance(deployment.appAddress);
+    return plainToClass(DeployManagerIdentityResponseDto, {
+      deployed: true,
+      did: issuer.did,
+      verificationMethodId: issuer.verificationMethodId,
+      didDocument: resolved.didDocument.toJSON() as Record<string, unknown>,
+      appId: deployment.appId.toString(),
+      appAddress: deployment.appAddress,
+      appBalance: appBalance.toString(),
+      operation: deployment.operation,
+      deleteTxIds: deployment.deleteTxIds,
+      uploadTxIds: deployment.uploadTxIds,
+      skipped: deployment.skipped,
+      oldMbrMicroAlgos: deployment.oldMbrMicroAlgos,
+      newMbrMicroAlgos: deployment.newMbrMicroAlgos,
+    });
+  }
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
     const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);

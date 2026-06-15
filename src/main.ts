@@ -6,15 +6,39 @@ import 'source-map-support/register';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { ExceptionsFilter } from './exception.filter';
 import { LoggingInterceptor } from './logging.interceptor';
+import { Oid4vcAgentProvider } from './oid4vc/agent/oid4vc-agent.provider';
+import { Oid4vcConfig } from './oid4vc/oid4vc.config';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'error', 'warn', 'debug', 'verbose'],
   });
 
+  const oid4vcAgent = app.get(Oid4vcAgentProvider);
+  const oid4vcConfig = app.get(Oid4vcConfig);
+  const terminating = (router: typeof oid4vcAgent.issuerRouter) => {
+    return (req: any, res: any, next: any) => {
+      router(req, res, (err: unknown) => {
+        if (err) return next(err);
+        if (res.headersSent || res.writableEnded) return;
+        next();
+      });
+    };
+  };
+
   app.useGlobalFilters(new ExceptionsFilter());
   app.useGlobalInterceptors(new LoggingInterceptor());
   app.setGlobalPrefix('v1');
+
+  // Mount the Credo OID4VCI/OID4VP Express routers at the *absolute*
+  // pathname Credo bakes into the credential-offer and authorization
+  // URIs it emits (derived from `OID4VC_BASE_URL`). If `OID4VC_BASE_URL`
+  // includes a `/v1` prefix, the routers must be mounted at
+  // `/v1/oid4vci` (not just `/oid4vci`) so wallets hitting the
+  // advertised offer URL do not fall through to Nest's 404 handler.
+  app.use(oid4vcConfig.issuerMountPath, terminating(oid4vcAgent.issuerRouter));
+  app.use(oid4vcConfig.verifierMountPath, terminating(oid4vcAgent.verifierRouter));
+
   app.useGlobalPipes(
     new ValidationPipe({
       exceptionFactory: (errors) => {
@@ -40,6 +64,26 @@ async function bootstrap() {
       scheme: 'bearer',
       bearerFormat: 'JWT',
     })
+    // Credential-gated routes (e.g. `POST /v1/did/create/transactions`)
+    // accept a wallet-presented SD-JWT VC via the
+    // `X-Credential-Presentation` header. Register it as an apiKey
+    // scheme so Swagger UI prompts for it under "Authorize".
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-credential-presentation',
+        in: 'header',
+        description:
+          'Compact SD-JWT VC presentation that proves possession of a ' +
+          "device-attestation credential bound to the caller's did:key. " +
+          'Obtained by completing the OID4VCI pre-authorized-code flow ' +
+          'advertised by `POST /v1/link/response` and presenting ' +
+          "the issued credential with the holder's `cnf.kid` binding. " +
+          'Required on credential-gated endpoints such as ' +
+          '`POST /v1/did/create/transactions`.',
+      },
+      'x-credential-presentation',
+    )
     .build();
   const document = SwaggerModule.createDocument(app, options, {});
   SwaggerModule.setup('docs', app, document);

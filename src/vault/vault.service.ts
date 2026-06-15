@@ -202,6 +202,130 @@ export class VaultService {
     return this.getKey(manager_id, transitKeyPath, token);
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // KV v2 helpers
+  //
+  // Small, generic wrappers around Vault's KV-v2 secret engine so
+  // host modules can persist non-secret operational state (app ids,
+  // single-use challenges, etc.) alongside the existing key material
+  // instead of reaching for a side database or the `.env` file.
+  //
+  // The mount path defaults to `secret` (Vault dev/prod default
+  // mount for KV v2) and can be overridden with `VAULT_KV_MOUNT`.
+  // All keys are scoped under a caller-supplied path; callers are
+  // expected to namespace them (e.g. `intermezzo/manager/app-id`).
+  // ────────────────────────────────────────────────────────────────
+
+  private getKvMount(): string {
+    return this.configService.get<string>('VAULT_KV_MOUNT') ?? 'secret';
+  }
+
+  /**
+   * Read a KV-v2 entry at `path` (relative to the configured mount).
+   * Returns `undefined` when the entry does not exist (404) or has
+   * been soft-deleted; throws on any other error.
+   */
+  async kvRead<T extends Record<string, unknown> = Record<string, unknown>>(
+    path: string,
+    token: string,
+  ): Promise<T | undefined> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const mount = this.getKvMount();
+    const url = `${baseUrl}/v1/${mount}/data/${path}`;
+    try {
+      const result = await this.httpService.axiosRef.get(url, {
+        headers: {
+          'X-Vault-Token': token,
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+        },
+      });
+      const data = result.data?.data?.data;
+      // KV-v2 returns `data: null` for soft-deleted versions.
+      return (data ?? undefined) as T | undefined;
+    } catch (error) {
+      const status = error?.response?.status;
+      if (status === 404) return undefined;
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
+    }
+  }
+
+  /**
+   * Write a KV-v2 entry at `path` (creates a new version on update).
+   */
+  async kvWrite(path: string, data: Record<string, unknown>, token: string): Promise<void> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const mount = this.getKvMount();
+    const url = `${baseUrl}/v1/${mount}/data/${path}`;
+    try {
+      await this.httpService.axiosRef.post(
+        url,
+        { data },
+        {
+          headers: {
+            'X-Vault-Token': token,
+            'Content-Type': 'application/json',
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          },
+        },
+      );
+    } catch (error) {
+      const status = error?.response?.status ?? 500;
+      throw new HttpErrorByCode[status]('VaultException');
+    }
+  }
+
+  /**
+   * Permanently delete every version of a KV-v2 entry at `path`. Used
+   * for short-lived state (e.g. single-use attestation challenges)
+   * where soft-delete semantics are undesirable.
+   */
+  async kvDelete(path: string, token: string): Promise<void> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const mount = this.getKvMount();
+    const url = `${baseUrl}/v1/${mount}/metadata/${path}`;
+    try {
+      await this.httpService.axiosRef.delete(url, {
+        headers: {
+          'X-Vault-Token': token,
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+        },
+      });
+    } catch (error) {
+      const status = error?.response?.status;
+      if (status === 404) return;
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
+    }
+  }
+
+  /**
+   * List immediate child keys of a KV-v2 folder at `path`. Returns
+   * an empty array when the folder is missing.
+   */
+  async kvList(path: string, token: string): Promise<string[]> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const mount = this.getKvMount();
+    const url = `${baseUrl}/v1/${mount}/metadata/${path}`;
+    try {
+      const result = await this.httpService.axiosRef.request({
+        url,
+        method: 'LIST',
+        headers: {
+          'X-Vault-Token': token,
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+        },
+      });
+      return (result.data?.data?.keys ?? []) as string[];
+    } catch (error) {
+      const status = error?.response?.status;
+      if (status === 404) return [];
+      throw new HttpErrorByCode[status ?? 500]('VaultException');
+    }
+  }
+
   /**
    * Expecting a manager token to retrieve all keys from the vault and return an array of user objects including
    * it's user id and public address.
@@ -223,7 +347,8 @@ export class VaultService {
         headers: { 'X-Vault-Token': token },
       });
     } catch (error) {
-      throw new HttpErrorByCode[error.response.status]('VaultException');
+      const status = error?.response?.status ?? 500;
+      throw new HttpErrorByCode[status]('VaultException');
     }
 
     const users: string[] = result.data.data.keys;

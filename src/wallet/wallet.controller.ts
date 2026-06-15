@@ -7,14 +7,18 @@ import { CreateUserDto } from './create-user.dto';
 import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
 import { ManagerDetailDto } from './manager-detail.dto';
+import { ManagerIdentityDto, DeployManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConflictResponse,
   ApiCreatedResponse,
   ApiUnauthorizedResponse,
   ApiOkResponse,
   ApiOperation,
   ApiBadRequestResponse,
   ApiNotFoundResponse,
+  ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 import { AccountAssetsDto } from './account-assets.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
@@ -64,6 +68,70 @@ export class Wallet {
   })
   async managersDetail(@Request() request: any): Promise<ManagerDetailDto> {
     return await this.walletService.getManagerInfo(request.vault_token);
+  }
+
+  // Endpoint to get the manager's issuer DID + resolved DID Document.
+  // Lets wallets and partner verifiers pin the issuer `did:algo`
+  // without shipping a `did:algo` resolver of their own.
+  @Get('wallet/manager/identity')
+  @ApiOperation({
+    summary: 'Get Manager Identity',
+    description:
+      "Resolve the manager's issuer `did:algo` and return its DID Document. " +
+      "The DID is the platform's root of trust for credential issuance and is " +
+      'anchored on the **Algorand** ledger.',
+  })
+  @ApiOkResponse({
+    description: "The manager's issuer DID and resolved DID Document.",
+    type: ManagerIdentityDto,
+  })
+  @ApiNotFoundResponse({
+    description:
+      'No `DIDAlgoStorage` contract is configured for this process. ' +
+      'Call `POST /v1/wallet/manager/identity` (manager-authenticated) to deploy one.',
+  })
+  async managerIdentity(): Promise<ManagerIdentityDto> {
+    return await this.walletService.getManagerIdentity();
+  }
+
+  // Endpoint to deploy (or redeploy) the `DIDAlgoStorage` contract
+  // backing the manager's issuer DID. Manager-authenticated via the
+  // existing global JWT/Vault AuthGuard — the request's vault token
+  // signs the deployment. Useful at first boot, on key rotation, or
+  // when switching networks.
+  @Post('wallet/manager/identity')
+  @ApiOperation({
+    summary: 'Deploy Manager Identity',
+    description:
+      'Deploy a fresh `DIDAlgoStorage` contract using the manager Vault key, then provision and ' +
+      "publish the manager's issuer `did:algo` against it. The contract id is persisted to Vault KV " +
+      '(at `secret/intermezzo/manager/app-id`) so the next boot keeps using the same instance. Per-user ' +
+      '`DIDAlgoStorage` contracts (one per onboarded wallet `did:key`) live under `secret/intermezzo/users/`. Fails ' +
+      'with `409 Conflict` when a contract is already configured — pass `{ "force": true }` to update in ' +
+      "place (key rotation): the existing contract is reused, only the manager's DID-document box is " +
+      'deleted (reclaiming its MBR) and a fresh document is republished.',
+  })
+  @ApiBody({ type: DeployManagerIdentityDto, required: false })
+  @ApiConflictResponse({
+    description:
+      'A `DIDAlgoStorage` contract is already configured for this process. ' +
+      'Pass `{ "force": true }` to redeploy and reclaim MBR.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'The manager Algorand account is underfunded and cannot pay for the ' +
+      '`DIDAlgoStorage` contract deployment (algod reports an `overspend`). ' +
+      'Fund the manager account and retry.',
+  })
+  @ApiCreatedResponse({
+    description: 'The manager identity was provisioned successfully.',
+    type: DeployManagerIdentityResponseDto,
+  })
+  async deployManagerIdentity(
+    @Request() request: any,
+    @Body() body: DeployManagerIdentityDto = {},
+  ): Promise<DeployManagerIdentityResponseDto> {
+    return await this.walletService.deployManagerIdentity(request.vault_token, { force: body.force });
   }
 
   // Endpoint to fetch asset balance

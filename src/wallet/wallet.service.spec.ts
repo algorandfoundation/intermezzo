@@ -2,6 +2,8 @@ import createMockInstance from 'jest-create-mock-instance';
 import { VaultService } from '../vault/vault.service';
 import { WalletService } from './wallet.service';
 import { ChainService } from '../chain/chain.service';
+import { DidService } from '../did/did.service';
+import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { CreateAssetDto } from './create-asset.dto';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
@@ -27,6 +29,8 @@ describe('WalletService', () => {
   let vaultServiceMock: jest.Mocked<VaultService>;
   let chainServiceMock: jest.Mocked<ChainService>;
   let configServiceMock: jest.Mocked<ConfigService>;
+  let didServiceMock: jest.Mocked<DidService>;
+  let oid4vcAgentProviderMock: jest.Mocked<Oid4vcAgentProvider>;
 
   let chainService: ChainService;
   let httpService: HttpService;
@@ -35,7 +39,21 @@ describe('WalletService', () => {
     vaultServiceMock = createMockInstance(VaultService);
     chainServiceMock = createMockInstance(ChainService);
     configServiceMock = createMockInstance(ConfigService);
-    walletService = new WalletService(vaultServiceMock, chainServiceMock, configServiceMock);
+    didServiceMock = createMockInstance(DidService);
+    didServiceMock.publishControlledDid.mockResolvedValue({
+      did: 'did:algo:test:app:1:00',
+      document: {} as never,
+      txIds: [],
+    });
+    didServiceMock.deriveDid.mockReturnValue('did:algo:test:app:1:derived');
+    oid4vcAgentProviderMock = createMockInstance(Oid4vcAgentProvider);
+    walletService = new WalletService(
+      vaultServiceMock,
+      chainServiceMock,
+      configServiceMock,
+      didServiceMock,
+      oid4vcAgentProviderMock,
+    );
 
     httpService = createMockInstance(HttpService);
     chainService = new ChainService(configServiceMock, httpService);
@@ -66,8 +84,6 @@ describe('WalletService', () => {
 
     const result = await walletService.userCreate(userId, 'vault_token');
 
-    // expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, 'vault_token');
-    // expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(new Address(pubKey).toString());
     expect(result).toStrictEqual({
       public_address: new Address(pubKey).toString(),
       user_id: userId,
@@ -939,6 +955,33 @@ describe('WalletService', () => {
       expect(result).toStrictEqual({
         public_address: encodeAddress(pubKey),
       });
+    });
+  });
+
+  describe('deployManagerIdentity()', () => {
+    it('maps algod overspend errors to UnprocessableEntityException with a friendly message', async () => {
+      const overspendMessage =
+        'Error resolving execution info via simulate in transaction 0: ' +
+        'transaction CWNRIIDBLS22ZUFNQPM7Y7PFOTLF4B75PUZ4L53T4KCWICJF66HQ: ' +
+        'overspend (account 3E6ZXNHDFE4FJCLUKNUOHFUGHHOHA7N2QNFVU2HH7FUSQUAGPITQLCGB5E, ' +
+        'tried to spend {1000})';
+      didServiceMock.deployStorage.mockRejectedValueOnce(new Error(overspendMessage));
+
+      await expect(walletService.deployManagerIdentity('vault_token')).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining('Manager account is underfunded'),
+      });
+
+      expect(didServiceMock.deployStorage).toHaveBeenCalledWith('vault_token', { force: undefined });
+      expect(oid4vcAgentProviderMock.resetCachedIssuerDid).not.toHaveBeenCalled();
+      expect(oid4vcAgentProviderMock.ensureIssuerDid).not.toHaveBeenCalled();
+    });
+
+    it('rethrows non-overspend errors unchanged', async () => {
+      const other = new Error('something else exploded');
+      didServiceMock.deployStorage.mockRejectedValueOnce(other);
+
+      await expect(walletService.deployManagerIdentity('vault_token')).rejects.toBe(other);
     });
   });
 });

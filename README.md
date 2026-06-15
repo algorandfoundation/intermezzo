@@ -48,6 +48,17 @@ This is mostly defined by Hashicorp Vault. The application will use the `approle
 
 For most information, you can refer to the [Hashicorp Vault ACL documentation](https://www.vaultproject.io/docs/auth/approle).
 
+### Device Attestation & Credential Issuance
+
+Pawn provides generic OID4VC (OpenID for Verifiable Credential Issuance) tools. It does **not** provide a built-in device attestation endpoint, as attestation requirements (e.g., Apple App Attest, Google Play Integrity) vary significantly between platforms and applications.
+
+Downstream consumers (managers) are responsible for:
+1.  Verifying the device integrity or user identity out-of-band.
+2.  Using the `/v1/credential/issuer/offers` endpoint to create a pre-authorized credential offer for the user's `did:key`.
+3.  Distributing the offer URI/QR code to the user's wallet.
+
+Once the user's wallet redeems the credential, it can be used to authenticate subsequent requests to Pawn (e.g., for `did:algo` deployment) via the `CredentialAuthGuard`.
+
 
 # Setup Development Environment
 
