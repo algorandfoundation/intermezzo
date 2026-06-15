@@ -10,23 +10,28 @@ import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { plainToClass } from 'class-transformer';
 import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AssetHolding } from 'src/chain/algo-node-responses';
+import { CredentialAuthGuard } from '../auth/credential-auth.guard';
+import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 
 describe('Wallet Controller', () => {
   let walletController: Wallet;
   let mockWalletService: jest.Mocked<WalletService>;
+  let mockManagerToken: { getToken: jest.Mock };
 
   beforeAll(async () => {
     mockWalletService = createMockInstance(WalletService);
+    mockManagerToken = { getToken: jest.fn() };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [Wallet],
       providers: [
-        {
-          provide: WalletService,
-          useValue: mockWalletService,
-        },
+        { provide: WalletService, useValue: mockWalletService },
+        { provide: ManagerVaultTokenProvider, useValue: mockManagerToken },
       ],
-    }).compile();
+    })
+      .overrideGuard(CredentialAuthGuard)
+      .useValue({ canActivate: jest.fn().mockReturnValue(true) })
+      .compile();
 
     walletController = moduleRef.get<Wallet>(Wallet);
   });

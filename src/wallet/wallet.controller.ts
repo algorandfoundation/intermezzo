@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, Request, UseGuards } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { CreateAssetResponseDto } from './create-asset-response.dto';
@@ -18,8 +18,13 @@ import {
   ApiOperation,
   ApiBadRequestResponse,
   ApiNotFoundResponse,
+  ApiSecurity,
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
+import { Public } from '../auth/constants';
+import { CredentialAuthGuard } from '../auth/credential-auth.guard';
+import type { CredentialAuthRequest } from '../auth/credential-auth.guard';
+import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { AccountAssetsDto } from './account-assets.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
@@ -39,7 +44,10 @@ import { SponsorDetailDto } from './sponsor-detail.dto';
   description: 'Unauthorized',
 })
 export class Wallet {
-  constructor(private readonly walletService: WalletService) {}
+  constructor(
+    private readonly walletService: WalletService,
+    private readonly managerToken: ManagerVaultTokenProvider,
+  ) {}
 
   // Endpoint to get user details
   @Get('wallet/users/:user_id/')
@@ -353,6 +361,9 @@ export class Wallet {
 
   // Endpoint to get the Sponsor public address
   @Get('wallet/sponsor/')
+  @Public()
+  @UseGuards(CredentialAuthGuard)
+  @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Get Sponsor Address',
     description:
@@ -363,12 +374,16 @@ export class Wallet {
     description: 'The sponsor address has been successfully fetched.',
     type: SponsorDetailDto,
   })
-  async sponsorDetail(@Request() request: any): Promise<SponsorDetailDto> {
-    return await this.walletService.getSponsorInfo(request.vault_token);
+  async sponsorDetail(@Req() _request: CredentialAuthRequest): Promise<SponsorDetailDto> {
+    const vaultToken = await this.managerToken.getToken();
+    return await this.walletService.getSponsorInfo(vaultToken);
   }
 
   // Sponsor Transaction Group
   @Post('wallet/transactions/sponsor/')
+  @Public()
+  @UseGuards(CredentialAuthGuard)
+  @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Sponsor Transaction Group',
     description:
@@ -387,9 +402,10 @@ export class Wallet {
     description: 'Bad Request',
   })
   async sponsorTxGroup(
-    @Request() request: any,
+    @Req() _request: CredentialAuthRequest,
     @Body() sponsorRequestDto: SponsorRequestDto,
   ): Promise<SponsorResponseDto> {
-    return await this.walletService.sponsorTransactionGroup(request.vault_token, sponsorRequestDto);
+    const vaultToken = await this.managerToken.getToken();
+    return await this.walletService.sponsorTransactionGroup(vaultToken, sponsorRequestDto);
   }
 }
