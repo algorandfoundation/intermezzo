@@ -763,7 +763,13 @@ describe('WalletService', () => {
       vaultServiceMock.signAsManager.mockResolvedValue(
         Buffer.from(`vault:v1:${Buffer.from(new Uint8Array(64)).toString('base64')}`),
       );
-      walletServiceWithRealChain = new WalletService(vaultServiceMock, chainService, configServiceMock);
+      walletServiceWithRealChain = new WalletService(
+        vaultServiceMock,
+        chainService,
+        configServiceMock,
+        didServiceMock,
+        oid4vcAgentProviderMock,
+      );
     });
 
     afterEach(() => {
