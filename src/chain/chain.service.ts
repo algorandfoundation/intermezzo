@@ -39,7 +39,7 @@ export class ChainService {
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
-  ) { }
+  ) {}
 
   private parseLease(lease: string): Uint8Array {
     return new Uint8Array(Buffer.from(lease, 'base64'));
