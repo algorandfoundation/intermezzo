@@ -12,6 +12,9 @@ import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { CredentialAuthGuard } from '../auth/credential-auth.guard';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
+import { encodeAddress } from '@algorandfoundation/algokit-utils';
+import { base58 } from '@scure/base';
+import { randomBytes } from 'crypto';
 
 describe('Wallet Controller', () => {
   let walletController: Wallet;
@@ -226,6 +229,44 @@ describe('Wallet Controller', () => {
           transaction_id: expectedTransactionId,
         }),
       );
+    });
+  });
+
+  describe('managerAddress', () => {
+    it('fetches the manager vault token itself and returns the manager address, requiring no request auth', async () => {
+      const managerToken = 'manager-vault-token';
+      const expectedResponse = { public_address: 'MANAGERADDRESS' };
+
+      mockManagerToken.getToken.mockResolvedValueOnce(managerToken);
+      mockWalletService.getManagerAddress.mockResolvedValueOnce(expectedResponse);
+
+      const result = await walletController.managerAddress();
+
+      expect(mockManagerToken.getToken).toHaveBeenCalled();
+      expect(mockWalletService.getManagerAddress).toHaveBeenCalledWith(managerToken);
+      expect(result).toEqual(expectedResponse);
+    });
+  });
+
+  describe('sponsorTxGroup', () => {
+    it('derives the caller address from the credential did:key and passes it to the service', async () => {
+      const pubKey = randomBytes(32);
+      const didKey = 'did:key:z' + base58.encode(Uint8Array.from([0xed, 0x01, ...pubKey]));
+      const managerToken = 'manager-vault-token';
+      const sponsorRequest = { transactions: ['dHhuLTA=', 'dHhuLTE='] };
+      const expectedResponse = { transactions: ['c2lnbmVkLTA=', 'dHhuLTE='], group_id: 'Z3JvdXA=' };
+
+      mockManagerToken.getToken.mockResolvedValueOnce(managerToken);
+      mockWalletService.sponsorTransactionGroup.mockResolvedValueOnce(expectedResponse);
+
+      const result = await walletController.sponsorTxGroup({ didKey, headers: {} }, sponsorRequest);
+
+      expect(mockWalletService.sponsorTransactionGroup).toHaveBeenCalledWith(
+        managerToken,
+        sponsorRequest,
+        encodeAddress(pubKey),
+      );
+      expect(result).toEqual(expectedResponse);
     });
   });
 });

@@ -6,6 +6,7 @@ import { CreateAssetDto } from './create-asset.dto';
 import { UserInfoResponseDto } from './user-info-response.dto';
 import { ConfigService } from '@nestjs/config';
 import { ManagerDetailDto } from './manager-detail.dto';
+import { ManagerAddressDto } from './manager-address.dto';
 import { ManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
@@ -16,7 +17,6 @@ import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
 import { SponsorResponseDto } from './sponsor-response.dto';
-import { SponsorDetailDto } from './sponsor-detail.dto';
 @Injectable()
 export class WalletService {
   constructor(
@@ -126,6 +126,15 @@ export class WalletService {
       public_address: encodedAddress,
       algoBalance: algoBalance.toString(),
     };
+  }
+
+  // No chain calls — just the Vault-derived address, safe to expose publicly
+  // so wallets can learn the Sponsor address ahead of building a sponsored group.
+  async getManagerAddress(vault_token: string): Promise<ManagerAddressDto> {
+    const public_address = await this.vaultService.getManagerPublicKey(vault_token);
+    return plainToClass(ManagerAddressDto, {
+      public_address: new Address(public_address).toString(),
+    });
   }
 
   async getManagerInfo(vault_token: string): Promise<ManagerDetailDto> {
@@ -636,27 +645,14 @@ export class WalletService {
   }
 
   /**
-   * Returns information about the **Sponsor** account that funds fee-sponsorship transactions.
-   *
-   * The sponsor address is what callers must use as both the sender and the receiver of the
-   * 0 ALGO sponsor fee transaction (index 0) of any group submitted to
-   * {@link sponsorTransactionGroup}. Today the sponsor account is the same as the manager
-   * account, but this is intentionally exposed as a separate concept so the two can diverge
-   * in the future without breaking clients.
-   */
-  async getSponsorInfo(vault_token: string): Promise<SponsorDetailDto> {
-    const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    return {
-      public_address: encodeAddress(sponsorPublicKey),
-    };
-  }
-
-  /**
    * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
    *
    * Implements the protocol described in `sponsored-txns.txt`:
    *   - Index 0 must be an unsigned `pay` transaction with sender = receiver = sponsor and amount = 0.
    *   - Indices 1..N must already be signed by the user and have `fee = 0`.
+   *   - Indices 1..N must all be sent from `callerAddress` — the Algorand address bound to the
+   *     fee-sponsorship credential the caller presented. Fees are only sponsored for the
+   *     credential holder's own transactions.
    *   - All transactions must share the same group id.
    *   - The sponsor fee at index 0 must cover the whole group: `fee >= minFee * N * feeMultiplier`.
    *
@@ -666,6 +662,7 @@ export class WalletService {
   async sponsorTransactionGroup(
     vault_token: string,
     sponsorRequestDto: SponsorRequestDto,
+    callerAddress: string,
   ): Promise<SponsorResponseDto> {
     const { transactions: base64Transactions, feeMultiplier } = sponsorRequestDto;
 
@@ -730,6 +727,11 @@ export class WalletService {
       const userSender = env.txn.sender.toString();
       if (userSender === sponsorAddress) {
         throw new Error(`User transaction at index ${i} must not be sent from the sponsor address`);
+      }
+      if (userSender !== callerAddress) {
+        throw new Error(
+          `User transaction at index ${i} must be sent from the credential holder's address (${callerAddress})`,
+        );
       }
     }
 

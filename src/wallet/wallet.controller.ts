@@ -7,6 +7,7 @@ import { CreateUserDto } from './create-user.dto';
 import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
 import { ManagerDetailDto } from './manager-detail.dto';
+import { ManagerAddressDto } from './manager-address.dto';
 import { ManagerIdentityDto, DeployManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
 import {
   ApiBearerAuth,
@@ -22,7 +23,7 @@ import {
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 import { Public } from '../auth/constants';
-import { CredentialAuthGuard } from '../auth/credential-auth.guard';
+import { CredentialAuthGuard, RequiredCredential, FEE_SPONSORSHIP_VCT } from '../auth/credential-auth.guard';
 import type { CredentialAuthRequest } from '../auth/credential-auth.guard';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { AccountAssetsDto } from './account-assets.dto';
@@ -36,7 +37,8 @@ import { GroupRequestDto } from './group-request.dto';
 import { GroupResponseDto } from './group-response.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
 import { SponsorResponseDto } from './sponsor-response.dto';
-import { SponsorDetailDto } from './sponsor-detail.dto';
+import { decodeDidKeyEd25519 } from '../did/did-key';
+import { Address } from '@algorandfoundation/algokit-utils';
 
 @ApiBearerAuth()
 @Controller()
@@ -62,6 +64,30 @@ export class Wallet {
   async userDetail(@Request() request: any, @Param('user_id') user_id: string): Promise<UserInfoResponseDto> {
     // return or 404 if not found
     return await this.walletService.getUserInfo(user_id, request.vault_token);
+  }
+
+  // Endpoint to get the manager's Sponsor address ahead of time, without
+  // manager auth. Callers building a `POST /wallet/transactions/sponsor/`
+  // group need this to know the Sponsor address before they can construct
+  // the unsigned fee transaction at index 0 — the address itself isn't
+  // sensitive, it's the same value that would be visible on-chain once any
+  // transaction is submitted.
+  @Get('wallet/manager/address')
+  @Public()
+  @ApiOperation({
+    summary: 'Get Manager Sponsor Address',
+    description:
+      "Get the manager's Algorand `public_address`. This is the **Sponsor** address used by " +
+      '`POST /wallet/transactions/sponsor/` — callers can fetch it ahead of time to build the ' +
+      'unsigned Sponsor `pay` transaction at index 0 of a sponsored group. This endpoint requires no authentication.',
+  })
+  @ApiOkResponse({
+    description: "The manager's Sponsor address",
+    type: ManagerAddressDto,
+  })
+  async managerAddress(): Promise<ManagerAddressDto> {
+    const vaultToken = await this.managerToken.getToken();
+    return await this.walletService.getManagerAddress(vaultToken);
   }
 
   // Endpont to get manager details
@@ -359,36 +385,20 @@ export class Wallet {
     };
   }
 
-  // Endpoint to get the Sponsor public address
-  @Get('wallet/sponsor/')
-  @Public()
-  @UseGuards(CredentialAuthGuard)
-  @ApiSecurity('x-credential-presentation')
-  @ApiOperation({
-    summary: 'Get Sponsor Address',
-    description:
-      'Returns the **Algorand** `public_address` of the **Sponsor** account. ' +
-      'Clients MUST fetch this address before constructing a sponsored transaction group: it is required as both the sender and the receiver of the 0 ALGO sponsor fee transaction at index 0 of the group submitted to `POST /wallet/transactions/sponsor/`.',
-  })
-  @ApiOkResponse({
-    description: 'The sponsor address has been successfully fetched.',
-    type: SponsorDetailDto,
-  })
-  async sponsorDetail(@Req() _request: CredentialAuthRequest): Promise<SponsorDetailDto> {
-    const vaultToken = await this.managerToken.getToken();
-    return await this.walletService.getSponsorInfo(vaultToken);
-  }
-
   // Sponsor Transaction Group
   @Post('wallet/transactions/sponsor/')
   @Public()
   @UseGuards(CredentialAuthGuard)
+  @RequiredCredential(FEE_SPONSORSHIP_VCT)
   @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Sponsor Transaction Group',
     description:
       'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
+      'The caller must present a valid manager-issued `fee-sponsorship-credential` via the `x-credential-presentation` header. ' +
+      'The **Sponsor** address is the manager `public_address` returned by `GET /wallet/manager/`. ' +
       'The caller submits a complete group where index 0 is an **unsigned** 0 ALGO `pay` from Sponsor to Sponsor whose `fee` covers the entire group, and indices 1..N are user transactions already signed by the user with `fee = 0`. ' +
+      'Every user transaction must be sent from the Algorand address bound to the presented credential — fees are only sponsored for the credential holder’s own transactions. ' +
       'This endpoint validates the group, signs only the sponsor transaction, and returns the full signed group. The caller is responsible for submitting it to the network.',
   })
   @ApiCreatedResponse({
@@ -402,10 +412,14 @@ export class Wallet {
     description: 'Bad Request',
   })
   async sponsorTxGroup(
-    @Req() _request: CredentialAuthRequest,
+    @Req() request: CredentialAuthRequest,
     @Body() sponsorRequestDto: SponsorRequestDto,
   ): Promise<SponsorResponseDto> {
     const vaultToken = await this.managerToken.getToken();
-    return await this.walletService.sponsorTransactionGroup(vaultToken, sponsorRequestDto);
+    // The credential's bound did:key wraps the caller's ed25519 public
+    // key, which is also their Algorand address — the service uses it
+    // to reject groups containing transactions the caller doesn't own.
+    const callerAddress = new Address(decodeDidKeyEd25519(request.didKey!)).toString();
+    return await this.walletService.sponsorTransactionGroup(vaultToken, sponsorRequestDto, callerAddress);
   }
 }

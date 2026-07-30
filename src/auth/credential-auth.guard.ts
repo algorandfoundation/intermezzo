@@ -1,16 +1,37 @@
-import { CanActivate, ExecutionContext, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 
 /**
- * Credential configuration / `vct` of the credential this guard
- * accepts. Must stay in sync with
+ * Credential configuration / `vct` the guard accepts by default. Must
+ * stay in sync with
  * `DEFAULT_CREDENTIAL_CONFIGURATIONS['device-attestation-credential']`
  * in `oid4vc/issuer/credential-configurations.ts`.
  */
 export const DEVICE_ATTESTATION_VCT = 'device-attestation-credential';
 
+/**
+ * `vct` of the custom fee-sponsorship credential gating sponsored-fee
+ * routes. The manager registers this configuration via
+ * `POST /v1/credential/issuer/configurations/fee-sponsorship-credential`
+ * and issues offers per holder (see `docs/CUSTOM_CREDENTIALS.md`).
+ * Possession of the credential is the entitlement — the manager only
+ * issues it to users allowed to use sponsored-fee routes.
+ */
+export const FEE_SPONSORSHIP_VCT = 'fee-sponsorship-credential';
+
 /** Header the wallet uses to present its credential. */
 export const CREDENTIAL_HEADER = 'x-credential-presentation';
+
+export const REQUIRED_CREDENTIAL_VCT_KEY = 'requiredCredentialVct';
+
+/**
+ * Route decorator selecting which credential `vct`
+ * {@link CredentialAuthGuard} requires, e.g.
+ * `@RequiredCredential(FEE_SPONSORSHIP_VCT)`. Routes without it require
+ * the default {@link DEVICE_ATTESTATION_VCT}.
+ */
+export const RequiredCredential = (vct: string) => SetMetadata(REQUIRED_CREDENTIAL_VCT_KEY, vct);
 
 /**
  * Augmented Express request: post-guard the caller's `did:key`
@@ -45,7 +66,10 @@ export interface CredentialAuthRequest {
  *      the manager's resolved DID document.
  *   2. The `iss` claim must equal the manager `did:algo` returned by
  *      `Oid4vcAgentProvider.ensureIssuerDid`.
- *   3. The `vct` must equal {@link DEVICE_ATTESTATION_VCT}.
+ *   3. The `vct` must equal the route's required credential type —
+ *      {@link DEVICE_ATTESTATION_VCT} by default, overridable per
+ *      route with {@link RequiredCredential} (e.g. the sponsored-fee
+ *      route requires {@link FEE_SPONSORSHIP_VCT}).
  *   4. The credential's `cnf.kid` must encode a `did:key`; that
  *      `did:key` is exposed as `request.didKey` for downstream
  *      handlers that need to derive the caller's Algorand address.
@@ -58,14 +82,33 @@ export interface CredentialAuthRequest {
 export class CredentialAuthGuard implements CanActivate {
   private readonly logger = new Logger(CredentialAuthGuard.name);
 
-  constructor(private readonly agentProvider: Oid4vcAgentProvider) {}
+  constructor(
+    private readonly agentProvider: Oid4vcAgentProvider,
+    private readonly reflector: Reflector,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<CredentialAuthRequest>();
+    const expectedVct =
+      this.reflector.getAllAndOverride<string>(REQUIRED_CREDENTIAL_VCT_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? DEVICE_ATTESTATION_VCT;
+    await this.verifyCredential(request, expectedVct);
+    return true;
+  }
+
+  /**
+   * Verify the SD-JWT VC presented in {@link CREDENTIAL_HEADER}: issuer
+   * signature, manager `iss`, expected `vct`, and holder `did:key`
+   * binding. On success attaches `didKey` / `credentialPayload` to the
+   * request.
+   */
+  private async verifyCredential(request: CredentialAuthRequest, expectedVct: string): Promise<void> {
     const raw = request.headers[CREDENTIAL_HEADER];
     const compact = Array.isArray(raw) ? raw[0] : raw;
     if (!compact || typeof compact !== 'string') {
-      throw new UnauthorizedException(`Missing ${CREDENTIAL_HEADER} header carrying the device-attestation credential`);
+      throw new UnauthorizedException(`Missing ${CREDENTIAL_HEADER} header carrying the ${expectedVct} credential`);
     }
     const agent = await this.agentProvider.getAgent();
     const result = await agent.sdJwtVc.verify({ compactSdJwtVc: compact });
@@ -80,8 +123,8 @@ export class CredentialAuthGuard implements CanActivate {
         `Credential iss ${String(payload.iss)} does not match the manager issuer ${issuerDid.did}`,
       );
     }
-    if (payload.vct !== DEVICE_ATTESTATION_VCT) {
-      throw new UnauthorizedException(`Credential vct ${String(payload.vct)} is not ${DEVICE_ATTESTATION_VCT}`);
+    if (payload.vct !== expectedVct) {
+      throw new UnauthorizedException(`Credential vct ${String(payload.vct)} is not ${expectedVct}`);
     }
     const cnf = payload.cnf as { kid?: string; id?: string } | undefined;
     const boundDidUrl = cnf?.kid ?? cnf?.id;
@@ -94,7 +137,6 @@ export class CredentialAuthGuard implements CanActivate {
     }
     request.didKey = didKey;
     request.credentialPayload = payload;
-    this.logger.debug(`CredentialAuthGuard: authenticated ${didKey} via device-attestation-credential`);
-    return true;
+    this.logger.debug(`CredentialAuthGuard: authenticated ${didKey} via ${expectedVct}`);
   }
 }

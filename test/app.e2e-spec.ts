@@ -7,7 +7,14 @@ import * as crypto from 'crypto';
 import { randomBytes } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
-import { getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import { Address, getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import {
+  encodeSignedTransaction,
+  encodeTransaction,
+  groupTransactions,
+  Transaction,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
 import { HttpService } from '@nestjs/axios';
 import { base58 } from '@scure/base';
 
@@ -1088,6 +1095,8 @@ describe('App E2E', () => {
     interface SelfCustodyWallet {
       privateKey: crypto.KeyObject;
       didKey: string;
+      /** Algorand address of the wallet's ed25519 public key (the same key the did:key wraps). */
+      address: string;
     }
 
     const base64Url = (input: Buffer | string): string => {
@@ -1112,7 +1121,8 @@ describe('App E2E', () => {
       const publicKeyRaw = Buffer.from(spki.subarray(spki.length - 32));
       const multibasePayload = Buffer.concat([ED25519_MULTICODEC_PREFIX, publicKeyRaw]);
       const didKey = `did:key:z${base58.encode(multibasePayload)}`;
-      return { privateKey, didKey };
+      const address = new Address(publicKeyRaw).toString();
+      return { privateKey, didKey, address };
     };
 
     /**
@@ -1185,23 +1195,28 @@ describe('App E2E', () => {
       expect(identity.data.did).toMatch(/^did:algo:/);
     }, 120000);
 
-    it('issues a device-attestation SD-JWT VC to a self-custody did:key wallet', async () => {
-      const wallet = buildWallet();
-      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
-      const managerAccessToken = await signInToPawn(vaultToken);
-
+    /**
+     * Full holder-side OID4VCI flow: the manager creates a
+     * pre-authorized offer for the wallet's `did:key`, then the wallet
+     * redeems it (token endpoint + holder proof JWT) and receives the
+     * compact SD-JWT VC.
+     */
+    const issueAndRedeemCredential = async (input: {
+      wallet: SelfCustodyWallet;
+      managerAccessToken: string;
+      configurationId: string;
+      issuanceMetadata?: Record<string, unknown>;
+    }): Promise<string> => {
       // 1. Manager creates a pre-authorized offer for the wallet did:key.
       // (The manager is assumed to have verified the user/device out-of-band).
       const redeemed = await axios.post(
         `${APP_BASE_URL}/credential/issuer/offers`,
         {
-          credentialConfigurationIds: ['device-attestation-credential'],
-          holderDidKey: wallet.didKey,
-          issuanceMetadata: {
-            attested_at: new Date().toISOString(),
-          },
+          credentialConfigurationIds: [input.configurationId],
+          holderDidKey: input.wallet.didKey,
+          ...(input.issuanceMetadata ? { issuanceMetadata: input.issuanceMetadata } : {}),
         },
-        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        { headers: { Authorization: `Bearer ${input.managerAccessToken}` } },
       );
       expect(redeemed.status).toBe(201);
       expect(typeof redeemed.data.credentialOffer).toBe('string');
@@ -1229,12 +1244,12 @@ describe('App E2E', () => {
         .then((r) => r.data);
       expect(typeof token.access_token).toBe('string');
 
-      // 4. Submit the holder proof JWT and pick up the SD-JWT VC.
+      // 3. Submit the holder proof JWT and pick up the SD-JWT VC.
       const proof = buildHolderProofJwt({
-        didKey: wallet.didKey,
+        didKey: input.wallet.didKey,
         audience: offer.credential_issuer,
         nonce: token.c_nonce,
-        privateKey: wallet.privateKey,
+        privateKey: input.wallet.privateKey,
       });
       const vct = offer.credential_configuration_ids[0];
       const credentialResp = await axios
@@ -1257,6 +1272,153 @@ describe('App E2E', () => {
       // i.e. a JWT (3 segments) optionally followed by `~`-separated
       // disclosures. Either form must at least contain the JWS dots.
       expect(compact!.split('.').length).toBeGreaterThanOrEqual(3);
+      return compact!;
+    };
+
+    it('issues a device-attestation SD-JWT VC to a self-custody did:key wallet', async () => {
+      const wallet = buildWallet();
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      await issueAndRedeemCredential({
+        wallet,
+        managerAccessToken,
+        configurationId: 'device-attestation-credential',
+        issuanceMetadata: { attested_at: new Date().toISOString() },
+      });
     }, 120000);
+
+    describe('Fee sponsorship (custom fee-sponsorship-credential)', () => {
+      const FEE_SPONSORSHIP_CONFIG_ID = 'fee-sponsorship-credential';
+      const MIN_FEE = 1000;
+
+      const registerFeeSponsorshipConfiguration = async (managerAccessToken: string) => {
+        const response = await axios.post(
+          `${APP_BASE_URL}/credential/issuer/configurations/${FEE_SPONSORSHIP_CONFIG_ID}`,
+          {
+            format: 'vc+sd-jwt',
+            vct: FEE_SPONSORSHIP_CONFIG_ID,
+            cryptographic_binding_methods_supported: ['did:key'],
+            credential_signing_alg_values_supported: ['EdDSA'],
+            display: [{ name: 'Fee Sponsorship', locale: 'en-US' }],
+          },
+          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        );
+        expect([200, 201]).toContain(response.status);
+      };
+
+      const buildPay = (from: string, to: string, amount: number, fee: number): Transaction =>
+        new Transaction({
+          type: TransactionType.Payment,
+          sender: Address.fromString(from),
+          fee: BigInt(fee),
+          firstValid: 1n,
+          lastValid: 1001n,
+          genesisId: 'e2e',
+          genesisHash: new Uint8Array(32),
+          payment: { receiver: Address.fromString(to), amount: BigInt(amount) },
+        });
+
+      /**
+       * Build a valid sponsored group as the wallet would: index 0 an
+       * unsigned 0 ALGO sponsor fee txn covering the group, index 1 a
+       * user payment with fee = 0 signed by `signer`. Returns base64
+       * txns ready for `POST /wallet/transactions/sponsor/`.
+       */
+      const buildSponsoredGroup = (sponsorAddress: string, senderAddress: string, signer: crypto.KeyObject) => {
+        const sponsorTxn = buildPay(sponsorAddress, sponsorAddress, 0, 2 * MIN_FEE);
+        const userTxn = buildPay(senderAddress, sponsorAddress, 1, 0);
+        const grouped = groupTransactions([sponsorTxn, userTxn]);
+        const userBytes = encodeTransaction(grouped[1]);
+        // ed25519 over the "TX"-prefixed canonical encoding, exactly
+        // what algod verifies on submission.
+        const signature = new Uint8Array(crypto.sign(null, Buffer.from(userBytes), signer));
+        const signedUser = encodeSignedTransaction({ txn: grouped[1], sig: signature });
+        return [
+          Buffer.from(encodeTransaction(grouped[0])).toString('base64'),
+          Buffer.from(signedUser).toString('base64'),
+        ];
+      };
+
+      it('(OK) issues a fee-sponsorship VC to a wallet, which presents it and gets its group sponsored', async () => {
+        const wallet = buildWallet();
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        // 1. Manager registers the custom configuration (idempotent)
+        //    and issues the credential to the user's wallet.
+        await registerFeeSponsorshipConfiguration(managerAccessToken);
+        const compact = await issueAndRedeemCredential({
+          wallet,
+          managerAccessToken,
+          configurationId: FEE_SPONSORSHIP_CONFIG_ID,
+        });
+
+        // 2. The wallet builds a sponsored group for its own address.
+        const sponsorAddress = await getManagerAddress();
+        const transactions = buildSponsoredGroup(sponsorAddress, wallet.address, wallet.privateKey);
+
+        // 3. Present the credential — no manager JWT — and get the
+        //    sponsor fee txn signed.
+        const response = await axios.post(
+          `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+          { transactions },
+          { headers: { 'x-credential-presentation': compact } },
+        );
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toBe('string');
+        expect(response.data.transactions).toHaveLength(2);
+        // sponsor txn (index 0) replaced with a signed envelope, user txn untouched
+        expect(response.data.transactions[0]).not.toBe(transactions[0]);
+        expect(response.data.transactions[1]).toBe(transactions[1]);
+
+        // 4. The same credential must NOT sponsor transactions sent by
+        //    someone other than the holder. (Service-level validation
+        //    surfaces as a 500 today.)
+        const otherWallet = buildWallet();
+        const foreignGroup = buildSponsoredGroup(sponsorAddress, otherWallet.address, otherWallet.privateKey);
+        await expect(
+          axios.post(
+            `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+            { transactions: foreignGroup },
+            { headers: { 'x-credential-presentation': compact } },
+          ),
+        ).rejects.toMatchObject({ response: { status: 500 } });
+      }, 120000);
+
+      it('(FAIL) rejects the sponsor route without a credential presentation', async () => {
+        const sponsorAddress = await getManagerAddress();
+        const wallet = buildWallet();
+        const transactions = buildSponsoredGroup(sponsorAddress, wallet.address, wallet.privateKey);
+
+        await expect(
+          axios.post(`${APP_BASE_URL}/wallet/transactions/sponsor/`, { transactions }),
+        ).rejects.toMatchObject({ response: { status: 401 } });
+      }, 120000);
+
+      it('(FAIL) rejects a device-attestation credential on the sponsor route', async () => {
+        const wallet = buildWallet();
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const deviceAttestation = await issueAndRedeemCredential({
+          wallet,
+          managerAccessToken,
+          configurationId: 'device-attestation-credential',
+          issuanceMetadata: { attested_at: new Date().toISOString() },
+        });
+
+        const sponsorAddress = await getManagerAddress();
+        const transactions = buildSponsoredGroup(sponsorAddress, wallet.address, wallet.privateKey);
+
+        await expect(
+          axios.post(
+            `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+            { transactions },
+            { headers: { 'x-credential-presentation': deviceAttestation } },
+          ),
+        ).rejects.toMatchObject({ response: { status: 401 } });
+      }, 120000);
+    });
   });
 });
