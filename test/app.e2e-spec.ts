@@ -7,7 +7,7 @@ import * as crypto from 'crypto';
 import { randomBytes } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
-import { getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import { Address, getApplicationAddress } from '@algorandfoundation/algokit-utils';
 import { HttpService } from '@nestjs/axios';
 import { base58 } from '@scure/base';
 
@@ -15,6 +15,7 @@ const APP_BASE_URL = 'http://localhost:3000/v1';
 const VAULT_BASE_URL = 'http://localhost:8200';
 const VAULT_TRANSIT_USERS_PATH = 'pawn/users';
 const VAULT_TRANSIT_MANAGERS_PATH = 'pawn/managers';
+const VAULT_PQ_USERS_PATH = 'pawn/pq-users';
 const VAULT_MANAGER_KEY = 'manager';
 
 // Load role and secret information from JSON files
@@ -155,6 +156,118 @@ describe('App E2E', () => {
           headers: { Authorization: `Bearer ${accessToken}` },
         }),
       ).rejects.toMatchObject({ response: { status: 404 } }); // HTTP 404 Not Found
+    });
+  });
+
+  // The `algorand-pq` secrets engine is a custom plugin (vault/plugin/), so
+  // these talk to Vault directly — no service endpoints expose PQ accounts yet.
+  describe('PQ accounts (algorand-pq plugin)', () => {
+    const pqKey = (token: string, name: string) =>
+      axios.get(`${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`, {
+        headers: { 'X-Vault-Token': token },
+      });
+
+    it('(OK) Creates an account whose address matches an independent derivation', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const name = randomBytes(16).toString('hex');
+
+      const created = await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`,
+        {},
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+      expect(created.status).toBe(200);
+
+      const { scheme, salt, public_key, address } = created.data.data;
+      expect(scheme).toBe('f1');
+      expect(salt).toBeGreaterThanOrEqual(0);
+      expect(salt).toBeLessThanOrEqual(255);
+      // Falcon-1024 public key.
+      expect(Buffer.from(public_key, 'base64')).toHaveLength(1793);
+
+      // Re-derive the address here rather than trusting the plugin's copy:
+      // SHA512-256("PQA" || scheme || salt || pk), rendered with Algorand's
+      // usual base32+checksum encoding.
+      const preimage = Buffer.concat([
+        Buffer.from('PQA'),
+        Buffer.from(scheme),
+        Buffer.from([salt]),
+        Buffer.from(public_key, 'base64'),
+      ]);
+      const digest = crypto.createHash('sha512-256').update(preimage).digest();
+      expect(new Address(new Uint8Array(digest)).toString()).toBe(address);
+
+      // Reading returns exactly what creating reported, and creating again is
+      // idempotent rather than silently re-keying the account.
+      const read = await pqKey(vaultToken, name);
+      expect(read.data.data).toStrictEqual(created.data.data);
+      const recreated = await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`,
+        {},
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+      expect(recreated.data.data.address).toBe(address);
+    });
+
+    it('(OK) Signs with the manager role', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const name = randomBytes(16).toString('hex');
+      await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`,
+        {},
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+
+      const response = await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/sign/${name}`,
+        { input: Buffer.from('TX-e2e').toString('base64') },
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+
+      // Compressed Falcon-1024 signatures are variable length but always far
+      // larger than the 64-byte ed25519 ones the transit engine returns.
+      const signature = Buffer.from(response.data.data.signature, 'base64');
+      expect(signature.length).toBeGreaterThan(1000);
+      expect(signature.length).toBeLessThanOrEqual(1538);
+    });
+
+    it('(FAIL) User role can create but cannot sign', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const name = randomBytes(16).toString('hex');
+
+      const created = await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`,
+        {},
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+      expect(created.status).toBe(200);
+
+      await expect(
+        axios.post(
+          `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/sign/${name}`,
+          { input: Buffer.from('TX-e2e').toString('base64') },
+          { headers: { 'X-Vault-Token': vaultToken } },
+        ),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    });
+
+    it('(FAIL) Rejects unknown keys and undecodable input', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const name = randomBytes(16).toString('hex');
+      await axios.post(
+        `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`,
+        {},
+        { headers: { 'X-Vault-Token': vaultToken } },
+      );
+
+      await expect(pqKey(vaultToken, 'no-such-key')).rejects.toMatchObject({ response: { status: 404 } });
+      await expect(
+        axios.post(
+          `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/sign/${name}`,
+          { input: 'not-base64!!' },
+          { headers: { 'X-Vault-Token': vaultToken } },
+        ),
+      ).rejects.toMatchObject({ response: { status: 400 } });
     });
   });
 
