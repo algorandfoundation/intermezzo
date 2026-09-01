@@ -463,6 +463,50 @@ export class DidService {
   }
 
   /**
+   * Live variant of {@link getUserDid}: the DID document is resolved
+   * directly from the on-chain contract's boxes instead of any cached
+   * state. The per-user contract's appId cannot be reliably
+   * discovered from the chain alone (algod truncates `created-apps`
+   * for large accounts and no indexer is available), so it is taken
+   * from the caller-supplied `appId` when present, and falls back to
+   * the Vault KV registry otherwise.
+   *
+   * `didDocument` is `null` when the contract exists but no document
+   * is currently READY (mid-upload, mid-delete, or never published).
+   *
+   * Returns `null` for malformed `did:key`s, and when no `appId` was
+   * supplied and none is registered in Vault for the key.
+   */
+  async getUserDidLive(
+    didKey: string,
+    vaultToken: string,
+    appIdOverride?: bigint,
+  ): Promise<{
+    didKey: string;
+    did: string;
+    appId: string;
+    appAddress: string;
+    didDocument: Record<string, unknown> | null;
+  } | null> {
+    let publicKey: Uint8Array;
+    try {
+      publicKey = decodeDidKeyEd25519(didKey);
+    } catch (err) {
+      this.logger.warn(`getUserDidLive: invalid did:key "${didKey}": ${(err as Error).message}`);
+      return null;
+    }
+
+    const appId = appIdOverride ?? (await this.getUserAppId(didKey, vaultToken));
+    if (appId === undefined) return null;
+
+    const algorand = this.buildAlgorandClient();
+    const appClient = new DidAlgoStorageClient({ appId, algorand });
+    const didDocument = await resolveDIDDocument(appClient, publicKey);
+    const did = buildDidIdentifier(this.getNetwork(), appId, publicKey);
+    return { didKey, did, appId: appId.toString(), appAddress: appClient.appAddress.toString(), didDocument };
+  }
+
+  /**
    * Derive the canonical `did:algo` identifier for an ed25519 public
    * key without any chain or cache I/O. Useful when callers need to
    * advertise a DID alongside a vault-resident user key even though

@@ -6,11 +6,13 @@ import {
   HttpCode,
   NotFoundException,
   Param,
+  ParseBoolPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiNotFoundResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiNotFoundResponse, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { DidService, UserContractCreatePlan, UserDidUpdatePlan } from './did.service';
 import { Public } from '../auth/constants';
 import { CredentialAuthGuard } from '../auth/credential-auth.guard';
@@ -28,6 +30,13 @@ interface UserDidEntry {
   did: string;
   appId: string;
   appAddress: string;
+  /**
+   * Only present on live (`?live=true`) lookups: the DID document
+   * currently published on chain, or `null` when the contract exists
+   * but no document is READY (mid-upload, mid-delete, or never
+   * published).
+   */
+  didDocument?: Record<string, unknown> | null;
 }
 
 /** Express request augmented by the global manager `AuthGuard`. */
@@ -90,13 +99,62 @@ export class DidController {
   /**
    * Look up a single user record by `did:key`. Returns 404 when no
    * per-user contract has been provisioned for that key.
+   *
+   * Pass `?live=true` to resolve the currently-published DID document
+   * directly from the on-chain contract's boxes and include it in the
+   * response. The contract's app id cannot be reliably discovered from
+   * the chain alone, so callers may pin it explicitly with
+   * `?appId=<id>`; when omitted, the app id falls back to the Vault KV
+   * registry.
    */
   @Get('identities/:didKey')
   @ApiOperation({
     summary: 'Look up a single user did:algo by did:key',
+    description:
+      'By default the lookup is served from the Vault KV registry. Pass `?live=true` to also ' +
+      'resolve the currently-published DID document from the on-chain `DIDAlgoStorage` boxes ' +
+      '(`didDocument`, `null` when none is published). The contract app id is taken from the ' +
+      'optional `appId` query parameter when supplied, and falls back to the Vault KV registry ' +
+      'otherwise.',
+  })
+  @ApiQuery({
+    name: 'live',
+    required: false,
+    type: Boolean,
+    description: 'When true, resolve the on-chain DID document from the contract boxes and include it in the response.',
+  })
+  @ApiQuery({
+    name: 'appId',
+    required: false,
+    type: String,
+    description:
+      'Explicit `DIDAlgoStorage` app id to resolve against (only valid with `live=true`). ' +
+      'When omitted, the app id falls back to the Vault KV registry.',
   })
   @ApiNotFoundResponse({ description: 'No per-user did:algo registered for the supplied did:key.' })
-  async getIdentity(@Param('didKey') didKey: string, @Req() request: ManagerAuthedRequest): Promise<UserDidEntry> {
+  async getIdentity(
+    @Param('didKey') didKey: string,
+    @Query('live', new ParseBoolPipe({ optional: true })) live: boolean | undefined,
+    @Query('appId') appId: string | undefined,
+    @Req() request: ManagerAuthedRequest,
+  ): Promise<UserDidEntry> {
+    if (appId !== undefined && !live) {
+      throw new BadRequestException('appId is only supported together with live=true');
+    }
+    if (live) {
+      let appIdOverride: bigint | undefined;
+      if (appId !== undefined) {
+        if (!/^\d+$/.test(appId)) {
+          throw new BadRequestException('appId must be a non-negative integer');
+        }
+        appIdOverride = BigInt(appId);
+      }
+      const entry = await this.didService.getUserDidLive(didKey, request.vault_token, appIdOverride);
+      if (!entry) {
+        throw new NotFoundException(`No per-user did:algo found for ${didKey}`);
+      }
+      return entry;
+    }
     const entry = await this.didService.getUserDid(didKey, request.vault_token);
     if (!entry) {
       throw new NotFoundException(`No per-user did:algo registered for ${didKey}`);

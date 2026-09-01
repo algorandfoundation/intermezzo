@@ -1,6 +1,7 @@
 import createMockInstance from 'jest-create-mock-instance';
 import { ConfigService } from '@nestjs/config';
 import { Address } from '@algorandfoundation/algokit-utils';
+import { base58 } from '@scure/base';
 
 import { DidService } from './did.service';
 import { ChainService } from '../chain/chain.service';
@@ -17,19 +18,27 @@ jest.mock('../../libs/did-algo', () => {
     uploadDIDDocument: jest.fn(),
     deleteDIDDocument: jest.fn(),
     replaceDIDDocument: jest.fn(),
+    resolveDIDDocument: jest.fn(),
   };
 });
 jest.mock('./vault-signer', () => ({
   buildManagerSigner: jest.fn(),
 }));
 
-import { DidAlgoStorageClient, deleteDIDDocument, uploadDIDDocument, replaceDIDDocument } from '../../libs/did-algo';
+import {
+  DidAlgoStorageClient,
+  deleteDIDDocument,
+  uploadDIDDocument,
+  replaceDIDDocument,
+  resolveDIDDocument,
+} from '../../libs/did-algo';
 import { buildManagerSigner } from './vault-signer';
 
 const DidAlgoStorageClientMock = DidAlgoStorageClient as unknown as jest.Mock;
 const uploadDIDDocumentMock = uploadDIDDocument as unknown as jest.Mock;
 const deleteDIDDocumentMock = deleteDIDDocument as unknown as jest.Mock;
 const replaceDIDDocumentMock = replaceDIDDocument as unknown as jest.Mock;
+const resolveDIDDocumentMock = resolveDIDDocument as unknown as jest.Mock;
 const buildManagerSignerMock = buildManagerSigner as unknown as jest.Mock;
 
 /**
@@ -85,12 +94,13 @@ describe('DidService', () => {
     buildManagerSignerMock.mockResolvedValue({ address: MANAGER_ADDRESS, signer: jest.fn() });
 
     metadataValueMock.mockReset();
-    DidAlgoStorageClientMock.mockImplementation(() => ({
+    DidAlgoStorageClientMock.mockImplementation((opts?: { appId?: bigint }) => ({
       state: {
         box: { metadata: { value: metadataValueMock } },
         global: { currentIndex: jest.fn().mockResolvedValue(0n) },
       },
       appClient: { getABIMethod: (n: string) => ({ name: n }) },
+      appAddress: { toString: () => `addr-of-app-${opts?.appId ?? 'unknown'}` },
     }));
     uploadDIDDocumentMock.mockResolvedValue(['tx-upload-1']);
     deleteDIDDocumentMock.mockResolvedValue(['tx-del-1']);
@@ -211,6 +221,77 @@ describe('DidService', () => {
 
       expect(deleteDIDDocumentMock).not.toHaveBeenCalled();
       expect(result.txIds).toBeNull();
+    });
+  });
+
+  describe('getUserDidLive', () => {
+    const USER_PUB_KEY = new Uint8Array(32).fill(0x42);
+    const USER_DID_KEY = 'did:key:z' + base58.encode(Uint8Array.from([0xed, 0x01, ...USER_PUB_KEY]));
+
+    it('returns null for a malformed did:key without any Vault or chain I/O', async () => {
+      (vaultService.kvRead as jest.Mock).mockClear();
+
+      const result = await didService.getUserDidLive('did:key:not-a-key', 'vt');
+
+      expect(result).toBeNull();
+      expect(vaultService.kvRead).not.toHaveBeenCalled();
+      expect(resolveDIDDocumentMock).not.toHaveBeenCalled();
+    });
+
+    it('uses the explicit appId override without consulting the Vault registry', async () => {
+      (vaultService.kvRead as jest.Mock).mockClear();
+      const document = { id: 'did:algo:...', verificationMethod: [] };
+      resolveDIDDocumentMock.mockResolvedValueOnce(document);
+
+      const result = await didService.getUserDidLive(USER_DID_KEY, 'vt', 555n);
+
+      expect(result).toEqual({
+        didKey: USER_DID_KEY,
+        did: expect.stringMatching(/^did:algo:testnet:app:555:[A-Z2-7]+$/),
+        appId: '555',
+        appAddress: 'addr-of-app-555',
+        didDocument: document,
+      });
+      expect(vaultService.kvRead).not.toHaveBeenCalled();
+      expect(resolveDIDDocumentMock).toHaveBeenCalledWith(
+        expect.objectContaining({ appAddress: expect.anything() }),
+        USER_PUB_KEY,
+      );
+    });
+
+    it('falls back to the Vault KV registry for the appId when none is supplied', async () => {
+      (vaultService.kvRead as jest.Mock).mockClear();
+      const document = { id: 'did:algo:...' };
+      resolveDIDDocumentMock.mockResolvedValueOnce(document);
+
+      const result = await didService.getUserDidLive(USER_DID_KEY, 'vt');
+
+      expect(vaultService.kvRead).toHaveBeenCalledWith(expect.stringContaining(encodeURIComponent(USER_DID_KEY)), 'vt');
+      expect(result).toEqual({
+        didKey: USER_DID_KEY,
+        did: expect.stringMatching(/^did:algo:testnet:app:1234:[A-Z2-7]+$/),
+        appId: '1234',
+        appAddress: 'addr-of-app-1234',
+        didDocument: document,
+      });
+    });
+
+    it('returns null when no appId is supplied and none is registered in Vault', async () => {
+      (vaultService.kvRead as jest.Mock).mockResolvedValueOnce(undefined);
+
+      const result = await didService.getUserDidLive(USER_DID_KEY, 'vt');
+
+      expect(result).toBeNull();
+      expect(resolveDIDDocumentMock).not.toHaveBeenCalled();
+    });
+
+    it('reports didDocument=null when the contract has no published document', async () => {
+      resolveDIDDocumentMock.mockResolvedValueOnce(null);
+
+      const result = await didService.getUserDidLive(USER_DID_KEY, 'vt', 42n);
+
+      expect(result?.appId).toBe('42');
+      expect(result?.didDocument).toBeNull();
     });
   });
 
