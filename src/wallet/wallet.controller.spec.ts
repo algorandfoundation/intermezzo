@@ -233,7 +233,7 @@ describe('Wallet Controller', () => {
   });
 
   describe('managerAddress', () => {
-    it('fetches the manager vault token itself and returns the manager address, requiring no request auth', async () => {
+    it('fetches the manager vault token server-side rather than taking one from the credential-bearing request', async () => {
       const managerToken = 'manager-vault-token';
       const expectedResponse = { public_address: 'MANAGERADDRESS' };
 
@@ -245,6 +245,13 @@ describe('Wallet Controller', () => {
       expect(mockManagerToken.getToken).toHaveBeenCalled();
       expect(mockWalletService.getManagerAddress).toHaveBeenCalledWith(managerToken);
       expect(result).toEqual(expectedResponse);
+    });
+
+    it('is gated by CredentialAuthGuard', () => {
+      // The testing module overrides the guard, so nothing above would fail
+      // if the decorator were dropped — assert the route metadata directly.
+      const guards = Reflect.getMetadata('__guards__', Wallet.prototype.managerAddress) ?? [];
+      expect(guards).toContain(CredentialAuthGuard);
     });
   });
 

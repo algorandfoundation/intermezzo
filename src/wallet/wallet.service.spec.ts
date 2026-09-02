@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { ManagerAddressDto } from './manager-address.dto';
+import { BadRequestException } from '@nestjs/common';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
 import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
@@ -831,6 +832,24 @@ describe('WalletService', () => {
       ).rejects.toThrow('Transactions array is required and must not be empty');
     });
 
+    it('reports caller mistakes as BadRequestException, not raw Errors', async () => {
+      // The global ExceptionsFilter only forwards a message to the caller
+      // when the thrown value is an HttpException — a raw Error would
+      // reach the wallet as an opaque 500 "Internal server error".
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const { sponsor, user } = buildValidGroup(500, 0);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(
+          vaultToken,
+          { transactions: [toB64(sponsor), toB64(user)] },
+          userAddress,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
     it('throws when group is too small', async () => {
       const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 1000);
       await expect(
@@ -840,6 +859,17 @@ describe('WalletService', () => {
           userAddress,
         ),
       ).rejects.toThrow('Sponsored group must contain at least the sponsor fee txn and one user txn');
+    });
+
+    it('throws when transactions carry no group id at all', async () => {
+      // never passed through setGroupID, so `grp` is absent
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const base64 = [toB64(sponsorTx), toB64(signUserTxn(userTx))];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }, userAddress),
+      ).rejects.toThrow('Transactions must be grouped (missing group id)');
     });
 
     it('throws when transactions have different group ids', async () => {
@@ -853,6 +883,30 @@ describe('WalletService', () => {
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }, userAddress),
       ).rejects.toThrow('All transactions must belong to the same group');
+    });
+
+    it('throws when the sponsor txn (index 0) is not a payment', async () => {
+      // an axfer at index 0 must not be accepted as the fee txn — otherwise
+      // the sponsor could be made to sign an asset movement of its own.
+      const sponsorAxfer = encodeTransaction(
+        new Transaction({
+          type: TransactionType.AssetTransfer,
+          sender: Address.fromString(sponsorAddress),
+          fee: 2000n,
+          firstValid: 1n,
+          lastValid: 1001n,
+          genesisId: 'test-genesis-id',
+          genesisHash: testGenesisHash,
+          assetTransfer: { assetId: 1n, amount: 1n, receiver: Address.fromString(userAddress) },
+        }),
+      );
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([sponsorAxfer, userTx]);
+      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1]))];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }, userAddress),
+      ).rejects.toThrow('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
     });
 
     it('throws when sponsor txn (index 0) is signed', async () => {

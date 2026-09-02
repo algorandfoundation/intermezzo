@@ -23,7 +23,7 @@ import {
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 import { Public } from '../auth/constants';
-import { CredentialAuthGuard, RequiredCredential, FEE_SPONSORSHIP_VCT } from '../auth/credential-auth.guard';
+import { CredentialAuthGuard } from '../auth/credential-auth.guard';
 import type { CredentialAuthRequest } from '../auth/credential-auth.guard';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { AccountAssetsDto } from './account-assets.dto';
@@ -66,20 +66,27 @@ export class Wallet {
     return await this.walletService.getUserInfo(user_id, request.vault_token);
   }
 
-  // Endpoint to get the manager's Sponsor address ahead of time, without
-  // manager auth. Callers building a `POST /wallet/transactions/sponsor/`
-  // group need this to know the Sponsor address before they can construct
-  // the unsigned fee transaction at index 0 — the address itself isn't
-  // sensitive, it's the same value that would be visible on-chain once any
-  // transaction is submitted.
+  // Endpoint to get the manager's Sponsor address ahead of time, gated by
+  // the same wallet credential as `POST /wallet/transactions/sponsor/`.
+  // Callers building a sponsored group need this to know the Sponsor
+  // address before they can construct the unsigned fee transaction at
+  // index 0, and they already hold the credential by then — it is minted
+  // during `/v1/link/response` onboarding, well before any sponsoring.
+  // The address itself is not a secret (it appears on-chain the moment any
+  // transaction is submitted); gating it just keeps the sponsorship surface
+  // reachable only by wallets the manager has attested.
   @Get('wallet/manager/address')
   @Public()
+  @UseGuards(CredentialAuthGuard)
+  @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Get Manager Sponsor Address',
     description:
       "Get the manager's Algorand `public_address`. This is the **Sponsor** address used by " +
       '`POST /wallet/transactions/sponsor/` — callers can fetch it ahead of time to build the ' +
-      'unsigned Sponsor `pay` transaction at index 0 of a sponsored group. This endpoint requires no authentication.',
+      'unsigned Sponsor `pay` transaction at index 0 of a sponsored group. Requires a valid ' +
+      'manager-issued `device-attestation-credential` in the `x-credential-presentation` header, ' +
+      'the same credential the sponsor route itself requires.',
   })
   @ApiOkResponse({
     description: "The manager's Sponsor address",
@@ -389,14 +396,14 @@ export class Wallet {
   @Post('wallet/transactions/sponsor/')
   @Public()
   @UseGuards(CredentialAuthGuard)
-  @RequiredCredential(FEE_SPONSORSHIP_VCT)
   @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Sponsor Transaction Group',
     description:
       'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
-      'The caller must present a valid manager-issued `fee-sponsorship-credential` via the `x-credential-presentation` header. ' +
-      'The **Sponsor** address is the manager `public_address` returned by `GET /wallet/manager/`. ' +
+      'The caller must present a valid manager-issued `device-attestation-credential` via the `x-credential-presentation` header. ' +
+      'The **Sponsor** address is the manager `public_address` returned by `GET /wallet/manager/address`, ' +
+      'which accepts the same credential as this route. ' +
       'The caller submits a complete group where index 0 is an **unsigned** 0 ALGO `pay` from Sponsor to Sponsor whose `fee` covers the entire group, and indices 1..N are user transactions already signed by the user with `fee = 0`. ' +
       'Every user transaction must be sent from the Algorand address bound to the presented credential — fees are only sponsored for the credential holder’s own transactions. ' +
       'This endpoint validates the group, signs only the sponsor transaction, and returns the full signed group. The caller is responsible for submitting it to the network.',
@@ -409,7 +416,11 @@ export class Wallet {
     description: 'Not Found',
   })
   @ApiBadRequestResponse({
-    description: 'Bad Request',
+    description:
+      'The submitted group is invalid. The `message` names the exact rule that failed — transactions not sharing ' +
+      'one group id, a sponsor fee transaction at index 0 that is signed / not a `pay` / not a 0 ALGO ' +
+      'Sponsor-to-Sponsor payment, a user transaction that is unsigned, carries a non-zero `fee`, or is not sent ' +
+      "from the credential holder's own address, or a sponsor fee that does not cover the whole group.",
   })
   async sponsorTxGroup(
     @Req() request: CredentialAuthRequest,

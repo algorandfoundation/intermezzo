@@ -1,11 +1,9 @@
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
 import {
   CredentialAuthGuard,
   CredentialAuthRequest,
   CREDENTIAL_HEADER,
   DEVICE_ATTESTATION_VCT,
-  FEE_SPONSORSHIP_VCT,
 } from './credential-auth.guard';
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 
@@ -15,7 +13,6 @@ describe('CredentialAuthGuard', () => {
 
   let guard: CredentialAuthGuard;
   let verifyMock: jest.Mock;
-  let reflectorMock: { getAllAndOverride: jest.Mock };
   let request: CredentialAuthRequest;
 
   const buildContext = (headers: Record<string, string>): ExecutionContext => {
@@ -40,12 +37,11 @@ describe('CredentialAuthGuard', () => {
 
   beforeEach(() => {
     verifyMock = jest.fn();
-    reflectorMock = { getAllAndOverride: jest.fn().mockReturnValue(undefined) };
     const agentProviderMock = {
       getAgent: jest.fn().mockResolvedValue({ sdJwtVc: { verify: verifyMock } }),
       ensureIssuerDid: jest.fn().mockResolvedValue({ did: ISSUER_DID }),
     } as unknown as Oid4vcAgentProvider;
-    guard = new CredentialAuthGuard(agentProviderMock, reflectorMock as unknown as Reflector);
+    guard = new CredentialAuthGuard(agentProviderMock);
   });
 
   it('(OK) accepts a valid device-attestation credential and attaches the holder did:key', async () => {
@@ -56,25 +52,8 @@ describe('CredentialAuthGuard', () => {
     expect(request.credentialPayload).toMatchObject({ vct: DEVICE_ATTESTATION_VCT });
   });
 
-  it('(OK) requires the vct declared via @RequiredCredential route metadata', async () => {
-    reflectorMock.getAllAndOverride.mockReturnValue(FEE_SPONSORSHIP_VCT);
-    mockVerifiedPayload(validPayload({ vct: FEE_SPONSORSHIP_VCT }));
-
-    await expect(guard.canActivate(buildContext({ [CREDENTIAL_HEADER]: 'sd-jwt' }))).resolves.toBe(true);
-    expect(request.didKey).toBe(HOLDER_DID_KEY);
-  });
-
-  it('rejects a device-attestation credential on a route requiring the fee-sponsorship credential', async () => {
-    reflectorMock.getAllAndOverride.mockReturnValue(FEE_SPONSORSHIP_VCT);
-    mockVerifiedPayload(validPayload({ vct: DEVICE_ATTESTATION_VCT }));
-
-    await expect(guard.canActivate(buildContext({ [CREDENTIAL_HEADER]: 'sd-jwt' }))).rejects.toThrow(
-      new RegExp(`is not ${FEE_SPONSORSHIP_VCT}`),
-    );
-  });
-
-  it('rejects a fee-sponsorship credential on a default (device-attestation) route', async () => {
-    mockVerifiedPayload(validPayload({ vct: FEE_SPONSORSHIP_VCT }));
+  it('rejects a credential whose vct is not the device-attestation credential', async () => {
+    mockVerifiedPayload(validPayload({ vct: 'some-other-credential' }));
 
     await expect(guard.canActivate(buildContext({ [CREDENTIAL_HEADER]: 'sd-jwt' }))).rejects.toThrow(
       new RegExp(`is not ${DEVICE_ATTESTATION_VCT}`),
@@ -105,8 +84,6 @@ describe('CredentialAuthGuard', () => {
   it('rejects a credential not bound to a did:key', async () => {
     mockVerifiedPayload(validPayload({ cnf: { kid: 'did:algo:testnet:user#key-1' } }));
 
-    await expect(guard.canActivate(buildContext({ [CREDENTIAL_HEADER]: 'sd-jwt' }))).rejects.toThrow(
-      /is not a did:key/,
-    );
+    await expect(guard.canActivate(buildContext({ [CREDENTIAL_HEADER]: 'sd-jwt' }))).rejects.toThrow(/is not a did:key/);
   });
 });

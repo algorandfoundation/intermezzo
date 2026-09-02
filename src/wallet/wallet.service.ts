@@ -1,4 +1,10 @@
-import { Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { ChainService } from '../chain/chain.service';
 import { DidService } from '../did/did.service';
@@ -128,8 +134,8 @@ export class WalletService {
     };
   }
 
-  // No chain calls — just the Vault-derived address, safe to expose publicly
-  // so wallets can learn the Sponsor address ahead of building a sponsored group.
+  // No chain calls — just the Vault-derived address, so credential-holding
+  // wallets can learn the Sponsor address ahead of building a sponsored group.
   async getManagerAddress(vault_token: string): Promise<ManagerAddressDto> {
     const public_address = await this.vaultService.getManagerPublicKey(vault_token);
     return plainToClass(ManagerAddressDto, {
@@ -651,7 +657,7 @@ export class WalletService {
    *   - Index 0 must be an unsigned `pay` transaction with sender = receiver = sponsor and amount = 0.
    *   - Indices 1..N must already be signed by the user and have `fee = 0`.
    *   - Indices 1..N must all be sent from `callerAddress` — the Algorand address bound to the
-   *     fee-sponsorship credential the caller presented. Fees are only sponsored for the
+   *     device-attestation credential the caller presented. Fees are only sponsored for the
    *     credential holder's own transactions.
    *   - All transactions must share the same group id.
    *   - The sponsor fee at index 0 must cover the whole group: `fee >= minFee * N * feeMultiplier`.
@@ -667,10 +673,10 @@ export class WalletService {
     const { transactions: base64Transactions, feeMultiplier } = sponsorRequestDto;
 
     if (!base64Transactions || base64Transactions.length === 0) {
-      throw new Error('Transactions array is required and must not be empty');
+      throw new BadRequestException('Transactions array is required and must not be empty');
     }
     if (base64Transactions.length < 2) {
-      throw new Error('Sponsored group must contain at least the sponsor fee txn and one user txn');
+      throw new BadRequestException('Sponsored group must contain at least the sponsor fee txn and one user txn');
     }
 
     const rawTxs: Uint8Array[] = this.chainService.decodeBase64Transactions(base64Transactions);
@@ -682,13 +688,13 @@ export class WalletService {
     // ---- Group ID validation ----
     const firstGroupBytes: Uint8Array | undefined = envelopes[0].txn.group;
     if (!firstGroupBytes || firstGroupBytes.length === 0) {
-      throw new Error('Transactions must be grouped (missing group id)');
+      throw new BadRequestException('Transactions must be grouped (missing group id)');
     }
     const firstGroupId: string = Buffer.from(firstGroupBytes).toString('base64');
     for (const env of envelopes) {
       const grp = env.txn.group;
       if (!grp || Buffer.from(grp).toString('base64') !== firstGroupId) {
-        throw new Error('All transactions must belong to the same group');
+        throw new BadRequestException('All transactions must belong to the same group');
       }
     }
 
@@ -697,39 +703,39 @@ export class WalletService {
     const sponsorTxn = sponsorEnv.txn;
 
     if (sponsorEnv.sig) {
-      throw new Error('Sponsor fee transaction (index 0) must be unsigned');
+      throw new BadRequestException('Sponsor fee transaction (index 0) must be unsigned');
     }
     if (sponsorTxn.type !== 'pay') {
-      throw new Error('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
+      throw new BadRequestException('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
     }
     const sponsorTxnSender = sponsorTxn.sender.toString();
     if (sponsorTxnSender !== sponsorAddress) {
-      throw new Error(`Sponsor fee transaction sender must be the sponsor address (${sponsorAddress})`);
+      throw new BadRequestException(`Sponsor fee transaction sender must be the sponsor address (${sponsorAddress})`);
     }
     if (!sponsorTxn.payment?.receiver || sponsorTxn.payment.receiver.toString() !== sponsorAddress) {
-      throw new Error(`Sponsor fee transaction receiver must be the sponsor address (${sponsorAddress})`);
+      throw new BadRequestException(`Sponsor fee transaction receiver must be the sponsor address (${sponsorAddress})`);
     }
     const sponsorAmt: bigint = sponsorTxn.payment?.amount ?? 0n;
     if (sponsorAmt !== 0n) {
-      throw new Error('Sponsor fee transaction amount must be 0');
+      throw new BadRequestException('Sponsor fee transaction amount must be 0');
     }
 
     // ---- User txns (indices 1..N) validation ----
     for (let i = 1; i < envelopes.length; i++) {
       const env = envelopes[i];
       if (!env.sig) {
-        throw new Error(`User transaction at index ${i} must be signed by the user`);
+        throw new BadRequestException(`User transaction at index ${i} must be signed by the user`);
       }
       const userFee: bigint = env.txn.fee ?? 0n;
       if (userFee !== 0n) {
-        throw new Error(`User transaction at index ${i} must have fee = 0`);
+        throw new BadRequestException(`User transaction at index ${i} must have fee = 0`);
       }
       const userSender = env.txn.sender.toString();
       if (userSender === sponsorAddress) {
-        throw new Error(`User transaction at index ${i} must not be sent from the sponsor address`);
+        throw new BadRequestException(`User transaction at index ${i} must not be sent from the sponsor address`);
       }
       if (userSender !== callerAddress) {
-        throw new Error(
+        throw new BadRequestException(
           `User transaction at index ${i} must be sent from the credential holder's address (${callerAddress})`,
         );
       }
@@ -743,7 +749,7 @@ export class WalletService {
     const requiredFee: bigint = BigInt(Math.ceil(Number(minFee) * envelopes.length * multiplier));
     const sponsorFee: bigint = sponsorTxn.fee ?? 0n;
     if (sponsorFee < requiredFee) {
-      throw new Error(
+      throw new BadRequestException(
         `Sponsor fee transaction fee (${sponsorFee}) is below required fee (${requiredFee}) for ${envelopes.length} transactions`,
       );
     }

@@ -1288,24 +1288,8 @@ describe('App E2E', () => {
       });
     }, 120000);
 
-    describe('Fee sponsorship (custom fee-sponsorship-credential)', () => {
-      const FEE_SPONSORSHIP_CONFIG_ID = 'fee-sponsorship-credential';
+    describe('Fee sponsorship (device-attestation-credential)', () => {
       const MIN_FEE = 1000;
-
-      const registerFeeSponsorshipConfiguration = async (managerAccessToken: string) => {
-        const response = await axios.post(
-          `${APP_BASE_URL}/credential/issuer/configurations/${FEE_SPONSORSHIP_CONFIG_ID}`,
-          {
-            format: 'vc+sd-jwt',
-            vct: FEE_SPONSORSHIP_CONFIG_ID,
-            cryptographic_binding_methods_supported: ['did:key'],
-            credential_signing_alg_values_supported: ['EdDSA'],
-            display: [{ name: 'Fee Sponsorship', locale: 'en-US' }],
-          },
-          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
-        );
-        expect([200, 201]).toContain(response.status);
-      };
 
       const buildPay = (from: string, to: string, amount: number, fee: number): Transaction =>
         new Transaction({
@@ -1340,18 +1324,18 @@ describe('App E2E', () => {
         ];
       };
 
-      it('(OK) issues a fee-sponsorship VC to a wallet, which presents it and gets its group sponsored', async () => {
+      it('(OK) a wallet presents its device-attestation VC and gets its group sponsored', async () => {
         const wallet = buildWallet();
         const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
         const managerAccessToken = await signInToPawn(vaultToken);
 
-        // 1. Manager registers the custom configuration (idempotent)
-        //    and issues the credential to the user's wallet.
-        await registerFeeSponsorshipConfiguration(managerAccessToken);
+        // 1. Manager issues the device-attestation credential to the
+        //    user's wallet.
         const compact = await issueAndRedeemCredential({
           wallet,
           managerAccessToken,
-          configurationId: FEE_SPONSORSHIP_CONFIG_ID,
+          configurationId: 'device-attestation-credential',
+          issuanceMetadata: { attested_at: new Date().toISOString() },
         });
 
         // 2. The wallet builds a sponsored group for its own address.
@@ -1373,8 +1357,7 @@ describe('App E2E', () => {
         expect(response.data.transactions[1]).toBe(transactions[1]);
 
         // 4. The same credential must NOT sponsor transactions sent by
-        //    someone other than the holder. (Service-level validation
-        //    surfaces as a 500 today.)
+        //    someone other than the holder.
         const otherWallet = buildWallet();
         const foreignGroup = buildSponsoredGroup(sponsorAddress, otherWallet.address, otherWallet.privateKey);
         await expect(
@@ -1383,7 +1366,79 @@ describe('App E2E', () => {
             { transactions: foreignGroup },
             { headers: { 'x-credential-presentation': compact } },
           ),
-        ).rejects.toMatchObject({ response: { status: 500 } });
+        ).rejects.toMatchObject({
+          response: {
+            status: 400,
+            // ExceptionsFilter nests the HttpException body under `response`.
+            data: {
+              response: { message: expect.stringContaining("must be sent from the credential holder's address") },
+            },
+          },
+        });
+      }, 120000);
+
+      it('(FAIL) returns a descriptive 400 when the sponsor fee does not cover the group', async () => {
+        const wallet = buildWallet();
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const compact = await issueAndRedeemCredential({
+          wallet,
+          managerAccessToken,
+          configurationId: 'device-attestation-credential',
+          issuanceMetadata: { attested_at: new Date().toISOString() },
+        });
+
+        const sponsorAddress = await getManagerAddress();
+        // Underfund the sponsor fee txn: a 2-txn group needs 2 * MIN_FEE.
+        const sponsorTxn = buildPay(sponsorAddress, sponsorAddress, 0, MIN_FEE);
+        const userTxn = buildPay(wallet.address, sponsorAddress, 1, 0);
+        const grouped = groupTransactions([sponsorTxn, userTxn]);
+        const signature = new Uint8Array(
+          crypto.sign(null, Buffer.from(encodeTransaction(grouped[1])), wallet.privateKey),
+        );
+        const transactions = [
+          Buffer.from(encodeTransaction(grouped[0])).toString('base64'),
+          Buffer.from(encodeSignedTransaction({ txn: grouped[1], sig: signature })).toString('base64'),
+        ];
+
+        await expect(
+          axios.post(
+            `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+            { transactions },
+            { headers: { 'x-credential-presentation': compact } },
+          ),
+        ).rejects.toMatchObject({
+          response: {
+            status: 400,
+            data: { response: { message: expect.stringContaining('is below required fee') } },
+          },
+        });
+      }, 120000);
+
+      it('(OK) serves the Sponsor address to a credential-holding wallet, and rejects one without', async () => {
+        const wallet = buildWallet();
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const compact = await issueAndRedeemCredential({
+          wallet,
+          managerAccessToken,
+          configurationId: 'device-attestation-credential',
+          issuanceMetadata: { attested_at: new Date().toISOString() },
+        });
+
+        // Presenting the same credential the sponsor route requires.
+        const response = await axios.get(`${APP_BASE_URL}/wallet/manager/address`, {
+          headers: { 'x-credential-presentation': compact },
+        });
+        expect(response.status).toBe(200);
+        expect(response.data.public_address).toBe(await getManagerAddress());
+
+        // No Authorization header and no credential presentation.
+        await expect(axios.get(`${APP_BASE_URL}/wallet/manager/address`)).rejects.toMatchObject({
+          response: { status: 401 },
+        });
       }, 120000);
 
       it('(FAIL) rejects the sponsor route without a credential presentation', async () => {
@@ -1396,17 +1451,20 @@ describe('App E2E', () => {
         ).rejects.toMatchObject({ response: { status: 401 } });
       }, 120000);
 
-      it('(FAIL) rejects a device-attestation credential on the sponsor route', async () => {
+      it('(FAIL) rejects a tampered credential presentation', async () => {
         const wallet = buildWallet();
         const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
         const managerAccessToken = await signInToPawn(vaultToken);
 
-        const deviceAttestation = await issueAndRedeemCredential({
+        const compact = await issueAndRedeemCredential({
           wallet,
           managerAccessToken,
           configurationId: 'device-attestation-credential',
           issuanceMetadata: { attested_at: new Date().toISOString() },
         });
+        // Flip the last character of the issuer signature so the SD-JWT
+        // still parses but fails signature verification.
+        const tampered = compact.slice(0, -1) + (compact.endsWith('A') ? 'B' : 'A');
 
         const sponsorAddress = await getManagerAddress();
         const transactions = buildSponsoredGroup(sponsorAddress, wallet.address, wallet.privateKey);
@@ -1415,7 +1473,7 @@ describe('App E2E', () => {
           axios.post(
             `${APP_BASE_URL}/wallet/transactions/sponsor/`,
             { transactions },
-            { headers: { 'x-credential-presentation': deviceAttestation } },
+            { headers: { 'x-credential-presentation': tampered } },
           ),
         ).rejects.toMatchObject({ response: { status: 401 } });
       }, 120000);
