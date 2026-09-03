@@ -1,7 +1,8 @@
 # Credential status and revocation — implementation plan
 
-**Branch:** `feat/credentials-status-and-revoke`
-**Status:** Phases 0-2 complete. Next: Phase 3 (endpoints).
+**Integration branch:** `feat/credentials-status-and-revoke`
+**Status:** Phases 0-2 complete and committed. Next: Phase 3 (endpoints), on
+its own branch.
 **Scope:** per-credential revocation for SD-JWT VCs issued by this service, published as an IETF Token Status List.
 
 This document is the working plan. It is written to be resumable: a session
@@ -10,6 +11,50 @@ code it points at and know what is done, what is left, and why each choice
 was made. Update the checkboxes as phases land.
 
 ---
+
+## Branch and PR structure
+
+The work ships as a stack of three pull requests. The bottom branch is the
+**integration branch**: the other two merge into it, and only once the feature
+is whole does it merge to `master`.
+
+```
+feat/credentials-status-local-resolve   PR 3 — Phase 4, Phase 6
+        │ merges into
+        ▼
+feat/credentials-status-endpoint        PR 2 — Phase 3, 5b, 5e
+        │ merges into
+        ▼
+feat/credentials-status-and-revoke      PR 1 — Phases 0-2  (integration branch)
+        │ merges into
+        ▼
+master
+```
+
+| PR | Branch | Owns | Base |
+| --- | --- | --- | --- |
+| 1 | `feat/credentials-status-and-revoke` | Phases 0-2, and this document | `master` |
+| 2 | `feat/credentials-status-endpoint` | Phase 3, 5b, 5e | PR 1 |
+| 3 | `feat/credentials-status-local-resolve` | Phase 4, Phase 6 | PR 2 |
+
+**Why this direction matters.** Phase 2 makes issued credentials carry a
+`status_list.uri`, and Phase 3 is what serves it — between them, issuance
+produces credentials that fail verification permanently (§8). Merging the
+stack downward into the integration branch, rather than each PR into `master`
+in turn, means `master` never sees that intermediate state. The hazard is
+confined to a feature branch nothing deploys from.
+
+Two consequences worth knowing:
+
+- **Do not merge PR 1 to `master` early**, however green it looks on its own.
+  It is complete as a unit of review, not as a unit of deployment.
+- The repo merges with real merge commits rather than squashing (`git log
+  --merges`), so the usual stacked-PR hazard — a squashed base rewriting its
+  commits and making the child PR show duplicated changes — does not apply
+  here. Rebasing the integration branch while the stack is open would
+  reintroduce it; merge into it instead.
+
+Phase 5a, 5c and 5d already landed in PR 1 alongside the code they cover.
 
 ## 1. Problem
 
@@ -258,7 +303,7 @@ happen here — the mapper injects `Oid4vcStatusService`, so without it Nest
 fails to resolve `Oid4vcIssuerService` at boot. Only the controller is left
 for Phase 3.
 
-### Phase 3 — endpoints
+### Phase 3 — endpoints  *(PR 2)*
 
 - [ ] `status/oid4vc-status.controller.ts`, `@Controller('credential/status')`,
       `@ApiTags('OID4VC')`:
@@ -283,7 +328,7 @@ records already carry `statusListId` / `statusListIndex`, and the existing
 - [ ] Register the controller in [`oid4vc.module.ts`](oid4vc.module.ts).
       The service and repository were registered in Phase 2.
 
-### Phase 4 — keep the wallet auth path off the network
+### Phase 4 — keep the wallet auth path off the network  *(PR 3)*
 
 **This is the primary enforcement path, not an optimisation.** The manager is
 the only party checking status initially, so in practice every status check
@@ -332,7 +377,7 @@ Phase 1 added 10, Phase 2 added 6.)
   - revoking an unknown session, or one that was never redeemed, is a 404
   - deferred to Phase 4: own-base URIs short-circuit locally, foreign URIs
     fall through
-- [ ] **5b** `status/oid4vc-status.controller.spec.ts` — delegation, and the
+- [ ] **5b** *(PR 2)* `status/oid4vc-status.controller.spec.ts` — delegation, and the
       `application/statuslist+jwt` content type.
 - [x] **5c** `issuer/oid4vc-issuer.service.spec.ts` — **new file**; the issuer
       service had no spec at all, so the mapper was entirely untested:
@@ -347,7 +392,7 @@ Phase 1 added 10, Phase 2 added 6.)
       `statusListUri` under the default and a prefix-less base URL, and the
       no-path-segment warning. Pulled forward into Phase 0 so that phase lands
       green rather than deferring its own coverage.
-- [ ] **5e** `test/status-list.e2e-spec.ts` — self-contained.
+- [ ] **5e** *(PR 2)* `test/status-list.e2e-spec.ts` — self-contained.
 
   The existing [`test/app.e2e-spec.ts`](../../test/app.e2e-spec.ts) drives a
   live stack (Vault on `:8200`, the app on `:3000`, a real chain, secrets read
@@ -376,7 +421,7 @@ Phase 1 added 10, Phase 2 added 6.)
       `app.e2e-spec.ts`, so this suite is runnable without live Vault.
       `yarn test:e2e` still requires the full stack.
 
-### Phase 6 — documentation
+### Phase 6 — documentation  *(PR 3)*
 
 - [ ] [`README.md`](README.md) — status list section, revoke `curl` examples.
 - [ ] [`TRUST_MODEL.md`](TRUST_MODEL.md) line 71 — currently calls the mutable
@@ -401,6 +446,12 @@ credential. A fetch failure throws inside `verify()`, so taking the endpoint
 away — or moving it, via a changed `OID4VC_BASE_URL` — bricks every credential
 that points at it. There is no partial rollout and no clean rollback after
 Phase 2 ships.
+
+The window between Phase 2 and Phase 3 is contained by the branch structure
+above: PR 1 does not reach `master` until PR 2 has merged into it, so no
+deployable branch ever issues credentials pointing at a URL nothing serves.
+The commit message on `cbd5ed0` carries the same warning for anyone who finds
+that commit on its own.
 
 **No new key coupling.** The list is signed by the manager key, which already
 signs every credential. A manager key rotation already invalidated
@@ -447,4 +498,5 @@ here — recorded so the next person does not rediscover them.
   the gap (§5.1).
 - Everything else is settled. Note that Phase 2 is the point of no return:
   once credentials ship with a `status_list.uri`, the endpoint and its URL are
-  load-bearing forever (§8).
+  load-bearing forever (§8) — which is why PR 1 waits for PR 2 before it sees
+  `master`.
