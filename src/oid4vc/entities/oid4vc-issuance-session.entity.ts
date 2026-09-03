@@ -61,6 +61,25 @@ export class Oid4vcIssuanceSession {
    */
   issuanceMetadata?: Record<string, unknown>;
 
+  /**
+   * Status list the issued credential's revocation bit lives on, and the
+   * index of that bit. Assigned by the credential mapper at redemption time
+   * and embedded in the credential as `status.status_list`; absent until the
+   * wallet actually redeems the offer.
+   *
+   * Together these are the only handle we have for revoking one specific
+   * credential, so they are written before the signed credential is returned.
+   */
+  statusListId?: string;
+
+  statusListIndex?: number;
+
+  /** When the credential was revoked, if it has been. */
+  revokedAt?: Date;
+
+  /** Operator-supplied note recorded alongside {@link revokedAt}. */
+  revokedReason?: string;
+
   createdAt: Date;
 
   updatedAt: Date;

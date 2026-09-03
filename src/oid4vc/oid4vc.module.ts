@@ -17,6 +17,8 @@ import { DidAlgoChainAdapter } from './algo/did-algo-chain.adapter';
 import { AlgoDidResolver } from './algo/algo-did.resolver';
 import { VaultKeyProvisioningAdapter } from './algo/vault-key-provisioning.adapter';
 import { Oid4vcSessionMirrorService } from './sessions/oid4vc-session-mirror.service';
+import { Oid4vcStatusService } from './status/oid4vc-status.service';
+import { StatusListRepository } from './status/status-list.repository';
 
 /**
  * Standalone Nest module exposing OID4VCI (issuance) and OID4VP
@@ -68,7 +70,9 @@ import { Oid4vcSessionMirrorService } from './sessions/oid4vc-session-mirror.ser
     Oid4vcIssuanceSessionRepository,
     Oid4vcVerificationSessionRepository,
     Oid4vcSessionMirrorService,
+    StatusListRepository,
+    Oid4vcStatusService,
   ],
-  exports: [Oid4vcConfig, Oid4vcAgentProvider, Oid4vcIssuerService, Oid4vcVerifierService],
+  exports: [Oid4vcConfig, Oid4vcAgentProvider, Oid4vcIssuerService, Oid4vcVerifierService, Oid4vcStatusService],
 })
 export class Oid4vcModule {}

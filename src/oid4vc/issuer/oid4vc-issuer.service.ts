@@ -16,6 +16,7 @@ import { SetCredentialConfigurationDto } from '../dto/credential-configuration.d
 import { DEFAULT_CREDENTIAL_CONFIGURATIONS, CREDENTIAL_CONFIGURATIONS_KV_FOLDER } from './credential-configurations';
 import { VaultService } from '../../vault/vault.service';
 import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
+import { Oid4vcStatusService } from '../status/oid4vc-status.service';
 
 export { DEFAULT_CREDENTIAL_CONFIGURATIONS };
 
@@ -42,6 +43,7 @@ export class Oid4vcIssuerService implements OnModuleInit {
     private readonly sessionRepo: Oid4vcIssuanceSessionRepository,
     private readonly vaultService: VaultService,
     private readonly tokenProvider: AlgoVaultTokenProvider,
+    private readonly statusList: Oid4vcStatusService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -319,16 +321,41 @@ export class Oid4vcIssuerService implements OnModuleInit {
 
       switch (configuration.format) {
         case OpenId4VciCredentialFormatProfile.SdJwtVc: {
+          const claimsToIssue = stripInternalKeys(claims);
+
+          // Reserve the credential's revocation bit and record where it
+          // lives *before* handing back something signed. A credential whose
+          // entry we failed to persist could never be revoked, so a failure
+          // on either step has to abort issuance rather than leak one.
+          const status = await this.statusList.allocate();
+          const { affected } = await this.sessionRepo.update(
+            { credoIssuanceSessionId: issuanceSession.id },
+            { statusListId: status.listId, statusListIndex: status.idx },
+          );
+          if (affected === 0) {
+            throw new Error(
+              `Cannot issue ${configurationId}: no local issuance session is mapped to Credo session ` +
+                `${issuanceSession.id}, so status list entry ${status.listId}#${status.idx} could not be ` +
+                'recorded and the credential would never be revocable.',
+            );
+          }
+
           const signed: OpenId4VciSignCredential = {
             credentialSupportedId: configurationId,
             format: ClaimFormat.SdJwtVc,
             payload: {
               vct: (configuration as { vct?: string }).vct!,
-              ...stripInternalKeys(claims),
+              ...claimsToIssue,
+              // Deliberately after the spread: `status` is reserved by
+              // SD-JWT VC, and a same-named claim in `issuanceMetadata` must
+              // not be able to shadow the real revocation pointer.
+              status: { status_list: { uri: status.uri, idx: status.idx } },
             },
             issuer: { method: 'did', didUrl: issuerDid.verificationMethodId },
             holder: { method: 'did', didUrl: holderVerificationMethodId },
-            disclosureFrame: { _sd: Object.keys(stripInternalKeys(claims)) },
+            // `status` is reserved: listing it in `_sd` makes `@sd-jwt` throw
+            // "Cannot disclose protected field" and fail the whole issuance.
+            disclosureFrame: { _sd: Object.keys(claimsToIssue).filter((key) => key !== 'status') },
           };
           return signed;
         }

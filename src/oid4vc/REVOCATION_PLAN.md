@@ -1,7 +1,7 @@
 # Credential status and revocation — implementation plan
 
 **Branch:** `feat/credentials-status-and-revoke`
-**Status:** approach agreed, implementation not started
+**Status:** Phases 0-2 complete. Next: Phase 3 (endpoints).
 **Scope:** per-credential revocation for SD-JWT VCs issued by this service, published as an IETF Token Status List.
 
 This document is the working plan. It is written to be resumable: a session
@@ -168,31 +168,43 @@ compressed bitstring for 16k unused entries is a few dozen bytes.
 
 ### Phase 0 — dependency and config
 
-- [ ] `package.json`: add `"@sd-jwt/jwt-status-list": "0.7.2"` to
+- [x] `package.json`: add `"@sd-jwt/jwt-status-list": "0.7.2"` to
       `dependencies`. Pin exactly: `yarn.lock` already resolves that spec as a
       transitive of `@sd-jwt/sd-jwt-vc`, so an exact pin needs no lockfile
       change. A range like `^0.7.2` introduces a new spec string and forces
-      lockfile churn.
-- [ ] [`oid4vc.config.ts`](oid4vc.config.ts): add `statusListBaseUrl`
-      (`${baseUrl}/credential/status/list`), `statusListUri(listId)`, and
-      `statusListSize` (env `OID4VC_STATUS_LIST_SIZE`, default `16384`,
-      warn-and-fall-back on non-positive input). Document the new env var in
-      the class docblock alongside the others.
+      lockfile churn. Confirmed: `yarn install --frozen-lockfile` succeeds and
+      leaves `yarn.lock` byte-identical.
+- [x] [`oid4vc.config.ts`](oid4vc.config.ts): add `statusListBaseUrl`
+      (`${baseUrl}/credential/status/list`) and `statusListUri(listId)`.
+
+      List size is **not** configurable: a `STATUS_LIST_SIZE = 16384` const
+      lives with the entity in Phase 1. Nobody tunes a bitstring length per
+      deployment, and the answer at capacity is rollover, not a bigger number
+      — so an env var here would be config for a value that never changes,
+      plus a parse branch and its tests to maintain.
 
 > **Deployment trap.** The status URI is baked into every credential at
 > issuance. If `OID4VC_BASE_URL` is wrong or omits the `/v1` prefix, every
 > credential issued under it points at a 404 and fails verification
-> permanently — reissuance is the only fix. Worth a startup warning if the
-> base URL's pathname does not match the global prefix.
+> permanently — reissuance is the only fix.
+>
+> Implemented as a heuristic warning in `statusListBaseUrl`: the config layer
+> does not know the prefix literal, only that `main.ts` always installs one,
+> so it warns when the base URL has no path segment at all. That catches the
+> realistic misconfiguration (`http://host:3000` instead of
+> `http://host:3000/v1`) without hardcoding `v1` into the config.
 
 ### Phase 1 — storage and service
 
-- [ ] `entities/status-list.entity.ts` — `StatusListRecord` as in §6.
-- [ ] `status/status-list.repository.ts` — subclass the existing
+- [x] `entities/status-list.entity.ts` — `StatusListRecord` as in §6, plus
+      `export const STATUS_LIST_SIZE = 16384` used when a list is first created.
+      The `size` field stays on the record so an existing list keeps its own
+      length if the const ever changes.
+- [x] `status/status-list.repository.ts` — subclass the existing
       [`VaultRepository`](../vault/vault.repository.ts) over folder
       `intermezzo/oid4vc/status-lists`, no secondary index. About eight lines;
       do not introduce a new persistence layer.
-- [ ] `status/oid4vc-status.service.ts`:
+- [x] `status/oid4vc-status.service.ts`:
   - `allocate()` → `{ listId, idx, uri }`; reads the record, hands out
     `nextIndex`, increments, saves.
   - `setStatus(listId, idx, 0 | 1)` → decompress, set, recompress, save,
@@ -211,11 +223,23 @@ compressed bitstring for 16k unused entries is a few dozen bytes.
 Allocation and status writes both go through a single in-process promise
 chain so concurrent redemptions cannot collide on an index.
 
+**Resequenced:** the four session fields listed under Phase 2 were added here
+instead. `revokeBySessionId` resolves a session id to its `(listId, index)`
+pair, so it cannot compile without them, and they are pure type declarations
+with no behaviour attached.
+
+**Token building runs inside the same queue as bit writes.** Not incidental:
+building outside it allows a revocation to land between reading the record and
+populating the cache, which would publish — and then keep serving — a token
+saying a revoked credential is live. The cache is re-checked inside the queue
+so concurrent misses sign once rather than once each.
+
 ### Phase 2 — allocation at issue time
 
-- [ ] Add the four fields from §6 to
+- [x] Add the four fields from §6 to
       [`Oid4vcIssuanceSession`](entities/oid4vc-issuance-session.entity.ts).
-- [ ] In [`buildCredentialMapper`](issuer/oid4vc-issuer.service.ts), **SD-JWT
+      Done in Phase 1 — see the note there.
+- [x] In [`buildCredentialMapper`](issuer/oid4vc-issuer.service.ts), **SD-JWT
       branch only**:
   - allocate an entry, and set `status: { status_list: { uri, idx } }`
     **after** the claims spread, so a stray `status` claim in
@@ -225,7 +249,14 @@ chain so concurrent redemptions cannot collide on an index.
   - persist `statusListId` / `statusListIndex` to the local session **before
     returning**. If the write-back fails the mapper must throw, so no
     unrevocable credential escapes. Throw on `affected === 0` too.
-- [ ] Leave the W3C `JwtVc` branch **exactly as it is** (§4 row 7).
+- [x] Leave the W3C `JwtVc` branch **exactly as it is** (§4 row 7).
+- [x] Register `Oid4vcStatusService` and `StatusListRepository` in
+      [`oid4vc.module.ts`](oid4vc.module.ts) and export the service.
+
+**Resequenced:** provider registration was listed under Phase 3. It has to
+happen here — the mapper injects `Oid4vcStatusService`, so without it Nest
+fails to resolve `Oid4vcIssuerService` at boot. Only the controller is left
+for Phase 3.
 
 ### Phase 3 — endpoints
 
@@ -249,8 +280,8 @@ records already carry `statusListId` / `statusListIndex`, and the existing
 
 - [ ] Request DTOs with `class-validator` — the app installs a global
       `ValidationPipe` with `transform: true`.
-- [ ] Register the service, repository and controller in
-      [`oid4vc.module.ts`](oid4vc.module.ts); export the service.
+- [ ] Register the controller in [`oid4vc.module.ts`](oid4vc.module.ts).
+      The service and repository were registered in Phase 2.
 
 ### Phase 4 — keep the wallet auth path off the network
 
@@ -281,29 +312,41 @@ silent failure mode: it should be caught by the Phase 5a URI-matching tests.
 **24 suites, 190 tests, all passing, ~7s** (`yarn test`). No existing test may
 change behaviour or be edited to accommodate this work.
 
-- [ ] **5a** `status/oid4vc-status.service.spec.ts` — Vault KV mocked as an
-      in-memory map, `vault.sign` stubbed:
+Running total: after Phase 2, **26 suites, 209 tests**, `yarn lint`,
+`yarn format` and `yarn build` all clean. (Baseline 24/190; Phase 0 added 3,
+Phase 1 added 10, Phase 2 added 6.)
+
+- [x] **5a** `status/oid4vc-status.service.spec.ts` — Vault KV faked as an
+      in-memory map; `vault.sign` backed by a **real** Ed25519 key from node's
+      `crypto`, so the published token is verified the way a verifier would
+      rather than merely inspected:
   - `allocate()` yields 0, 1, 2… and persists `nextIndex`
   - `Promise.all` of N concurrent allocations yields N **distinct** indices
     (this is the test that proves the serialization actually serializes)
   - `setStatus(idx, 1)` flips only that bit; neighbours stay `0`
   - JWT round trip via `getListFromStatusListJWT`; header `typ` is
     `statuslist+jwt`; payload carries `iss` / `sub` / `iat` and **no `exp`**
-  - the JWT cache is invalidated by a write
+  - the JWT cache is invalidated by a write, but *not* by an allocation
+  - concurrent cache misses sign once
   - allocating past `size` throws a named error
-  - own-base URIs short-circuit locally, foreign URIs fall through
+  - revoking an unknown session, or one that was never redeemed, is a 404
+  - deferred to Phase 4: own-base URIs short-circuit locally, foreign URIs
+    fall through
 - [ ] **5b** `status/oid4vc-status.controller.spec.ts` — delegation, and the
       `application/statuslist+jwt` content type.
-- [ ] **5c** `issuer/oid4vc-issuer.service.spec.ts` — **new file**; the issuer
-      service has no spec today, so the mapper is currently untested:
+- [x] **5c** `issuer/oid4vc-issuer.service.spec.ts` — **new file**; the issuer
+      service had no spec at all, so the mapper was entirely untested:
   - the SD-JWT branch emits `status.status_list` and writes the mapping back
-  - a failed write-back throws and issues nothing
-  - the W3C `JwtVc` branch stays byte-identical and status-free — this is the
+  - `status` is kept out of the disclosure frame
+  - an `issuanceMetadata` claim named `status` cannot shadow the real pointer
+  - a failed write-back, and a failed allocation, each issue nothing
+  - the W3C `JwtVc` branch stays status-free and never allocates — the
     regression guard for the one path where adding status would *break*
     verification
-- [ ] **5d** extend [`oid4vc.config.spec.ts`](oid4vc.config.spec.ts) —
-      `statusListUri` under the default and a prefix-less base URL,
-      `statusListSize` fallback on garbage input.
+- [x] **5d** extend [`oid4vc.config.spec.ts`](oid4vc.config.spec.ts) —
+      `statusListUri` under the default and a prefix-less base URL, and the
+      no-path-segment warning. Pulled forward into Phase 0 so that phase lands
+      green rather than deferring its own coverage.
 - [ ] **5e** `test/status-list.e2e-spec.ts` — self-contained.
 
   The existing [`test/app.e2e-spec.ts`](../../test/app.e2e-spec.ts) drives a
@@ -378,8 +421,26 @@ upgrade path, so they show up in a debt sweep rather than rotting silently.
 | Single list, throw at capacity | 16384 credentials | Auto-rollover — nearly free, since `statusListId` is already stored per credential |
 | `bits: 1` | No suspension | `bits: 2` plus a custom `statusValidator` on the verifier side |
 | Device-level revocation (all credentials for one `did:key`) not built | Revoking a device means revoking its sessions one at a time | Add `revokeByHolderDidKey`; needs a secondary index on `holderDidKey` to avoid an O(n) scan |
+| Signed-token cache is per-process with no expiry | A revocation on another instance does not evict this one's entry, so it keeps serving a token saying the credential is live | Short TTL on the entry, or cross-instance invalidation |
 
-## 10. Open questions
+## 10. Pre-existing defects found, and left alone
+
+Noticed while building. Neither is caused by this work and neither is fixed
+here — recorded so the next person does not rediscover them.
+
+- **The W3C `JwtVc` branch silently drops every custom claim.** The mapper
+  builds `new W3cCredential({ credentialSubject: { id, ...claims } })`, but
+  Credo's `W3cCredentialSubject` only maps `id` and `claims`, so anything
+  passed through `issuanceMetadata` never reaches the issued credential.
+  Verified directly: a `tier` claim serialises away, leaving `{ id }`.
+  `oid4vc-issuer.service.spec.ts` pins the current behaviour so the branch is
+  guarded, with a comment making clear the assertion is not an endorsement.
+  Anyone relying on `jwt_vc_json` issuance today is getting empty credentials.
+- **`VaultService.sign` is typed `Promise<Buffer>` but returns a string**
+  (§4). Mirrored with a cast rather than corrected, since fixing the type
+  touches every caller.
+
+## 11. Open questions
 
 - **Decision 1 is the only one still worth challenging.** If any credential
   currently in circulation matters, reissue at cutover instead of accepting
