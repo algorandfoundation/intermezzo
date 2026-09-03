@@ -1,8 +1,8 @@
 # Credential status and revocation — implementation plan
 
 **Integration branch:** `feat/credentials-status-and-revoke`
-**Status:** Phases 0-3 complete. Next: Phase 4 (in-process resolution), on
-PR 3's branch.
+**Status:** All phases complete. PR 3 is the last of the stack; merge order
+is in *Branch and PR structure* below.
 **Scope:** per-credential revocation for SD-JWT VCs issued by this service, published as an IETF Token Status List.
 
 This document is the working plan. It is written to be resumable: a session
@@ -352,12 +352,27 @@ dependent on the process being able to reach itself at its own advertised
 hostname — in a container whose `OID4VC_BASE_URL` is an external name, every
 request would 401.
 
-- [ ] In the status service's `onModuleInit` (guarded by `config.autoInit`,
+- [x] In the status service's `onModuleInit` (guarded by `config.autoInit`,
       matching `Oid4vcIssuerService`), resolve `SdJwtVcService` from
       `agent.context.dependencyManager` and wrap `getStatusListFetcher` so a
       URI under `statusListBaseUrl` resolves in-process and anything else
       falls through to the original. The method is `private` in the type
       declarations, so the patch needs a cast — comment why.
+
+**Two Credo internals were verified before relying on them**, because either
+being false would have made the patch a silent no-op:
+
+- `SdJwtVcService` is registered with `registerSingleton`
+  (`SdJwtVcModule.js:24`), so `dependencyManager.resolve` returns the very
+  instance `agent.sdJwtVc.verify` uses.
+- `getBaseSdJwtConfig` calls `getStatusListFetcher` afresh on every sign and
+  verify (`SdJwtVcService.js:448-452`, called from `:92` and `:125`), so
+  replacing the method takes effect for all later verifications rather than
+  being captured once at construction.
+
+Only a single clean path segment is claimed as ours
+(`/^[A-Za-z0-9._-]+$/`); a nested path or a query string under our own base
+URL falls through to the network rather than being guessed at.
 
 If this ever breaks on a Credo upgrade, deleting it leaves a correct but
 slower system that depends on self-reachability. That is the fallback, not a
@@ -369,10 +384,10 @@ silent failure mode: it should be caught by the Phase 5a URI-matching tests.
 **24 suites, 190 tests, all passing, ~7s** (`yarn test`). No existing test may
 change behaviour or be edited to accommodate this work.
 
-Running total: after Phase 3, **27 suites, 216 tests** (`yarn test`) plus
+Running total: after Phase 4, **27 suites, 228 tests** (`yarn test`) plus
 **2 e2e tests** (`yarn test:e2e status-list`), with `yarn lint`, `yarn format`
 and `yarn build` clean. (Baseline 24/190; Phase 0 added 3, Phase 1 added 10,
-Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
+Phase 2 added 6, Phase 3 added 7 unit + 2 e2e, Phase 4 added 12.)
 
 - [x] **5a** `status/oid4vc-status.service.spec.ts` — Vault KV faked as an
       in-memory map; `vault.sign` backed by a **real** Ed25519 key from node's
@@ -388,8 +403,10 @@ Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
   - concurrent cache misses sign once
   - allocating past `size` throws a named error
   - revoking an unknown session, or one that was never redeemed, is a 404
-  - deferred to Phase 4: own-base URIs short-circuit locally, foreign URIs
-    fall through
+  - *(Phase 4)* own-base URIs short-circuit locally and foreign ones fall
+    through to the original fetcher; a revocation is reflected immediately;
+    `autoInit=false` leaves the fetcher untouched; and an unavailable agent
+    warns rather than failing boot
 - [x] **5b** *(PR 2)* `status/oid4vc-status.controller.spec.ts` — delegation,
       DTO validation, a 404 for an unknown list, `Cache-Control: no-store`, and
       an **exact-match** assertion on the content type (the charset suffix is a
@@ -458,12 +475,14 @@ Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
 
 ### Phase 6 — documentation  *(PR 3)*
 
-- [ ] [`README.md`](README.md) — status list section, revoke `curl` examples.
-- [ ] [`TRUST_MODEL.md`](TRUST_MODEL.md) line 71 — currently calls the mutable
-      on-chain `did:algo` document the "revocation surface". That becomes
-      wrong once this lands: key rotation is a blunt all-users instrument, not
-      revocation. Replace with the per-credential mechanism, and record the
-      §5.1 gap for credentials issued before this change.
+- [x] [`README.md`](README.md) — endpoint table, a Revocation section with
+      `curl` examples, and the status list records added to Storage.
+- [x] [`TRUST_MODEL.md`](TRUST_MODEL.md) — the mutable on-chain document is
+      now described as a *key-rotation* surface, explicitly noting it
+      invalidates every credential for every holder, with per-credential
+      revocation added as a separate invariant. The §5.1 gap (credentials
+      predating the `status` claim are permanently unrevocable) is recorded
+      there too.
 
 ---
 

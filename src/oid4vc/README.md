@@ -38,6 +38,9 @@ App-level orchestration endpoints (Nest):
 | GET    | `/v1/credential/issuer/sessions/:id`   | Inspect an issuance session                |
 | POST   | `/v1/credential/verifier/requests`     | Create a presentation request              |
 | GET    | `/v1/credential/verifier/sessions/:id` | Inspect a verification session + claims    |
+| GET    | `/v1/credential/status/list/:listId`   | **Public.** Signed status list token       |
+| POST   | `/v1/credential/status/revoke`         | Revoke one issued credential               |
+| POST   | `/v1/credential/status/reactivate`     | Undo a revocation                          |
 
 The OID4VCI/OID4VP **protocol endpoints** themselves (token, credential,
 authorization, …) are mounted by Credo on its own Express routers under
@@ -56,6 +59,61 @@ One configuration is advertised (see
 The credential mapper (`Oid4vcIssuerService#buildCredentialMapper`) selects
 the `OpenId4VciSignCredential` shape per the wallet's requested format and
 populates it from the offer's `issuanceMetadata`.
+
+### Revocation
+
+Every SD-JWT VC is issued with an [IETF Token Status
+List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
+pointer:
+
+```json
+"status": { "status_list": { "uri": "https://host/v1/credential/status/list/default", "idx": 42 } }
+```
+
+Verification enforces this for free — `@sd-jwt` fetches the list, checks
+its signature, reads the bit and rejects the credential unless it is `0`.
+Nothing in this repo implements a revocation check; issuing the claim *is*
+the integration.
+
+Revoke by issuance session id (the id from
+`GET /v1/credential/issuer/sessions`):
+
+```sh
+curl -X POST http://localhost:3000/v1/credential/status/revoke \
+  -H "Authorization: Bearer $MANAGER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"<issuance-session-id>","reason":"device reported stolen"}'
+```
+
+`POST .../reactivate` with the same body reverses it. The list itself is
+public, because verifiers must be able to dereference it:
+
+```sh
+curl -i http://localhost:3000/v1/credential/status/list/default
+# Content-Type: application/statuslist+jwt
+```
+
+Three things worth knowing:
+
+- **The list URL is load-bearing for the life of every credential that
+  points at it.** A failed status fetch fails verification, so moving or
+  removing it — including by changing `OID4VC_BASE_URL` — bricks issued
+  credentials. Reissuance is the only repair.
+- **The list token is signed with the manager `did:algo` key**, the same
+  key that signs credentials. Credo configures a single verifier for both,
+  so any other signing key fails verification.
+- **Credentials issued before this feature carry no `status` claim** and
+  are therefore permanently unrevocable: `@sd-jwt` skips the check
+  entirely when the claim is absent.
+
+This service resolves its own lists in-process rather than fetching its
+own URL (`Oid4vcStatusService#installLocalStatusListFetcher`), so
+`CredentialAuthGuard` does no network I/O per request and wallet auth does
+not depend on the server reaching itself.
+
+W3C `jwt_vc_json` credentials get **no** status claim: Credo refuses to
+verify credential status for JWT VCs, so adding one would break
+verification rather than enable it.
 
 ### Holder binding
 
@@ -144,7 +202,12 @@ App-level mappings persisted in Vault KV:
 
 - `oid4vc_issuance_session` / `oid4vc_verification_session` — correlate
   Credo session ids with the holder `did:key` and credential
-  configuration for status queries.
+  configuration for status queries. The issuance session also carries the
+  credential's `statusListId` / `statusListIndex`, plus `revokedAt` /
+  `revokedReason` once revoked.
+- `intermezzo/oid4vc/status-lists/records/<id>` — one record per status
+  list: a 16384-entry bitstring (36 bytes deflated) and the next free
+  index.
 
 The Vault key binding map is **in-memory** (manager-only) and rebuilt on
 boot by `Oid4vcAgentProvider`.

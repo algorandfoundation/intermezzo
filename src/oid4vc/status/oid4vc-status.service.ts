@@ -1,5 +1,6 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { StatusList, createHeaderAndPayload } from '@sd-jwt/jwt-status-list';
+import { AgentContext, SdJwtVcService } from '@credo-ts/core';
 
 import { parseVaultSignature } from '../../../libs/credo-vault-wallet';
 import { VaultService } from '../../vault/vault.service';
@@ -12,6 +13,18 @@ import { StatusListRepository } from './status-list.repository';
 
 /** Id of the list every credential is currently allocated on. */
 export const DEFAULT_STATUS_LIST_ID = 'default';
+
+/** Shape of the one `SdJwtVcService` member Phase 4 replaces. */
+type StatusListFetcherHost = {
+  getStatusListFetcher(agentContext: AgentContext): (uri: string) => Promise<string>;
+};
+
+/**
+ * List ids we are willing to resolve without leaving the process. Anything
+ * else under our own base URL (a nested path, a query string) falls through to
+ * the network rather than being guessed at.
+ */
+const LIST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 /** A status list entry handed out at issuance time. */
 export interface AllocatedStatusEntry {
@@ -32,7 +45,7 @@ export interface AllocatedStatusEntry {
  * anything other than the credential's issuer key fails verification.
  */
 @Injectable()
-export class Oid4vcStatusService {
+export class Oid4vcStatusService implements OnModuleInit {
   private readonly logger = new Logger(Oid4vcStatusService.name);
 
   /**
@@ -66,6 +79,70 @@ export class Oid4vcStatusService {
     private readonly vault: VaultService,
     private readonly tokenProvider: AlgoVaultTokenProvider,
   ) {}
+
+  /**
+   * Teaches the agent to resolve *our* status lists without an HTTP round
+   * trip. See {@link installLocalStatusListFetcher}.
+   */
+  async onModuleInit(): Promise<void> {
+    if (!this.config.autoInit) return;
+    try {
+      await this.installLocalStatusListFetcher();
+    } catch (err) {
+      this.logger.warn(
+        `Could not install the in-process status list fetcher (${(err as Error).message}); ` +
+          'status checks will fall back to fetching our own URL over HTTP.',
+      );
+    }
+  }
+
+  /**
+   * Returns the list id when `uri` is one of ours, and `undefined` when it
+   * belongs to another issuer and must be fetched over the network.
+   */
+  localStatusListId(uri: string): string | undefined {
+    const prefix = `${this.config.statusListBaseUrl}/`;
+    if (!uri.startsWith(prefix)) return undefined;
+    const listId = uri.slice(prefix.length);
+    return LIST_ID_PATTERN.test(listId) ? listId : undefined;
+  }
+
+  /**
+   * Replaces Credo's status list fetcher with one that answers our own URIs
+   * from Vault directly, and delegates everything else to the original.
+   *
+   * This is the enforcement path that actually runs. `CredentialAuthGuard`
+   * verifies a credential on *every* wallet request, and each verification
+   * dereferences the status list. Without this, every wallet call would make a
+   * loopback HTTP request, and — worse — wallet authentication as a whole
+   * would depend on the process being able to reach itself at its own
+   * advertised hostname. In a container whose `OID4VC_BASE_URL` is an external
+   * name, that resolves somewhere else or nowhere, and every request 401s.
+   *
+   * `SdJwtVcService` is registered with `registerSingleton`, and
+   * `getBaseSdJwtConfig` calls `getStatusListFetcher` afresh for every sign and
+   * verify, so replacing the method on the resolved instance affects all
+   * subsequent verifications.
+   */
+  private async installLocalStatusListFetcher(): Promise<void> {
+    const agent = await this.agentProvider.getAgent();
+    const service = agent.context.dependencyManager.resolve(SdJwtVcService);
+
+    // `getStatusListFetcher` is `private` in the type declarations. It is a
+    // deliberate reach into Credo: there is no supported hook for supplying a
+    // status list fetcher, and the alternative is making wallet auth depend on
+    // the server reaching itself over the network.
+    const host = service as unknown as StatusListFetcherHost;
+    const fetchOverNetwork = host.getStatusListFetcher.bind(service);
+
+    host.getStatusListFetcher = (agentContext: AgentContext) => async (uri: string) => {
+      const listId = this.localStatusListId(uri);
+      if (listId === undefined) return fetchOverNetwork(agentContext)(uri);
+      return this.getStatusListJwt(listId);
+    };
+
+    this.logger.log(`Status lists under ${this.config.statusListBaseUrl} will resolve in-process`);
+  }
 
   /**
    * Reserves the next entry on the default list, creating the list on first

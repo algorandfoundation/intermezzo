@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getListFromStatusListJWT } from '@sd-jwt/jwt-status-list';
+import { AgentContext } from '@credo-ts/core';
 
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
@@ -14,7 +15,8 @@ import { StatusListRepository } from './status-list.repository';
 import { DEFAULT_STATUS_LIST_ID, Oid4vcStatusService } from './oid4vc-status.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
-const LIST_URI = `http://localhost:3000/v1/credential/status/list/${DEFAULT_STATUS_LIST_ID}`;
+const LIST_BASE = 'http://localhost:3000/v1/credential/status/list';
+const LIST_URI = `${LIST_BASE}/${DEFAULT_STATUS_LIST_ID}`;
 
 /**
  * Minimal in-memory stand-in for {@link VaultRepository}. Hand-rolled rather
@@ -46,10 +48,40 @@ describe('Oid4vcStatusService', () => {
   let sessions: ReturnType<typeof fakeRepo<Oid4vcIssuanceSession>>;
   let sign: jest.Mock;
   let publicKey: crypto.KeyObject;
+  let privateKey: crypto.KeyObject;
+
+  /** Builds a service, optionally with a stub agent and `autoInit` disabled. */
+  function makeService(opts: { agent?: unknown; agentError?: Error; autoInit?: boolean } = {}) {
+    const configService = {
+      get: <T>(key: string, fallback?: T) =>
+        key === 'OID4VC_AUTO_INIT' && opts.autoInit === false ? ('false' as unknown as T) : fallback,
+    } as unknown as ConfigService;
+
+    const agentProvider = {
+      ensureIssuerDid: jest.fn(async () => ({
+        did: ISSUER_DID,
+        verificationMethodId: `${ISSUER_DID}#keys-1`,
+      })),
+      getAgent: jest.fn(async () => {
+        if (opts.agentError) throw opts.agentError;
+        return opts.agent;
+      }),
+    } as unknown as Oid4vcAgentProvider;
+
+    return new Oid4vcStatusService(
+      new Oid4vcConfig(configService),
+      lists as unknown as StatusListRepository,
+      sessions as unknown as Oid4vcIssuanceSessionRepository,
+      agentProvider,
+      { sign } as unknown as VaultService,
+      { getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
+    );
+  }
 
   beforeEach(() => {
     const keyPair = crypto.generateKeyPairSync('ed25519');
     publicKey = keyPair.publicKey;
+    privateKey = keyPair.privateKey;
 
     lists = fakeRepo<StatusListRecord>();
     sessions = fakeRepo<Oid4vcIssuanceSession>();
@@ -57,23 +89,11 @@ describe('Oid4vcStatusService', () => {
     // Sign for real, so the published token can be verified the way a
     // verifier would rather than merely inspected.
     sign = jest.fn(async (_key: string, _path: string, data: Uint8Array) => {
-      const signature = crypto.sign(null, Buffer.from(data), keyPair.privateKey);
+      const signature = crypto.sign(null, Buffer.from(data), privateKey);
       return `vault:v1:${signature.toString('base64')}`;
     });
 
-    service = new Oid4vcStatusService(
-      new Oid4vcConfig({ get: <T>(_k: string, d?: T) => d } as unknown as ConfigService),
-      lists as unknown as StatusListRepository,
-      sessions as unknown as Oid4vcIssuanceSessionRepository,
-      {
-        ensureIssuerDid: jest.fn(async () => ({
-          did: ISSUER_DID,
-          verificationMethodId: `${ISSUER_DID}#keys-1`,
-        })),
-      } as unknown as Oid4vcAgentProvider,
-      { sign } as unknown as VaultService,
-      { getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
-    );
+    service = makeService();
   });
 
   /** Registers a redeemed issuance session pointing at `idx`. */
@@ -211,6 +231,91 @@ describe('Oid4vcStatusService', () => {
 
     it('fails loudly for a list that was never created', async () => {
       await expect(service.getStatusListJwt('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('in-process status list resolution', () => {
+    let networkFetch: jest.Mock;
+    let host: { getStatusListFetcher: jest.Mock };
+    let agent: unknown;
+
+    beforeEach(() => {
+      networkFetch = jest.fn(async (uri: string) => `remote-token-for:${uri}`);
+      host = { getStatusListFetcher: jest.fn(() => networkFetch) };
+      agent = { context: { dependencyManager: { resolve: jest.fn(() => host) } } };
+    });
+
+    /** The fetcher Credo would build for a verification, after patching. */
+    function currentFetcher(): (uri: string) => Promise<string> {
+      return host.getStatusListFetcher({} as AgentContext);
+    }
+
+    describe('URI matching', () => {
+      it.each([
+        [`${LIST_BASE}/default`, 'default'],
+        [`${LIST_BASE}/default-2`, 'default-2'],
+      ])('claims %s as its own', (uri, expected) => {
+        expect(service.localStatusListId(uri)).toBe(expected);
+      });
+
+      it.each([
+        ['https://another-issuer.example/statuslist/1', 'a foreign issuer'],
+        [`${LIST_BASE}/nested/path`, 'a nested path'],
+        [`${LIST_BASE}/default?refresh=1`, 'a query string'],
+        [`${LIST_BASE}/`, 'an empty id'],
+        [LIST_BASE, 'the bare base URL'],
+      ])('leaves %s to the network (%s)', (uri) => {
+        expect(service.localStatusListId(uri)).toBeUndefined();
+      });
+    });
+
+    it('answers our own URIs without touching the network', async () => {
+      const svc = makeService({ agent });
+      const entry = await svc.allocate();
+      await svc.onModuleInit();
+
+      const token = await currentFetcher()(entry.uri);
+
+      expect(token).toBe(await svc.getStatusListJwt());
+      expect(networkFetch).not.toHaveBeenCalled();
+      // This is the property that matters: wallet auth must not depend on the
+      // process being able to reach itself at its advertised hostname.
+      expect(getListFromStatusListJWT(token).getStatus(entry.idx)).toBe(0);
+    });
+
+    it('delegates every other issuer to the original fetcher', async () => {
+      const svc = makeService({ agent });
+      await svc.onModuleInit();
+
+      const foreign = 'https://another-issuer.example/statuslist/1';
+      await expect(currentFetcher()(foreign)).resolves.toBe(`remote-token-for:${foreign}`);
+      expect(networkFetch).toHaveBeenCalledWith(foreign);
+    });
+
+    it('reflects a revocation immediately', async () => {
+      const svc = makeService({ agent });
+      const entry = await svc.allocate();
+      await seedSession('session-a', entry.idx);
+      await svc.onModuleInit();
+
+      await svc.revokeBySessionId('session-a');
+
+      const token = await currentFetcher()(entry.uri);
+      expect(getListFromStatusListJWT(token).getStatus(entry.idx)).toBe(1);
+    });
+
+    it('leaves the fetcher alone when auto-init is off', async () => {
+      const svc = makeService({ agent, autoInit: false });
+      await svc.onModuleInit();
+
+      // Untouched: still the stub installed by this test's setup.
+      await expect(currentFetcher()('anything')).resolves.toBe('remote-token-for:anything');
+    });
+
+    it('falls back to HTTP rather than failing boot when the agent is unavailable', async () => {
+      const svc = makeService({ agentError: new Error('askar wallet unavailable') });
+
+      await expect(svc.onModuleInit()).resolves.toBeUndefined();
     });
   });
 });
