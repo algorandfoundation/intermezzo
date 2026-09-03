@@ -18,6 +18,7 @@ import { AlgoDidResolver } from './algo/algo-did.resolver';
 import { VaultKeyProvisioningAdapter } from './algo/vault-key-provisioning.adapter';
 import { Oid4vcSessionMirrorService } from './sessions/oid4vc-session-mirror.service';
 import { Oid4vcStatusService } from './status/oid4vc-status.service';
+import { Oid4vcStatusController } from './status/oid4vc-status.controller';
 import { StatusListRepository } from './status/status-list.repository';
 
 /**
@@ -41,7 +42,7 @@ import { StatusListRepository } from './status/status-list.repository';
  */
 @Module({
   imports: [ConfigModule, forwardRef(() => DidModule), VaultModule],
-  controllers: [Oid4vcIssuerController, Oid4vcVerifierController],
+  controllers: [Oid4vcIssuerController, Oid4vcVerifierController, Oid4vcStatusController],
   providers: [
     Oid4vcConfig,
     AlgoVaultTokenProvider,

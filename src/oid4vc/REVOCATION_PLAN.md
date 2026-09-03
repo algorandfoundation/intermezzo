@@ -1,8 +1,8 @@
 # Credential status and revocation — implementation plan
 
 **Integration branch:** `feat/credentials-status-and-revoke`
-**Status:** Phases 0-2 complete and committed. Next: Phase 3 (endpoints), on
-its own branch.
+**Status:** Phases 0-3 complete. Next: Phase 4 (in-process resolution), on
+PR 3's branch.
 **Scope:** per-credential revocation for SD-JWT VCs issued by this service, published as an IETF Token Status List.
 
 This document is the working plan. It is written to be resumable: a session
@@ -145,7 +145,8 @@ references if either is upgraded.
 | The status list JWT is verified with **the same key** as the credential's `iss` — Credo configures a single `verifier` for both | `@credo-ts/core/build/modules/sd-jwt-vc/SdJwtVcService.js:154` |
 | No `alg` / `typ` / `kid` checks on the list JWT; signature only | `@sd-jwt/core` `Jwt.verify` |
 | `exp` is checked only when present — omit it and there is no expiry cliff | same |
-| Credo's fetcher is a plain `fetch` with no content-type check; `@sd-jwt`'s *default* fetcher does require `application/statuslist+jwt` | `SdJwtVcService.js:458` and `@sd-jwt/sd-jwt-vc/dist/index.js:84-105` |
+| Credo's fetcher is a plain `fetch` with no content-type check; `@sd-jwt`'s *default* fetcher compares Content-Type for **strict equality** with `application/statuslist+jwt` — a `; charset=utf-8` suffix is rejected as "Invalid content type" | `SdJwtVcService.js:458` and `@sd-jwt/sd-jwt-vc/dist/index.js:98` |
+| Express appends `; charset=utf-8` to the Content-Type of any **string** body, and Nest sends any **object** (a Buffer included) via `response.json()` — so neither ordinary return path can serve an exact media type | `express/lib/response.js` `send()`, `@nestjs/platform-express/adapters/express-adapter.js:68` |
 | `status` is a **reserved** field: listing it in `_sd` throws `"Cannot disclose protected field"` | `@sd-jwt/sd-jwt-vc/dist/index.js:72` |
 | Credo hardcodes `'Verifying credential status is not supported for JWT VCs'` — adding `credentialStatus` to a W3C JwtVc makes verification **fail**, not check | `@credo-ts/core/.../W3cJwtCredentialService.js:169` |
 | `@sd-jwt/jwt-status-list@0.7.2` is already installed as a transitive dependency, and `yarn.lock:2050` already resolves the exact spec `0.7.2` | `node_modules/@sd-jwt/jwt-status-list`, `yarn.lock` |
@@ -305,7 +306,7 @@ for Phase 3.
 
 ### Phase 3 — endpoints  *(PR 2)*
 
-- [ ] `status/oid4vc-status.controller.ts`, `@Controller('credential/status')`,
+- [x] `status/oid4vc-status.controller.ts`, `@Controller('credential/status')`,
       `@ApiTags('OID4VC')`:
 
 | Route | Auth | Notes |
@@ -323,10 +324,21 @@ An ops listing (`GET entries`) was considered and cut: the issuance session
 records already carry `statusListId` / `statusListIndex`, and the existing
 `GET credential/issuer/sessions` route already exposes them.
 
-- [ ] Request DTOs with `class-validator` — the app installs a global
+- [x] Request DTOs with `class-validator` — the app installs a global
       `ValidationPipe` with `transform: true`.
-- [ ] Register the controller in [`oid4vc.module.ts`](oid4vc.module.ts).
+- [x] Register the controller in [`oid4vc.module.ts`](oid4vc.module.ts).
       The service and repository were registered in Phase 2.
+
+**The list route writes its own response.** It takes `@Res()` and calls
+`response.end(token)` instead of returning the string, purely to keep the
+media type exact — see the two Express/Nest rows in §4. Returning the token
+any ordinary way yields either `application/statuslist+jwt; charset=utf-8`
+(string) or a JSON-encoded Buffer (object), and the first of those is rejected
+by `@sd-jwt`'s default fetcher, which is precisely the third-party verifier
+this endpoint exists for. Credo's own fetcher does not check the media type,
+so this would have passed every internal test and failed only for outside
+verifiers. Nothing is written before the `await`, so a thrown
+`NotFoundException` still renders through the exception filter.
 
 ### Phase 4 — keep the wallet auth path off the network  *(PR 3)*
 
@@ -357,9 +369,10 @@ silent failure mode: it should be caught by the Phase 5a URI-matching tests.
 **24 suites, 190 tests, all passing, ~7s** (`yarn test`). No existing test may
 change behaviour or be edited to accommodate this work.
 
-Running total: after Phase 2, **26 suites, 209 tests**, `yarn lint`,
-`yarn format` and `yarn build` all clean. (Baseline 24/190; Phase 0 added 3,
-Phase 1 added 10, Phase 2 added 6.)
+Running total: after Phase 3, **27 suites, 216 tests** (`yarn test`) plus
+**2 e2e tests** (`yarn test:e2e status-list`), with `yarn lint`, `yarn format`
+and `yarn build` clean. (Baseline 24/190; Phase 0 added 3, Phase 1 added 10,
+Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
 
 - [x] **5a** `status/oid4vc-status.service.spec.ts` — Vault KV faked as an
       in-memory map; `vault.sign` backed by a **real** Ed25519 key from node's
@@ -377,8 +390,11 @@ Phase 1 added 10, Phase 2 added 6.)
   - revoking an unknown session, or one that was never redeemed, is a 404
   - deferred to Phase 4: own-base URIs short-circuit locally, foreign URIs
     fall through
-- [ ] **5b** *(PR 2)* `status/oid4vc-status.controller.spec.ts` — delegation, and the
-      `application/statuslist+jwt` content type.
+- [x] **5b** *(PR 2)* `status/oid4vc-status.controller.spec.ts` — delegation,
+      DTO validation, a 404 for an unknown list, `Cache-Control: no-store`, and
+      an **exact-match** assertion on the content type (the charset suffix is a
+      real regression risk, not a style point). Also asserts the `@Public()`
+      metadata is on the list route and on neither mutating route.
 - [x] **5c** `issuer/oid4vc-issuer.service.spec.ts` — **new file**; the issuer
       service had no spec at all, so the mapper was entirely untested:
   - the SD-JWT branch emits `status.status_list` and writes the mapping back
@@ -392,7 +408,7 @@ Phase 1 added 10, Phase 2 added 6.)
       `statusListUri` under the default and a prefix-less base URL, and the
       no-path-segment warning. Pulled forward into Phase 0 so that phase lands
       green rather than deferring its own coverage.
-- [ ] **5e** *(PR 2)* `test/status-list.e2e-spec.ts` — self-contained.
+- [x] **5e** *(PR 2)* `test/status-list.e2e-spec.ts` — self-contained.
 
   The existing [`test/app.e2e-spec.ts`](../../test/app.e2e-spec.ts) drives a
   live stack (Vault on `:8200`, the app on `:3000`, a real chain, secrets read
@@ -417,9 +433,28 @@ Phase 1 added 10, Phase 2 added 6.)
   library code Credo delegates to (§4 row 1), so it is a real end-to-end of
   the enforcement path rather than a mock of it.
 
-- [ ] Add a `test:e2e:offline` script pointing at a config that excludes
-      `app.e2e-spec.ts`, so this suite is runnable without live Vault.
-      `yarn test:e2e` still requires the full stack.
+  **No extra jest config.** An earlier revision added a `test:e2e:offline`
+  script and a second config that excluded `app.e2e-spec.ts`; both were
+  deleted. `yarn test:e2e` already runs this suite in CI, where
+  [`tests.yml`](../../.github/workflows/tests.yml) has LocalNet, Vault and the
+  compose stack up, and locally a path filter selects it with nothing to
+  maintain:
+
+  ```sh
+  yarn test:e2e status-list
+  ```
+
+  E2E specs stay in `test/` alongside `app.e2e-spec.ts` regardless of whether
+  they need the live stack — placement follows the kind of test, not its
+  dependencies.
+
+  Implementation notes: the app really listens (`app.listen(0)`) and the base
+  URL is read lazily, because the status URI baked into a credential has to
+  match the port the test server ended up on. Vault KV is a `Map` whose writes
+  are JSON round-tripped, so `undefined` fields genuinely disappear the way
+  they would through Vault. The real `StatusListRepository` and
+  `Oid4vcIssuanceSessionRepository` are used rather than fakes, so
+  `VaultRepository` is exercised too.
 
 ### Phase 6 — documentation  *(PR 3)*
 
