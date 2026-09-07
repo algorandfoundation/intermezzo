@@ -473,6 +473,7 @@ upgrade path, so they show up in a debt sweep rather than rotting silently.
 | `bits: 1` | No suspension | `bits: 2` plus a custom `statusValidator` on the verifier side |
 | Device-level revocation (all credentials for one `did:key`) not built | Revoking a device means revoking its sessions one at a time | Add `revokeByHolderDidKey`; needs a secondary index on `holderDidKey` to avoid an O(n) scan |
 | Signed-token cache is per-process with no expiry | A revocation on another instance does not evict this one's entry, so it keeps serving a token saying the credential is live | Short TTL on the entry, or cross-instance invalidation |
+| No `ttl` or `exp` on the Status List Token | Both are RECOMMENDED by draft-ietf-oauth-status-list-13 §5.1 and §13.7. Without either, a relying party is given no cache-lifetime signal and picks its own policy, so a revocation may take an unbounded time to reach a third-party verifier that caches aggressively. No functional difference for the verification paths in this repo, which fetch per check | Add `ttl` once Phase 3 makes the endpoint real and a refresh interval is worth choosing — it is a cache hint with no availability cliff. `exp` stays off deliberately: an expired list fails every credential pointing at it (see the comment at `status/oid4vc-status.service.ts`, which covers `exp` only) |
 
 ## 10. Pre-existing defects found, and left alone
 
