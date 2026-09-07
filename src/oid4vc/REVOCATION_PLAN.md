@@ -1,8 +1,8 @@
 # Credential status and revocation — implementation plan
 
 **Integration branch:** `feat/credentials-status-and-revoke`
-**Status:** All phases complete. PR 3 is the last of the stack; merge order
-is in *Branch and PR structure* below.
+**Status:** All phases complete. Two PRs remain; merge order is in *Branch and
+PR structure* below.
 **Scope:** per-credential revocation for SD-JWT VCs issued by this service, published as an IETF Token Status List.
 
 This document is the working plan. It is written to be resumable: a session
@@ -14,15 +14,12 @@ was made. Update the checkboxes as phases land.
 
 ## Branch and PR structure
 
-The work ships as a stack of three pull requests. The bottom branch is the
-**integration branch**: the other two merge into it, and only once the feature
-is whole does it merge to `master`.
+The work ships as a stack of two pull requests. The bottom branch is the
+**integration branch**: the other merges into it, and only once the feature is
+whole does it merge to `master`.
 
 ```
-feat/credentials-status-local-resolve   PR 3 — Phase 4, Phase 6
-        │ merges into
-        ▼
-feat/credentials-status-endpoint        PR 2 — Phase 3, 5b, 5e
+feat/credentials-status-endpoint        PR 2 — Phases 3-6
         │ merges into
         ▼
 feat/credentials-status-and-revoke      PR 1 — Phases 0-2  (integration branch)
@@ -34,8 +31,14 @@ master
 | PR | Branch | Owns | Base |
 | --- | --- | --- | --- |
 | 1 | `feat/credentials-status-and-revoke` | Phases 0-2, and this document | `master` |
-| 2 | `feat/credentials-status-endpoint` | Phase 3, 5b, 5e | PR 1 |
-| 3 | `feat/credentials-status-local-resolve` | Phase 4, Phase 6 | PR 2 |
+| 2 | `feat/credentials-status-endpoint` | Phases 3, 4, 5b, 5e, 6 | PR 1 |
+
+**This was a stack of three.** `feat/credentials-status-local-resolve` carried
+Phase 4 and Phase 6 as PR 3 on top of PR 2. It was fast-forwarded into
+`feat/credentials-status-endpoint`, so the two branches now point at the same
+commit and PR 3 has an empty diff — close it rather than trying to merge it.
+Phase headings below still name the PR that originally owned each phase; PR 2
+carries all of them now.
 
 **Why this direction matters.** Phase 2 makes issued credentials carry a
 `status_list.uri`, and Phase 3 is what serves it — between them, issuance
@@ -361,7 +364,7 @@ so this would have passed every internal test and failed only for outside
 verifiers. Nothing is written before the `await`, so a thrown
 `NotFoundException` still renders through the exception filter.
 
-### Phase 4 — keep the wallet auth path off the network  *(PR 3)*
+### Phase 4 — keep the wallet auth path off the network  *(was PR 3, now PR 2)*
 
 **This is the primary enforcement path, not an optimisation.** The manager is
 the only party checking status initially, so in practice every status check
@@ -505,7 +508,7 @@ compare-and-set and multi-entry work added 9.)
   `Oid4vcIssuanceSessionRepository` are used rather than fakes, so
   `VaultRepository` is exercised too.
 
-### Phase 6 — documentation  *(PR 3)*
+### Phase 6 — documentation  *(was PR 3, now PR 2)*
 
 - [x] [`README.md`](README.md) — endpoint table, a Revocation section with
       `curl` examples, and the status list records added to Storage.
@@ -534,8 +537,9 @@ that points at it. There is no partial rollout and no clean rollback after
 Phase 2 ships.
 
 The window between Phase 2 and Phase 3 is contained by the branch structure
-above: PR 1 does not reach `master` until PR 2 has merged into it, so no
-deployable branch ever issues credentials pointing at a URL nothing serves.
+above: PR 1 does not reach `master` until PR 2 — which now carries every
+remaining phase — has merged into it, so no deployable branch ever issues
+credentials pointing at a URL nothing serves.
 The commit message on `cbd5ed0` carries the same warning for anyone who finds
 that commit on its own.
 
