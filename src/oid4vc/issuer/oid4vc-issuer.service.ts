@@ -328,17 +328,22 @@ export class Oid4vcIssuerService implements OnModuleInit {
           // entry we failed to persist could never be revoked, so a failure
           // on either step has to abort issuance rather than leak one.
           const status = await this.statusList.allocate();
-          const { affected } = await this.sessionRepo.update(
-            { credoIssuanceSessionId: issuanceSession.id },
-            { statusListId: status.listId, statusListIndex: status.idx },
-          );
-          if (affected === 0) {
+          const session = await this.sessionRepo.findOneBy({ credoIssuanceSessionId: issuanceSession.id });
+          if (!session) {
             throw new Error(
               `Cannot issue ${configurationId}: no local issuance session is mapped to Credo session ` +
                 `${issuanceSession.id}, so status list entry ${status.listId}#${status.idx} could not be ` +
                 'recorded and the credential would never be revocable.',
             );
           }
+          // Appended, never replaced. One session can yield more than one
+          // credential — several configuration ids in the offer, or a
+          // repeated credential request — and overwriting would leave the
+          // earlier one live with nothing pointing at its bit.
+          await this.sessionRepo.save({
+            ...session,
+            statusEntries: [...(session.statusEntries ?? []), { listId: status.listId, idx: status.idx }],
+          });
 
           const signed: OpenId4VciSignCredential = {
             credentialSupportedId: configurationId,

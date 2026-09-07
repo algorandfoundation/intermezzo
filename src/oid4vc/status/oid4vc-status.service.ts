@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { StatusList, createHeaderAndPayload } from '@sd-jwt/jwt-status-list';
 
 import { parseVaultSignature } from '../../../libs/credo-vault-wallet';
@@ -7,16 +7,23 @@ import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
-import { STATUS_LIST_SIZE, STATUS_REVOKED, STATUS_VALID, StatusListRecord } from '../entities/status-list.entity';
+import {
+  STATUS_LIST_SIZE,
+  STATUS_REVOKED,
+  STATUS_VALID,
+  StatusListEntry,
+  StatusListRecord,
+} from '../entities/status-list.entity';
 import { StatusListRepository } from './status-list.repository';
 
 /** Id of the list every credential is currently allocated on. */
 export const DEFAULT_STATUS_LIST_ID = 'default';
 
+/** Attempts a conditional write gets before contention is reported as an error. */
+const CAS_ATTEMPTS = 5;
+
 /** A status list entry handed out at issuance time. */
-export interface AllocatedStatusEntry {
-  listId: string;
-  idx: number;
+export interface AllocatedStatusEntry extends StatusListEntry {
   /** Absolute URI of the list, as embedded in the credential. */
   uri: string;
 }
@@ -51,10 +58,12 @@ export class Oid4vcStatusService {
   /**
    * Serialises every read-modify-write against a list record.
    *
-   * ponytail: in-process only. Two Nest instances would race and could hand
-   * out the same index or lose a revocation, because `VaultService.kvWrite`
-   * has no compare-and-set. Add `cas` to `kvWrite` and retry on conflict if
-   * this is ever deployed more than once.
+   * Correctness across processes comes from the compare-and-set in
+   * {@link mutate}, not from here. This queue exists so that in-process
+   * concurrency — the common case, several redemptions in flight — resolves
+   * without burning retries, and so that a bit flip cannot interleave with
+   * {@link getStatusListJwt} building and caching a token from the record it
+   * read a moment earlier.
    */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -73,35 +82,36 @@ export class Oid4vcStatusService {
    * `status.status_list` claim.
    */
   async allocate(listId: string = DEFAULT_STATUS_LIST_ID): Promise<AllocatedStatusEntry> {
-    return this.serialise(async () => {
-      const record = await this.loadOrCreate(listId);
-      if (record.nextIndex >= record.size) {
-        // ponytail: single list. Rollover is cheap to add later because the
-        // list id is stored per credential — mint `${listId}-2` and point new
-        // allocations at it.
-        throw new Error(
-          `Status list ${listId} is full (${record.size} entries). ` +
-            'Credentials cannot be issued until a second list is provisioned.',
-        );
-      }
-      const idx = record.nextIndex;
-      await this.repo.save({ ...record, nextIndex: idx + 1 });
-      // No cache invalidation: allocating hands out an index that is already
-      // `0` in the bitstring, so the published list is unchanged.
-      return { listId: record.id, idx, uri: this.config.statusListUri(record.id) };
-    });
+    // No cache invalidation: allocating hands out an index that is already
+    // `0` in the bitstring, so the published list is unchanged.
+    return this.serialise(() =>
+      this.mutate(listId, true, (record) => {
+        if (record.nextIndex >= record.size) {
+          // ponytail: single list. Rollover is cheap to add later because the
+          // list id is stored per credential — mint `${listId}-2` and point new
+          // allocations at it.
+          throw new Error(
+            `Status list ${listId} is full (${record.size} entries). ` +
+              'Credentials cannot be issued until a second list is provisioned.',
+          );
+        }
+        const idx = record.nextIndex;
+        record.nextIndex = idx + 1;
+        return { listId: record.id, idx, uri: this.config.statusListUri(record.id) };
+      }),
+    );
   }
 
   /**
    * Revokes the credential issued for `sessionId`. Verification fails for
    * everyone from the next status fetch onwards.
    */
-  async revokeBySessionId(sessionId: string, reason?: string): Promise<AllocatedStatusEntry> {
+  async revokeBySessionId(sessionId: string, reason?: string): Promise<AllocatedStatusEntry[]> {
     return this.setSessionStatus(sessionId, STATUS_REVOKED, reason);
   }
 
   /** Reverses {@link revokeBySessionId}, for a revocation made in error. */
-  async reactivateBySessionId(sessionId: string): Promise<AllocatedStatusEntry> {
+  async reactivateBySessionId(sessionId: string): Promise<AllocatedStatusEntry[]> {
     return this.setSessionStatus(sessionId, STATUS_VALID);
   }
 
@@ -152,20 +162,26 @@ export class Oid4vcStatusService {
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
   }
 
-  private async setSessionStatus(sessionId: string, value: number, reason?: string): Promise<AllocatedStatusEntry> {
+  private async setSessionStatus(sessionId: string, value: number, reason?: string): Promise<AllocatedStatusEntry[]> {
     const session = await this.sessions.findOneById(sessionId);
     if (!session) {
       throw new NotFoundException(`Issuance session ${sessionId} not found`);
     }
-    const { statusListId, statusListIndex } = session;
-    if (!statusListId || typeof statusListIndex !== 'number') {
+    const entries = session.statusEntries ?? [];
+    if (entries.length === 0) {
       throw new NotFoundException(
         `Issuance session ${sessionId} has no status list entry. ` +
           'The offer was never redeemed, or the credential predates status list support.',
       );
     }
 
-    await this.setStatus(statusListId, statusListIndex, value);
+    // Every credential the session issued, not just the last one. Applied one
+    // at a time and not rolled back on failure: a partly-applied revocation
+    // is strictly better than none, and the operation is idempotent, so the
+    // caller's retry finishes the job.
+    for (const entry of entries) {
+      await this.setStatus(entry.listId, entry.idx, value);
+    }
 
     // Audit after the bit, never before: the revocation is the part that
     // matters, and a failure to record who did it must not leave a credential
@@ -183,40 +199,71 @@ export class Oid4vcStatusService {
       );
     }
 
-    return { listId: statusListId, idx: statusListIndex, uri: this.config.statusListUri(statusListId) };
+    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
   }
 
   private async setStatus(listId: string, idx: number, value: number): Promise<void> {
     await this.serialise(async () => {
-      const record = await this.requireList(listId);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= record.size) {
-        throw new NotFoundException(`Status list ${listId} has no entry ${idx}`);
-      }
-      const list = StatusList.decompressStatusList(record.encodedList, record.bits);
-      list.setStatus(idx, value);
-      await this.repo.save({ ...record, encodedList: list.compressStatusList() });
+      await this.mutate(listId, false, (record) => {
+        if (!Number.isInteger(idx) || idx < 0 || idx >= record.size) {
+          throw new NotFoundException(`Status list ${listId} has no entry ${idx}`);
+        }
+        const list = StatusList.decompressStatusList(record.encodedList, record.bits);
+        list.setStatus(idx, value);
+        record.encodedList = list.compressStatusList();
+      });
       this.cachedJwt.delete(listId);
     });
   }
 
+  /**
+   * Read-modify-write of one list record under Vault's compare-and-set, so a
+   * writer in another process loses the race and retries rather than
+   * silently overwriting — which is what would otherwise hand the same index
+   * to two credentials (draft-ietf-oauth-status-list §13.3 requires this) or
+   * drop a revocation.
+   *
+   * `apply` mutates the record it is handed and may be run more than once,
+   * so it must derive everything it returns from that record and have no
+   * effect outside it.
+   */
+  private async mutate<T>(
+    listId: string,
+    createIfMissing: boolean,
+    apply: (record: StatusListRecord) => T,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= CAS_ATTEMPTS; attempt++) {
+      const { record, version } = await this.repo.load(listId);
+      if (!record && !createIfMissing) {
+        throw new NotFoundException(`Status list ${listId} does not exist`);
+      }
+      const target = record ?? this.emptyList(listId);
+      const result = apply(target);
+      if (await this.repo.saveIfUnchanged(target, version)) return result;
+      this.logger.warn(`Status list ${listId} changed mid-write; retrying (attempt ${attempt}/${CAS_ATTEMPTS})`);
+    }
+    throw new ServiceUnavailableException(
+      `Status list ${listId} is under contention: ${CAS_ATTEMPTS} compare-and-set attempts all lost. Retry.`,
+    );
+  }
+
   private async requireList(listId: string): Promise<StatusListRecord> {
-    const record = await this.repo.findOneById(listId);
+    const { record } = await this.repo.load(listId);
     if (!record) throw new NotFoundException(`Status list ${listId} does not exist`);
     return record;
   }
 
-  private async loadOrCreate(listId: string): Promise<StatusListRecord> {
-    const existing = await this.repo.findOneById(listId);
-    if (existing) return existing;
+  /** An unsaved, all-valid list. Persisted by the first {@link mutate} that needs it. */
+  private emptyList(listId: string): StatusListRecord {
     this.logger.log(`Creating status list ${listId} with ${STATUS_LIST_SIZE} entries`);
     const empty = new StatusList(new Array(STATUS_LIST_SIZE).fill(STATUS_VALID), 1);
-    return this.repo.save({
+    return {
       id: listId,
       bits: 1,
       size: STATUS_LIST_SIZE,
       nextIndex: 0,
       encodedList: empty.compressStatusList(),
-    });
+    } as StatusListRecord;
   }
 
   /**
