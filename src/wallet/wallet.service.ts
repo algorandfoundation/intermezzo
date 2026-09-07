@@ -1,5 +1,6 @@
-import { Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
+import { AccountType } from '../vault/user-info.dto';
 import { ChainService } from '../chain/chain.service';
 import { DidService } from '../did/did.service';
 import { CreateAssetDto } from './create-asset.dto';
@@ -14,6 +15,18 @@ import { Address } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
+
+/**
+ * A user's account as resolved from Vault: which scheme backs it, its
+ * address, and the key material a signer needs.
+ *
+ * The PQ variant carries `salt` and `scheme` because the `pqsig`
+ * envelope has to reproduce them — they are not recoverable from the
+ * address alone.
+ */
+export type UserAccount =
+  | { type: 'ed25519'; userId: string; address: string; publicKey: Buffer }
+  | { type: 'falcon1024'; userId: string; address: string; publicKey: Buffer; salt: number; scheme: string };
 
 @Injectable()
 export class WalletService {
@@ -111,18 +124,62 @@ export class WalletService {
     });
   }
 
+  /**
+   * Read a user's ed25519 account from the transit mount, or
+   * `undefined` when the mount does not hold that `user_id`.
+   *
+   * A miss is a normal answer here — it is how both the account-type
+   * probe and the cross-mount conflict check learn that a `user_id`
+   * is not an ed25519 account.
+   */
+  private async getTransitAccount(user_id: string, vault_token: string): Promise<UserAccount | undefined> {
+    try {
+      const publicKey: Buffer = await this.vaultService.getUserPublicKey(user_id, vault_token);
+      return { type: 'ed25519', userId: user_id, address: new Address(publicKey).toString(), publicKey };
+    } catch (error) {
+      if (error?.getStatus?.() === 404) return undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * Resolve which kind of account a `user_id` has, and its address.
+   *
+   * The two Vault mounts are the source of truth: a `user_id` exists
+   * in exactly one of them, so nothing records the account type
+   * separately and nothing can drift. Transit is probed first, which
+   * means every account that exists today resolves in exactly the
+   * request it takes now — only PQ accounts pay for the miss.
+   */
+  async resolveUserAccount(user_id: string, vault_token: string): Promise<UserAccount> {
+    const ed25519 = await this.getTransitAccount(user_id, vault_token);
+    if (ed25519) return ed25519;
+
+    const pq = await this.vaultService.pqGetKey(user_id, vault_token);
+    if (!pq) throw new NotFoundException(`No account found for user ${user_id}`);
+
+    return {
+      type: 'falcon1024',
+      userId: user_id,
+      address: pq.address,
+      publicKey: pq.publicKey,
+      salt: pq.salt,
+      scheme: pq.scheme,
+    };
+  }
+
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
-    const public_address = await this.vaultService.getUserPublicKey(user_id, vault_token);
+    const account: UserAccount = await this.resolveUserAccount(user_id, vault_token);
 
     // get algo balance
-    const encodedAddress = new Address(public_address).toString();
-    const algoBalance: bigint = await this.chainService.getAccountBalance(encodedAddress);
+    const algoBalance: bigint = await this.chainService.getAccountBalance(account.address);
     Logger.debug(`User ${user_id} Algo Balance: ${algoBalance}`);
 
     return {
       user_id,
-      public_address: encodedAddress,
+      public_address: account.address,
       algoBalance: algoBalance.toString(),
+      account_type: account.type,
     };
   }
 
@@ -148,24 +205,46 @@ export class WalletService {
   }
 
   // Create new user and key
-  async userCreate(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
+  async userCreate(
+    user_id: string,
+    vault_token: string,
+    account_type: AccountType = 'ed25519',
+  ): Promise<UserInfoResponseDto> {
+    // A `user_id` present in both mounts would resolve to a different
+    // address depending on probe order — i.e. funds sent to whichever
+    // account the resolver happened to find. Refuse to create the
+    // collision rather than pick a winner.
+    const existing =
+      account_type === 'falcon1024'
+        ? await this.getTransitAccount(user_id, vault_token)
+        : await this.vaultService.pqGetKey(user_id, vault_token);
+    if (existing) {
+      throw new ConflictException(
+        `User ${user_id} already exists as a ${account_type === 'falcon1024' ? 'ed25519' : 'falcon1024'} account. ` +
+          'Account type is fixed at creation time — the two schemes derive different addresses.',
+      );
+    }
+
+    if (account_type === 'falcon1024') {
+      // The plugin is the authority on the address: it owns the salt
+      // scan the digest depends on, so re-deriving it here would only
+      // create a second implementation to keep in step.
+      const key = await this.vaultService.pqCreateKey(user_id, vault_token);
+      return { user_id, public_address: key.address, algoBalance: '0', account_type };
+    }
+
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
     const public_key: Buffer = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
     const public_address: string = new Address(public_key).toString();
-    return { user_id, public_address, algoBalance: '0' }; // Initial balance is set to 0
+    return { user_id, public_address, algoBalance: '0', account_type: 'ed25519' }; // Initial balance is set to 0
   }
 
   // Get all users
   async getKeys(vault_token: string): Promise<UserInfoResponseDto[]> {
-    const keys: UserInfoResponseDto[] = (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
-
-    // convert all public keys to algorand address
-    keys.map((key) => {
-      key.public_address = new Address(Buffer.from(key.public_address, 'base64')).toString();
-    });
-
-    return keys;
+    // `VaultService.getKeys` merges both mounts and already returns
+    // real addresses, so there is nothing left to convert here.
+    return (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
   }
   /**
    *

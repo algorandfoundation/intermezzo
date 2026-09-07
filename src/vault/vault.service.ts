@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosResponse } from 'axios';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
+import { Address } from '@algorandfoundation/algokit-utils';
 import { UserInfoDto } from './user-info.dto';
 
 export type KeyType = 'ed25519' | 'ecdsa-p256';
@@ -457,6 +458,9 @@ export class VaultService {
    * Expecting a manager token to retrieve all keys from the vault and return an array of user objects including
    * it's user id and public address.
    *
+   * Lists both user mounts, since a `user_id` lives in exactly one of
+   * them and the caller should not have to know which.
+   *
    * @param token - manager token
    * @returns
    */
@@ -475,19 +479,31 @@ export class VaultService {
       });
     } catch (error) {
       const status = error?.response?.status ?? 500;
-      throw new HttpErrorByCode[status]('VaultException');
+      // Vault answers LIST on an empty mount with a 404. Treating that
+      // as "no ed25519 users" rather than an error matters now that a
+      // deployment can hold PQ users and no transit ones at all.
+      if (status !== 404) throw new HttpErrorByCode[status]('VaultException');
     }
 
-    const users: string[] = result.data.data.keys;
+    const users: string[] = result?.data?.data?.keys ?? [];
 
     // for each add the public address to an array of user object (id, public address)
     const usersObjs: UserInfoDto[] = [];
     for (let i = 0; i < users.length; i++) {
-      const userObj = {
-        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'), // TODO: rename public_address that is actually the public key in base64 format
+      const userObj: UserInfoDto = {
+        public_address: new Address(await this.getKey(users[i], transitKeyPath, token)).toString(),
         user_id: users[i],
+        account_type: 'ed25519',
       };
       usersObjs.push(userObj);
+    }
+
+    // ...then the PQ mount. The plugin already returns the derived
+    // address, so unlike transit there is nothing to encode here.
+    for (const name of await this.pqListKeys(token)) {
+      const key = await this.pqGetKey(name, token);
+      if (!key) continue; // deleted between LIST and read
+      usersObjs.push({ user_id: name, public_address: key.address, account_type: 'falcon1024' });
     }
 
     return usersObjs;

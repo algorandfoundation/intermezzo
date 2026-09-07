@@ -1,3 +1,4 @@
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import createMockInstance from 'jest-create-mock-instance';
 import { VaultService } from '../vault/vault.service';
 import { WalletService } from './wallet.service';
@@ -81,6 +82,7 @@ describe('WalletService', () => {
       public_address: new Address(pubKey).toString(),
       user_id: userId,
       algoBalance: '0',
+      account_type: 'ed25519',
     });
   });
 
@@ -88,21 +90,20 @@ describe('WalletService', () => {
     const pubKey = randomBytes(32);
     const userId = '123581253191824129481240513501928401928';
 
-    vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(pubKey);
     vaultServiceMock.getKeys.mockResolvedValueOnce([
       {
         user_id: userId,
-        public_address: Buffer.from(pubKey).toString('base64'), // public_address here is actually publicKey from the vault
+        public_address: new Address(pubKey).toString(),
+        account_type: 'ed25519',
       },
     ]);
-
-    chainServiceMock.getAccountBalance.mockResolvedValueOnce(0n);
 
     const result = await walletService.getKeys('vault_token');
     expect(result).toStrictEqual([
       {
         public_address: new Address(pubKey).toString(),
         user_id: userId,
+        account_type: 'ed25519',
       },
     ]);
   });
@@ -124,6 +125,136 @@ describe('WalletService', () => {
       public_address: new Address(pubKey).toString(),
       user_id: '123581253191824129481240513501928401928',
       algoBalance: algoBalanceMock.toString(),
+      account_type: 'ed25519',
+    });
+  });
+
+  describe('PQ accounts', () => {
+    const userId = 'pq-user';
+    const pqAddress = 'ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU';
+    const pqKey = {
+      scheme: 'f1',
+      salt: 3,
+      publicKey: Buffer.from('falcon-public-key'),
+      address: pqAddress,
+    };
+
+    /** How `VaultService.getUserPublicKey` reports a missing transit key. */
+    const transitMiss = () => vaultServiceMock.getUserPublicKey.mockRejectedValueOnce(new NotFoundException());
+
+    describe('userCreate', () => {
+      it('(OK) should create a PQ key and return the address the plugin derived', async () => {
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(undefined); // no conflict check needed...
+        transitMiss(); // ...for falcon1024 the guard probes transit
+        vaultServiceMock.pqCreateKey.mockResolvedValueOnce(pqKey);
+
+        const result = await walletService.userCreate(userId, 'vault_token', 'falcon1024');
+
+        expect(vaultServiceMock.pqCreateKey).toHaveBeenCalledWith(userId, 'vault_token');
+        expect(vaultServiceMock.transitCreateKey).not.toHaveBeenCalled();
+        expect(result).toStrictEqual({
+          user_id: userId,
+          public_address: pqAddress,
+          algoBalance: '0',
+          account_type: 'falcon1024',
+        });
+      });
+
+      it('(OK) should default to ed25519 when no account_type is given', async () => {
+        const pubKey = randomBytes(32);
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(undefined);
+        vaultServiceMock.transitCreateKey.mockResolvedValueOnce(pubKey);
+
+        const result = await walletService.userCreate(userId, 'vault_token');
+
+        expect(vaultServiceMock.pqCreateKey).not.toHaveBeenCalled();
+        expect(result.account_type).toEqual('ed25519');
+        expect(result.public_address).toEqual(new Address(pubKey).toString());
+      });
+
+      it('(FAIL) should 409 when the user_id already exists as ed25519', async () => {
+        // The guard is the difference between a clear error and a
+        // user_id that resolves to two addresses depending on probe order.
+        vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(randomBytes(32));
+
+        await expect(walletService.userCreate(userId, 'vault_token', 'falcon1024')).rejects.toThrow(ConflictException);
+        expect(vaultServiceMock.pqCreateKey).not.toHaveBeenCalled();
+      });
+
+      it('(FAIL) should 409 when the user_id already exists as falcon1024', async () => {
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqKey);
+
+        await expect(walletService.userCreate(userId, 'vault_token', 'ed25519')).rejects.toThrow(ConflictException);
+        expect(vaultServiceMock.transitCreateKey).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('resolveUserAccount', () => {
+      it('(OK) should resolve an ed25519 account without touching the PQ mount', async () => {
+        const pubKey = randomBytes(32);
+        vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(pubKey);
+
+        const account = await walletService.resolveUserAccount('ed-user', 'vault_token');
+
+        expect(account).toStrictEqual({
+          type: 'ed25519',
+          userId: 'ed-user',
+          address: new Address(pubKey).toString(),
+          publicKey: pubKey,
+        });
+        // Existing accounts must not pay for the new code path.
+        expect(vaultServiceMock.pqGetKey).not.toHaveBeenCalled();
+      });
+
+      it('(OK) should fall through to the PQ mount on a transit miss', async () => {
+        transitMiss();
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqKey);
+
+        const account = await walletService.resolveUserAccount(userId, 'vault_token');
+
+        expect(account).toStrictEqual({
+          type: 'falcon1024',
+          userId,
+          address: pqAddress,
+          publicKey: pqKey.publicKey,
+          salt: 3,
+          scheme: 'f1',
+        });
+      });
+
+      it('(FAIL) should 404 when neither mount holds the user', async () => {
+        transitMiss();
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(undefined);
+
+        await expect(walletService.resolveUserAccount('ghost', 'vault_token')).rejects.toThrow(NotFoundException);
+      });
+
+      it('(FAIL) should propagate a non-404 transit error rather than probing PQ', async () => {
+        // A 403 means "cannot tell", not "not an ed25519 account" —
+        // falling through would silently create the wrong answer.
+        vaultServiceMock.getUserPublicKey.mockRejectedValueOnce(new ForbiddenException());
+
+        await expect(walletService.resolveUserAccount(userId, 'vault_token')).rejects.toThrow(ForbiddenException);
+        expect(vaultServiceMock.pqGetKey).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('getUserInfo', () => {
+      it('(OK) should report a PQ account with its plugin-derived address', async () => {
+        transitMiss();
+        vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqKey);
+        chainServiceMock.getAccountBalance.mockResolvedValueOnce(42n);
+
+        const result = await walletService.getUserInfo(userId, 'vault_token');
+
+        expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(pqAddress);
+        expect(result).toStrictEqual({
+          user_id: userId,
+          public_address: pqAddress,
+          algoBalance: '42',
+          account_type: 'falcon1024',
+        });
+      });
     });
   });
 

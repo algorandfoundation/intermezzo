@@ -5,6 +5,7 @@ import { Axios, AxiosResponse } from 'axios';
 import { randomBytes } from 'crypto';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import createMockInstance from 'jest-create-mock-instance';
+import { Address } from '@algorandfoundation/algokit-utils';
 import { UserInfoDto } from './user-info.dto';
 
 describe('VaultService', () => {
@@ -108,31 +109,36 @@ describe('VaultService', () => {
   });
 
   describe('getKeys()', () => {
-    it('(\OK) should return an array of keys', async () => {
-      const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
+    const baseUrl = 'http://vault';
+    const keysPath = 'transit/users';
+    const pqPath = 'pawn/pq-users';
 
-      const keysPath = 'transit/users';
-      (configService.get as jest.Mock).mockReturnValueOnce(keysPath);
+    const configForBothMounts = () => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        if (key === 'VAULT_TRANSIT_USERS_PATH') return keysPath;
+        if (key === 'VAULT_PQ_USERS_PATH') return pqPath;
+        return undefined;
+      });
+    };
 
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
-
-      const key1: Buffer = randomBytes(32);
-
-      const axiosResponse: AxiosResponse = {
-        data: {
-          data: {
-            keys: ['user-key1', 'user-key2'],
-          },
-        },
+    const listResponse = (keys: string[]): AxiosResponse =>
+      ({
+        data: { data: { keys } },
         status: 200,
         statusText: 'OK',
         headers: {},
         config: { headers: {} as any },
-      };
+      }) as AxiosResponse;
 
-      (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(axiosResponse);
+    it('(\OK) should return an array of keys', async () => {
+      configForBothMounts();
+
+      const key1: Buffer = randomBytes(32);
+
+      (httpService.axiosRef.request as jest.Mock)
+        .mockResolvedValueOnce(listResponse(['user-key1', 'user-key2'])) // transit LIST
+        .mockRejectedValueOnce({ response: { status: 404 } }); // PQ LIST — no PQ users
 
       // mock two calls for get keys
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue({
@@ -153,16 +159,79 @@ describe('VaultService', () => {
         headers: { 'X-Vault-Token': 'token' },
       });
 
+      // `public_address` is a real Algorand address now, not the base64
+      // public key the field used to carry.
       expect(result).toEqual([
         {
           user_id: 'user-key1',
-          public_address: key1.toString('base64'),
+          public_address: new Address(key1).toString(),
+          account_type: 'ed25519',
         },
         {
           user_id: 'user-key2',
-          public_address: key1.toString('base64'),
+          public_address: new Address(key1).toString(),
+          account_type: 'ed25519',
         },
       ]);
+    });
+
+    it('(\OK) should merge PQ users into the listing', async () => {
+      configForBothMounts();
+
+      const key1: Buffer = randomBytes(32);
+      const pqAddress = 'ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU';
+
+      (httpService.axiosRef.request as jest.Mock)
+        .mockResolvedValueOnce(listResponse(['ed-user'])) // transit LIST
+        .mockResolvedValueOnce(listResponse(['pq-user'])) // PQ LIST
+        .mockResolvedValueOnce({
+          data: { data: { scheme: 'f1', salt: 3, public_key: 'AAEC', address: pqAddress } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse); // PQ read
+
+      (httpService.axiosRef.get as jest.Mock).mockResolvedValue({
+        data: { data: { keys: { '1': { public_key: key1.toString('base64') } } } },
+      });
+
+      const result: UserInfoDto[] = await vaultService.getKeys('token');
+
+      expect(result).toEqual([
+        { user_id: 'ed-user', public_address: new Address(key1).toString(), account_type: 'ed25519' },
+        { user_id: 'pq-user', public_address: pqAddress, account_type: 'falcon1024' },
+      ]);
+    });
+
+    it('(\OK) should list PQ users when the transit mount is empty', async () => {
+      // Vault answers LIST on an empty mount with a 404. A PQ-only
+      // deployment must still be able to list its users.
+      configForBothMounts();
+
+      const pqAddress = 'ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU';
+
+      (httpService.axiosRef.request as jest.Mock)
+        .mockRejectedValueOnce({ response: { status: 404 } }) // transit LIST — empty
+        .mockResolvedValueOnce(listResponse(['pq-user'])) // PQ LIST
+        .mockResolvedValueOnce({
+          data: { data: { scheme: 'f1', salt: 0, public_key: 'AAEC', address: pqAddress } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+      const result: UserInfoDto[] = await vaultService.getKeys('token');
+
+      expect(result).toEqual([{ user_id: 'pq-user', public_address: pqAddress, account_type: 'falcon1024' }]);
+    });
+
+    it('(FAIL) should still throw when the transit LIST fails for a non-404 reason', async () => {
+      configForBothMounts();
+      (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+      await expect(vaultService.getKeys('token')).rejects.toThrow(HttpErrorByCode[403]);
     });
   });
 

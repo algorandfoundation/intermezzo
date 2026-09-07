@@ -195,6 +195,25 @@ path, and that the signing input is passed through base64 unmodified.
 
 ## Increment 3: user account type — creation, resolution, read endpoints
 
+**Status**: done. Unit suite 213/213, e2e 34/34 against the live stack. Four
+deviations from what is written below:
+
+- **No resolution cache.** The probe costs one extra Vault round trip for PQ
+  accounts only, and account type is immutable, so a cache would be correct —
+  but nothing has measured it as a problem yet. Add it when signing starts
+  resolving per transaction (increment 4), not before.
+- **`UserInfoResponseDto.account_type` is required, not optional.** It is always
+  populated on the way out, so an optional field would only weaken the type for
+  consumers.
+- **`getKeys` now tolerates a 404 from the transit LIST.** Vault answers LIST on
+  an empty mount with a 404, which the old code turned into a 500. That is
+  reachable for the first time now: a deployment can hold PQ users and no
+  transit ones at all.
+- **The added field is not invisible to strict assertions.** The existing
+  `User detail` e2e case asserted the whole response body with `toStrictEqual`
+  and had to be updated. Wire-additive, but a caller that pins an exact shape
+  will see it.
+
 ### Creation
 
 `CreateUserDto` gains one optional field:

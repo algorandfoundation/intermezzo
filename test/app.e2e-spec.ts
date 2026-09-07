@@ -130,6 +130,7 @@ describe('App E2E', () => {
         user_id: user_uid,
         public_address: create_user_response.data.public_address,
         algoBalance: '0', // Initial balance is set to 0
+        account_type: 'ed25519', // default when the create body omits it
       });
     });
   });
@@ -267,6 +268,116 @@ describe('App E2E', () => {
           { input: 'not-base64!!' },
           { headers: { 'X-Vault-Token': vaultToken } },
         ),
+      ).rejects.toMatchObject({ response: { status: 400 } });
+    });
+  });
+
+  // The same accounts, now through the service endpoints rather than
+  // straight to Vault. Nothing here needs to know which mount a user
+  // lives in — that is the point.
+  describe('PQ accounts (service layer)', () => {
+    const createUser = (accessToken: string, body: Record<string, unknown>) =>
+      axios.post(`${APP_BASE_URL}/wallet/user/`, body, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      });
+
+    const managerTokens = async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      return { vaultToken, accessToken: await signInToPawn(vaultToken) };
+    };
+
+    it('(OK) Creates a falcon1024 user whose address matches the PQ mount', async () => {
+      const { vaultToken, accessToken } = await managerTokens();
+      const userId = randomBytes(16).toString('hex');
+
+      const created = await createUser(accessToken, { user_id: userId, account_type: 'falcon1024' });
+      expect(created.status).toBe(201);
+      expect(created.data.account_type).toBe('falcon1024');
+      expect(created.data.algoBalance).toBe('0');
+
+      // The service must report exactly the address the plugin derived —
+      // not a second, client-side derivation that could drift from it.
+      const fromVault = await axios.get(`${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${userId}`, {
+        headers: { 'X-Vault-Token': vaultToken },
+      });
+      expect(created.data.public_address).toBe(fromVault.data.data.address);
+
+      // ...and reading the user back resolves to the same account with no
+      // hint from the caller about which mount to look in.
+      const detail = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(detail.data.public_address).toBe(created.data.public_address);
+      expect(detail.data.account_type).toBe('falcon1024');
+    });
+
+    it('(OK) A default create is still ed25519 and unchanged in shape', async () => {
+      const { accessToken } = await managerTokens();
+      const userId = randomBytes(16).toString('hex');
+
+      const created = await createUser(accessToken, { user_id: userId });
+      expect(created.status).toBe(201);
+      expect(created.data.account_type).toBe('ed25519');
+      expect(created.data.public_address).toHaveLength(58);
+
+      const detail = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(detail.data.public_address).toBe(created.data.public_address);
+      expect(detail.data.account_type).toBe('ed25519');
+    });
+
+    it('(OK) Both account types appear in the user listing', async () => {
+      const { accessToken } = await managerTokens();
+      const edUser = randomBytes(16).toString('hex');
+      const pqUser = randomBytes(16).toString('hex');
+
+      const ed = await createUser(accessToken, { user_id: edUser });
+      const pq = await createUser(accessToken, { user_id: pqUser, account_type: 'falcon1024' });
+
+      const list = await axios.get(`${APP_BASE_URL}/wallet/users`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      expect(list.data).toEqual(
+        expect.arrayContaining([
+          { user_id: edUser, public_address: ed.data.public_address, account_type: 'ed25519' },
+          { user_id: pqUser, public_address: pq.data.public_address, account_type: 'falcon1024' },
+        ]),
+      );
+      // Every listed address is a real Algorand address, not a base64 key.
+      for (const entry of list.data) {
+        expect(entry.public_address).toHaveLength(58);
+      }
+    });
+
+    it('(FAIL) Refuses a user_id that already exists in the other mount', async () => {
+      const { accessToken } = await managerTokens();
+      const edUser = randomBytes(16).toString('hex');
+      const pqUser = randomBytes(16).toString('hex');
+
+      await createUser(accessToken, { user_id: edUser });
+      await createUser(accessToken, { user_id: pqUser, account_type: 'falcon1024' });
+
+      // Allowing either of these would leave one user_id resolving to two
+      // different addresses depending on probe order.
+      await expect(createUser(accessToken, { user_id: edUser, account_type: 'falcon1024' })).rejects.toMatchObject({
+        response: { status: 409 },
+      });
+      await expect(createUser(accessToken, { user_id: pqUser, account_type: 'ed25519' })).rejects.toMatchObject({
+        response: { status: 409 },
+      });
+    });
+
+    it('(FAIL) Rejects an unknown account_type', async () => {
+      const { accessToken } = await managerTokens();
+
+      await expect(
+        createUser(accessToken, { user_id: randomBytes(16).toString('hex'), account_type: 'dilithium' }),
       ).rejects.toMatchObject({ response: { status: 400 } });
     });
   });
