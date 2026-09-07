@@ -202,9 +202,9 @@ App-level mappings persisted in Vault KV:
 
 - `oid4vc_issuance_session` / `oid4vc_verification_session` — correlate
   Credo session ids with the holder `did:key` and credential
-  configuration for status queries. The issuance session also carries the
-  credential's `statusListId` / `statusListIndex`, plus `revokedAt` /
-  `revokedReason` once revoked.
+  configuration for status queries. The issuance session also carries
+  `statusEntries` — one `(listId, idx)` per credential the session issued —
+  plus `revokedAt` / `revokedReason` once revoked.
 - `intermezzo/oid4vc/status-lists/records/<id>` — one record per status
   list: a 16384-entry bitstring (36 bytes deflated) and the next free
   index.
