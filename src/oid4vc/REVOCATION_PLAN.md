@@ -196,17 +196,25 @@ one mid-implementation invalidates parts of the plan below.
 ## 6. Data model
 
 ```
-StatusListRecord                    Oid4vcIssuanceSession  (+4 fields)
-  id: 'default'                       statusListId?:    'default'
-  bits: 1                             statusListIndex?: 42
-  size: 16384                         revokedAt?:       Date
-  nextIndex: 43                       revokedReason?:   string
+StatusListRecord                    Oid4vcIssuanceSession  (+3 fields)
+  id: 'default'                       statusEntries?:   [{ listId, idx }, …]
+  bits: 1                             revokedAt?:       Date
+  size: 16384                         revokedReason?:   string
+  nextIndex: 43
   encodedList: <deflate + base64url>
 ```
 
 One Vault KV record holds the entire list. The list is pre-sized full-length
 with all bits `0`, so issuing a credential only bumps a counter — the
 compressed bitstring for 16k unused entries is a few dozen bytes.
+
+`statusEntries` is a list, not a single `(listId, idx)` pair. One issuance
+session can yield more than one credential — several
+`credential_configuration_ids` in the offer, or a repeated credential request
+— and each carries its own entry, as §13.2 of the draft requires. A single
+field would be overwritten by the second issuance, leaving the first
+credential live with nothing pointing at its bit. Revoking a session flips
+every entry it holds.
 
 ---
 
@@ -266,12 +274,23 @@ compressed bitstring for 16k unused entries is a few dozen bytes.
     is status service → agent provider, and issuer service → status service.
     No cycle; do not add one.
 
-Allocation and status writes both go through a single in-process promise
-chain so concurrent redemptions cannot collide on an index.
+Every read-modify-write of a list record goes through Vault's compare-and-set:
+`StatusListRepository.load` returns the KV version alongside the record, and
+`saveIfUnchanged` writes only if the entry is still at that version, reporting
+`false` rather than clobbering a writer who got there first. `mutate` re-reads
+and re-applies on conflict, up to `CAS_ATTEMPTS`. This is what satisfies
+§13.3's *"The Status Issuer MUST prevent any unintended double allocation"*
+across processes; a second Nest instance loses the race instead of handing out
+an index that is already taken.
 
-**Resequenced:** the four session fields listed under Phase 2 were added here
-instead. `revokeBySessionId` resolves a session id to its `(listId, index)`
-pair, so it cannot compile without them, and they are pure type declarations
+Allocation and status writes additionally go through a single in-process
+promise chain. That is not what makes them correct — it just keeps the common
+case (several redemptions in one process) from burning retries, and it is what
+the token-cache guarantee below is built on.
+
+**Resequenced:** the session fields listed under Phase 2 were added here
+instead. `revokeBySessionId` resolves a session id to its `statusEntries`,
+so it cannot compile without them, and they are pure type declarations
 with no behaviour attached.
 
 **Token building runs inside the same queue as bit writes.** Not incidental:
@@ -282,7 +301,7 @@ so concurrent misses sign once rather than once each.
 
 ### Phase 2 — allocation at issue time
 
-- [x] Add the four fields from §6 to
+- [x] Add the fields from §6 to
       [`Oid4vcIssuanceSession`](entities/oid4vc-issuance-session.entity.ts).
       Done in Phase 1 — see the note there.
 - [x] In [`buildCredentialMapper`](issuer/oid4vc-issuer.service.ts), **SD-JWT
@@ -292,9 +311,11 @@ so concurrent misses sign once rather than once each.
     `issuanceMetadata` cannot shadow the real one;
   - exclude `status` from `disclosureFrame._sd` — required, not defensive
     polish, per §4 row 6;
-  - persist `statusListId` / `statusListIndex` to the local session **before
-    returning**. If the write-back fails the mapper must throw, so no
-    unrevocable credential escapes. Throw on `affected === 0` too.
+  - **append** the allocated entry to the local session's `statusEntries`
+    **before returning** — appending, never replacing, so a session that
+    issues twice keeps both credentials revocable. If the write-back fails
+    the mapper must throw, so no unrevocable credential escapes. Throw when
+    no local session maps to the Credo session id, too.
 - [x] Leave the W3C `JwtVc` branch **exactly as it is** (§4 row 7).
 - [x] Register `Oid4vcStatusService` and `StatusListRepository` in
       [`oid4vc.module.ts`](oid4vc.module.ts) and export the service.
@@ -321,7 +342,7 @@ hazards. Everything else inherits the global manager `AuthGuard`; only the list
 route opts out via `@Public()`.
 
 An ops listing (`GET entries`) was considered and cut: the issuance session
-records already carry `statusListId` / `statusListIndex`, and the existing
+records already carry `statusEntries`, and the existing
 `GET credential/issuer/sessions` route already exposes them.
 
 - [x] Request DTOs with `class-validator` — the app installs a global
@@ -369,10 +390,11 @@ silent failure mode: it should be caught by the Phase 5a URI-matching tests.
 **24 suites, 190 tests, all passing, ~7s** (`yarn test`). No existing test may
 change behaviour or be edited to accommodate this work.
 
-Running total: after Phase 3, **27 suites, 216 tests** (`yarn test`) plus
+Running total: after Phase 3, **27 suites, 225 tests** (`yarn test`) plus
 **2 e2e tests** (`yarn test:e2e status-list`), with `yarn lint`, `yarn format`
 and `yarn build` clean. (Baseline 24/190; Phase 0 added 3, Phase 1 added 10,
-Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
+Phase 2 added 6, Phase 3 added 7 unit + 2 e2e, the compare-and-set and
+multi-entry work added 9.)
 
 - [x] **5a** `status/oid4vc-status.service.spec.ts` — Vault KV faked as an
       in-memory map; `vault.sign` backed by a **real** Ed25519 key from node's
@@ -381,6 +403,11 @@ Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
   - `allocate()` yields 0, 1, 2… and persists `nextIndex`
   - `Promise.all` of N concurrent allocations yields N **distinct** indices
     (this is the test that proves the serialization actually serializes)
+  - a competing commit landing between read and write does not get its index
+    reused, and a write that keeps losing gives up with a 503 rather than
+    clobbering the list — the fake repository is versioned like Vault KV so
+    the retry loop actually runs
+  - revoking a session flips **every** entry it holds, and no others
   - `setStatus(idx, 1)` flips only that bit; neighbours stay `0`
   - JWT round trip via `getListFromStatusListJWT`; header `typ` is
     `statuslist+jwt`; payload carries `iss` / `sub` / `iat` and **no `exp`**
@@ -397,13 +424,18 @@ Phase 2 added 6, Phase 3 added 7 unit + 2 e2e.)
       metadata is on the list route and on neither mutating route.
 - [x] **5c** `issuer/oid4vc-issuer.service.spec.ts` — **new file**; the issuer
       service had no spec at all, so the mapper was entirely untested:
-  - the SD-JWT branch emits `status.status_list` and writes the mapping back
+  - the SD-JWT branch emits `status.status_list` and writes the entry back
+  - a second issuance on the same session **appends** rather than replacing
   - `status` is kept out of the disclosure frame
   - an `issuanceMetadata` claim named `status` cannot shadow the real pointer
   - a failed write-back, and a failed allocation, each issue nothing
   - the W3C `JwtVc` branch stays status-free and never allocates — the
     regression guard for the one path where adding status would *break*
     verification
+- [x] **5f** extend [`vault/vault.service.spec.ts`](../vault/vault.service.spec.ts)
+      — `cas` is sent as a write option, a lost compare-and-set surfaces as
+      `VaultCasConflictError`, an unrelated 400 does not, and
+      `kvReadVersioned` reports version `0` for a missing entry.
 - [x] **5d** extend [`oid4vc.config.spec.ts`](oid4vc.config.spec.ts) —
       `statusListUri` under the default and a prefix-less base URL, and the
       no-path-segment warning. Pulled forward into Phase 0 so that phase lands
@@ -503,11 +535,11 @@ upgrade path, so they show up in a debt sweep rather than rotting silently.
 
 | Shortcut | Ceiling | Upgrade |
 | --- | --- | --- |
-| In-process promise chain around allocation | Two Nest instances can hand out the same index; `VaultService.kvWrite` has no CAS parameter | Add `cas` to `kvWrite` and retry on conflict |
-| Single list, throw at capacity | 16384 credentials | Auto-rollover — nearly free, since `statusListId` is already stored per credential |
+| Single list, throw at capacity | 16384 credentials | Auto-rollover — nearly free, since the list id is already stored per entry |
 | `bits: 1` | No suspension | `bits: 2` plus a custom `statusValidator` on the verifier side |
 | Device-level revocation (all credentials for one `did:key`) not built | Revoking a device means revoking its sessions one at a time | Add `revokeByHolderDidKey`; needs a secondary index on `holderDidKey` to avoid an O(n) scan |
 | Signed-token cache is per-process with no expiry | A revocation on another instance does not evict this one's entry, so it keeps serving a token saying the credential is live | Short TTL on the entry, or cross-instance invalidation |
+| No `ttl` or `exp` on the Status List Token | Both are RECOMMENDED by draft-ietf-oauth-status-list-13 §5.1 and §13.7. Without either, a relying party is given no cache-lifetime signal and picks its own policy, so a revocation may take an unbounded time to reach a third-party verifier that caches aggressively. No functional difference for the verification paths in this repo, which fetch per check | Add `ttl` once Phase 3 makes the endpoint real and a refresh interval is worth choosing — it is a cache hint with no availability cliff. `exp` stays off deliberately: an expired list fails every credential pointing at it (see the comment at `status/oid4vc-status.service.ts`, which covers `exp` only) |
 
 ## 10. Pre-existing defects found, and left alone
 

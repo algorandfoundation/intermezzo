@@ -13,7 +13,7 @@ import { Oid4vcIssuanceSessionRepository } from '../src/oid4vc/sessions/vault-re
 import { Oid4vcStatusController } from '../src/oid4vc/status/oid4vc-status.controller';
 import { Oid4vcStatusService } from '../src/oid4vc/status/oid4vc-status.service';
 import { StatusListRepository } from '../src/oid4vc/status/status-list.repository';
-import { VaultService } from '../src/vault/vault.service';
+import { VaultCasConflictError, VaultService } from '../src/vault/vault.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
 
@@ -43,12 +43,16 @@ describe('Credential status list (e2e)', () => {
 
     // Vault KV as a map. Values are JSON round-tripped the way a real write
     // and read-back would be, so `undefined` fields really do disappear and
-    // dates really do come back as strings.
-    const kv = new Map<string, Record<string, unknown>>();
+    // dates really do come back as strings. Versioned like KV-v2, so the
+    // compare-and-set the status list writes through is really exercised.
+    const kv = new Map<string, { data: Record<string, unknown>; version: number }>();
     const vault = {
-      kvRead: async (path: string) => kv.get(path),
-      kvWrite: async (path: string, data: Record<string, unknown>) => {
-        kv.set(path, JSON.parse(JSON.stringify(data)));
+      kvRead: async (path: string) => kv.get(path)?.data,
+      kvReadVersioned: async (path: string) => ({ data: kv.get(path)?.data, version: kv.get(path)?.version ?? 0 }),
+      kvWrite: async (path: string, data: Record<string, unknown>, _token: string, cas?: number) => {
+        const held = kv.get(path);
+        if (cas !== undefined && (held?.version ?? 0) !== cas) throw new VaultCasConflictError(path);
+        kv.set(path, { data: JSON.parse(JSON.stringify(data)), version: (held?.version ?? 0) + 1 });
       },
       kvDelete: async (path: string) => {
         kv.delete(path);
@@ -122,8 +126,7 @@ describe('Credential status list (e2e)', () => {
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     await sessions.save({
       id: sessionId,
-      statusListId: entry.listId,
-      statusListIndex: entry.idx,
+      statusEntries: [{ listId: entry.listId, idx: entry.idx }],
     } as Partial<Oid4vcIssuanceSession>);
 
     return sdjwt.issue({

@@ -1,4 +1,4 @@
-import { VaultService } from './vault.service';
+import { VaultCasConflictError, VaultService } from './vault.service';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { Axios, AxiosResponse } from 'axios';
@@ -460,6 +460,66 @@ describe('VaultService', () => {
         (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
 
         await expect(vaultService.kvWrite('foo', { x: 1 }, 'token')).rejects.toThrow(HttpErrorByCode[403]);
+      });
+
+      it('(OK) should send `cas` as a write option when one is given', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({
+          data: {},
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        await vaultService.kvWrite('foo', { x: 1 }, 'token', 4);
+
+        expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/data/foo`,
+          { data: { x: 1 }, options: { cas: 4 } },
+          expect.anything(),
+        );
+      });
+
+      it('(FAIL) should report a lost compare-and-set as VaultCasConflictError', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['check-and-set parameter did not match the current version'] } },
+        });
+
+        await expect(vaultService.kvWrite('foo', { x: 1 }, 'token', 4)).rejects.toThrow(VaultCasConflictError);
+      });
+
+      it('(FAIL) should not mistake an unrelated 400 for a conflict', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['missing data'] } },
+        });
+
+        await expect(vaultService.kvWrite('foo', { x: 1 }, 'token', 4)).rejects.toThrow(HttpErrorByCode[400]);
+      });
+    });
+
+    describe('kvReadVersioned', () => {
+      it('(OK) should return the payload with its version', async () => {
+        configWith();
+        (httpService.axiosRef.get as jest.Mock).mockResolvedValueOnce({
+          data: { data: { data: { appId: '123' }, metadata: { version: 7 } } },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config: { headers: {} as any },
+        } as AxiosResponse);
+
+        expect(await vaultService.kvReadVersioned('foo', 'token')).toEqual({ data: { appId: '123' }, version: 7 });
+      });
+
+      it('(OK) should report version 0 for an entry that does not exist', async () => {
+        configWith();
+        (httpService.axiosRef.get as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        // 0 is what `cas` uses to mean "only if nobody has created it".
+        expect(await vaultService.kvReadVersioned('missing', 'token')).toEqual({ version: 0 });
       });
     });
 
