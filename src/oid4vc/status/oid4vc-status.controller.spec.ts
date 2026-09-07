@@ -17,8 +17,10 @@ describe('Oid4vcStatusController', () => {
 
   beforeEach(async () => {
     getStatusListJwt = jest.fn(async () => TOKEN);
-    revokeBySessionId = jest.fn(async () => ({ listId: 'default', idx: 7, uri: 'https://host/v1/x' }));
-    reactivateBySessionId = jest.fn(async () => ({ listId: 'default', idx: 7, uri: 'https://host/v1/x' }));
+    // Arrays: a session can hold an entry per credential it issued, and all
+    // of them are flipped together.
+    revokeBySessionId = jest.fn(async () => [{ listId: 'default', idx: 7, uri: 'https://host/v1/x' }]);
+    reactivateBySessionId = jest.fn(async () => [{ listId: 'default', idx: 7, uri: 'https://host/v1/x' }]);
 
     const moduleRef = await Test.createTestingModule({
       controllers: [Oid4vcStatusController],

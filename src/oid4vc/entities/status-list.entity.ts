@@ -43,6 +43,16 @@ export class StatusListRecord {
   updatedAt: Date;
 }
 
+/**
+ * Where one issued credential's status bit lives: the list, and the index on
+ * it. Embedded in the credential as `status.status_list`, and the only handle
+ * there is for revoking that credential.
+ */
+export interface StatusListEntry {
+  listId: string;
+  idx: number;
+}
+
 /** A credential whose entry reads `0` is valid. */
 export const STATUS_VALID = 0;
 

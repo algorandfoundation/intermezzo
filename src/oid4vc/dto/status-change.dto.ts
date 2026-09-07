@@ -5,8 +5,9 @@ import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
  * Body of the revoke / reactivate endpoints.
  *
  * A credential is addressed by the issuance session it was issued under,
- * because that record is what carries the `(statusListId, statusListIndex)`
- * pair written when the offer was redeemed.
+ * because that record is what carries the `statusEntries` written when the
+ * offer was redeemed. A session that redeemed more than once holds an entry
+ * per credential, and the endpoints act on all of them together.
  */
 export class ChangeCredentialStatusDto {
   @ApiProperty({

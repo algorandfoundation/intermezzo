@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getListFromStatusListJWT } from '@sd-jwt/jwt-status-list';
 import { AgentContext } from '@credo-ts/core';
@@ -42,9 +42,32 @@ function fakeRepo<T extends { id: string }>() {
   };
 }
 
+/**
+ * Stand-in for {@link StatusListRepository}, versioned the way Vault KV-v2
+ * is so the service's compare-and-set retry loop actually runs. Records are
+ * copied in and out, so a caller holding one cannot mutate the store without
+ * committing.
+ */
+function fakeListRepo() {
+  const store = new Map<string, { record: StatusListRecord; version: number }>();
+  return {
+    store,
+    load: jest.fn(async (id: string) => {
+      const held = store.get(id);
+      return { record: held ? { ...held.record } : null, version: held?.version ?? 0 };
+    }),
+    saveIfUnchanged: jest.fn(async (record: StatusListRecord, version: number) => {
+      const held = store.get(record.id);
+      if ((held?.version ?? 0) !== version) return false;
+      store.set(record.id, { record: { ...record }, version: version + 1 });
+      return true;
+    }),
+  };
+}
+
 describe('Oid4vcStatusService', () => {
   let service: Oid4vcStatusService;
-  let lists: ReturnType<typeof fakeRepo<StatusListRecord>>;
+  let lists: ReturnType<typeof fakeListRepo>;
   let sessions: ReturnType<typeof fakeRepo<Oid4vcIssuanceSession>>;
   let sign: jest.Mock;
   let publicKey: crypto.KeyObject;
@@ -83,7 +106,7 @@ describe('Oid4vcStatusService', () => {
     publicKey = keyPair.publicKey;
     privateKey = keyPair.privateKey;
 
-    lists = fakeRepo<StatusListRecord>();
+    lists = fakeListRepo();
     sessions = fakeRepo<Oid4vcIssuanceSession>();
 
     // Sign for real, so the published token can be verified the way a
@@ -96,9 +119,17 @@ describe('Oid4vcStatusService', () => {
     service = makeService();
   });
 
-  /** Registers a redeemed issuance session pointing at `idx`. */
-  async function seedSession(id: string, idx: number): Promise<void> {
-    await sessions.save({ id, statusListId: DEFAULT_STATUS_LIST_ID, statusListIndex: idx } as Oid4vcIssuanceSession);
+  /** Registers a redeemed issuance session holding one entry per `idx`. */
+  async function seedSession(id: string, ...indices: number[]): Promise<void> {
+    await sessions.save({
+      id,
+      statusEntries: indices.map((idx) => ({ listId: DEFAULT_STATUS_LIST_ID, idx })),
+    } as Oid4vcIssuanceSession);
+  }
+
+  /** The stored list record, without the version wrapper the fake keeps. */
+  function storedList(listId = DEFAULT_STATUS_LIST_ID): StatusListRecord {
+    return lists.store.get(listId)!.record;
   }
 
   function decodePayload(jwt: string): Record<string, unknown> {
@@ -110,22 +141,47 @@ describe('Oid4vcStatusService', () => {
       expect(await service.allocate()).toEqual({ listId: DEFAULT_STATUS_LIST_ID, idx: 0, uri: LIST_URI });
       expect(await service.allocate()).toEqual({ listId: DEFAULT_STATUS_LIST_ID, idx: 1, uri: LIST_URI });
 
-      const record = lists.store.get(DEFAULT_STATUS_LIST_ID);
-      expect(record).toMatchObject({ bits: 1, size: STATUS_LIST_SIZE, nextIndex: 2 });
+      expect(storedList()).toMatchObject({ bits: 1, size: STATUS_LIST_SIZE, nextIndex: 2 });
     });
 
     it('hands out distinct indices when redemptions overlap', async () => {
       const allocations = await Promise.all(Array.from({ length: 25 }, () => service.allocate()));
       const indices = allocations.map((a) => a.idx).sort((a, b) => a - b);
       expect(indices).toEqual(Array.from({ length: 25 }, (_, i) => i));
-      expect(lists.store.get(DEFAULT_STATUS_LIST_ID)?.nextIndex).toBe(25);
+      expect(storedList().nextIndex).toBe(25);
+    });
+
+    it('does not reuse an index another process took mid-write', async () => {
+      await service.allocate();
+
+      // Land a competing commit between this service's read and its write:
+      // the record handed back is stale by the time `saveIfUnchanged` runs.
+      lists.load.mockImplementationOnce(async (id: string) => {
+        const held = lists.store.get(id)!;
+        const stale = { record: { ...held.record }, version: held.version };
+        held.record.nextIndex += 1;
+        held.version += 1;
+        return stale;
+      });
+
+      // Index 1 went to the competitor, so the retry must hand out 2.
+      expect(await service.allocate()).toEqual({ listId: DEFAULT_STATUS_LIST_ID, idx: 2, uri: LIST_URI });
+      expect(storedList().nextIndex).toBe(3);
+    });
+
+    it('gives up rather than clobbering a list it keeps losing', async () => {
+      await service.allocate();
+      lists.saveIfUnchanged.mockResolvedValue(false);
+
+      await expect(service.allocate()).rejects.toThrow(ServiceUnavailableException);
+      // Still where the successful first allocation left it.
+      expect(storedList().nextIndex).toBe(1);
     });
 
     it('refuses to allocate past the end of the list', async () => {
       await service.allocate();
       // Fast-forward rather than allocating 16384 times.
-      const record = lists.store.get(DEFAULT_STATUS_LIST_ID) as StatusListRecord;
-      lists.store.set(DEFAULT_STATUS_LIST_ID, { ...record, nextIndex: record.size });
+      storedList().nextIndex = storedList().size;
 
       await expect(service.allocate()).rejects.toThrow(/is full/);
     });
@@ -143,6 +199,24 @@ describe('Oid4vcStatusService', () => {
       expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, first.idx)).toBe(1);
       expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, second.idx)).toBe(0);
       expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, STATUS_LIST_SIZE - 1)).toBe(0);
+    });
+
+    it('revokes every credential the session issued, not just the last', async () => {
+      const first = await service.allocate();
+      const second = await service.allocate();
+      const other = await service.allocate();
+      await seedSession('session-a', first.idx, second.idx);
+      await seedSession('session-b', other.idx);
+
+      const revoked = await service.revokeBySessionId('session-a');
+
+      expect(revoked).toEqual([
+        { listId: DEFAULT_STATUS_LIST_ID, idx: first.idx, uri: LIST_URI },
+        { listId: DEFAULT_STATUS_LIST_ID, idx: second.idx, uri: LIST_URI },
+      ]);
+      expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, first.idx)).toBe(1);
+      expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, second.idx)).toBe(1);
+      expect(await service.getStatus(DEFAULT_STATUS_LIST_ID, other.idx)).toBe(0);
     });
 
     it('records who and why, and clears it on reactivation', async () => {
