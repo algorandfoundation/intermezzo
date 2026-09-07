@@ -148,6 +148,11 @@ AppRole can create but gets 403 on sign while the manager succeeds.
 
 ## Increment 2: `VaultService` PQ methods
 
+**Status**: done. Verified against the running dev stack — create/read/sign/list
+round-trip through the real mount, create is idempotent, a miss returns
+`undefined`, signatures come back as raw 1226-byte buffers, and the user AppRole
+is denied on sign while the manager succeeds. Unit suite 201/201.
+
 Pure addition — no existing method is touched.
 
 ```ts
@@ -160,9 +165,18 @@ pqListKeys(token): Promise<string[]>          // LIST, [] on 404
 ```
 
 Mount path from a new `VAULT_PQ_USERS_PATH=pawn/pq-users` in `.env.template`,
-read the same way the transit paths are (`configService.get`). The value is
-currently hard-coded in `test/app.e2e-spec.ts:18` and `vault/development-init.ts:20`
-— point all three at the same env var.
+read the same way the transit paths are (`configService.get`), but falling back
+to `pawn/pq-users` the way `getKvMount` falls back to `secret`. The fallback is
+not cosmetic: `development-init.ts` only seeds `.env` when the file does not
+already exist, so every existing developer checkout would otherwise resolve an
+undefined mount.
+
+The value stays hard-coded in `test/app.e2e-spec.ts:18` and
+`vault/development-init.ts:20`, contrary to the original plan. `development-init`
+is what *writes* `.env` from the template, so it cannot read the variable it
+creates — which is why its transit paths are literals too. The e2e suite hard-codes
+its transit siblings the same way. Converting only the PQ constant would leave
+two conventions in one file for no gain.
 
 Two deliberate differences from the transit wrappers, both because the plugin
 does not imitate transit's quirks:
