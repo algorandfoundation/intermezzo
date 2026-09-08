@@ -142,6 +142,27 @@ sequenceDiagram
     Pawn-->>Verifier: { state, claims }
 ```
 
+### 4c. Check and change credential status
+
+```mermaid
+sequenceDiagram
+    actor Manager
+    participant Pawn as Pawn
+    participant Wallet
+    participant Verifier
+
+    Pawn-->>Wallet: Issue SD-JWT VC<br/>status.status_list = { uri, idx }
+    Wallet->>Verifier: Present credential
+    Verifier->>Pawn: GET /v1/credential/status/list/:listId
+    Pawn-->>Verifier: Signed status list JWT
+    Verifier->>Verifier: Check idx<br/>0 = valid, 1 = revoked
+
+    Manager->>Pawn: POST /v1/credential/status/revoke<br/>{ sessionId, reason? }
+    Pawn->>Pawn: Set every session credential's bit to 1
+    Manager->>Pawn: POST /v1/credential/status/reactivate<br/>{ sessionId }
+    Pawn->>Pawn: Set every session credential's bit to 0
+```
+
 ## 5. Wallet self-deploys its own `did:algo`
 
 > [!NOTE]
