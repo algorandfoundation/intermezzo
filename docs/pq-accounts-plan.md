@@ -12,7 +12,7 @@ the ed25519 code paths stay byte-identical. Concretely:
 1. **Ed25519 is the default and stays the default.** `POST /v1/wallet/user/`
    gains one optional field; omitting it produces exactly the account it
    produces today. No existing request body, response body, or endpoint changes
-   shape. The only response change is one *optional* added field
+    shape. The only response change is one required added field
    (`account_type`).
 2. **The manager stays ed25519, permanently (for now).** The manager key signs
    `DIDAlgoStorage` deployments, pays MBR, and drives the whole credo/oid4vc
@@ -59,26 +59,61 @@ the ed25519 code paths stay byte-identical. Concretely:
 - Official test vector (`cmd/algokey/pq_test.go`): entropy bytes `{1,2,...,32}` →
   address `ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU`.
 
-### TypeScript SDK gap (drives the increment 4 design)
+### TypeScript SDK gap — blocker for increment 4
 
-`@algorandfoundation/algokit-utils@10.0.0-beta.2` has **no `pqsig` support**.
-`SignedTransaction` is `{txn, sig?, msig?, lsig?, authAddress?}`
+**`algosdk@3.7.0` is a hard prerequisite for increment 4.** Increment 4 cannot be
+implemented on the packages currently in `package.json`, and the gap is not
+closed by any published `algokit-utils` release.
+
+`@algorandfoundation/algokit-utils` has **no `pqsig` support** — checked through
+`10.0.0-beta.4`, the newest version on npm (the project is on `10.0.0-beta.2`).
+`SignedTransaction` is still `{txn, sig?, msig?, lsig?, authAddress?}`
 (`packages/transact/src/transactions/signed-transaction.d.ts`) and
 `encodeSignedTransaction` cannot emit the field. The exported
 `FalconSignatureStruct` / `FalconVerifier` belong to the state-proof merkle
-signature scheme and are unrelated.
+signature scheme and are unrelated. Upgrading algokit-utils does not help; it has
+to come from somewhere else.
 
-So the signed-transaction envelope must be assembled by hand. Two facts make
-that small:
+`algosdk@3.7.0` (npm `latest`) has the full feature, added for consensus v42:
 
-- `encodeTransaction()` already emits `"TX" || <canonical msgpack txn>`, and
-  `encodeTransactionRaw()` emits the same bytes without the prefix. The signing
-  input and the envelope payload therefore both fall out of calls the codebase
-  already makes.
-- `algorand-msgpack` (canonical encoder, `sortKeys` + `ignoreUndefined`) is
-  already in `node_modules` as a direct dependency of algokit-utils. Promote it
-  to an explicit `dependencies` entry — already in the lockfile, so no install
-  changes — rather than adding a new msgpack library or hand-rolling one.
+- `SignedTransaction({txn, pqsig})` and `EncodedPQSig {sch, slt, pk, sig}`,
+  emitted through the SDK's own canonical schema encoder
+- `addressFromPQKey(schemeBytes, publicKey) -> {address, salt}` — the same
+  derivation (domain separation, salt scan, base32) the Vault plugin implements
+- `addressFromPQSig(pqsig)`
+- `addressWithSignersFromRawPQSigner({pqScheme, pqPublicKey, pqSigner})`, where
+  `pqSigner` is an async `(bytesToSign) => Promise<signature>` callback — the
+  shape of a remote signer, i.e. a `VaultService.pqSign` call
+- `emptyTxnSigner`, which attaches a pqsig envelope with empty signature bytes so
+  that `simulate` with `allowEmptySignatures` makes algod derive the authorizer
+  and charge the real post-quantum fee — a fee oracle that costs no Falcon
+  signature (see the fee note in increment 4)
+
+The two SDKs interoperate at the byte level, which is what makes this cheap:
+encoded transaction bytes go in and out, so no second transaction model enters
+the codebase. Verified against the real packages:
+
+- `algosdk.decodeUnsignedTransaction` accepts the output of algokit's
+  `encodeTransaction` with the 2-byte `"TX"` prefix stripped, and
+  `encodeUnsignedTransaction` re-encodes it byte-identically
+- algosdk's `txn.bytesToSign()` equals algokit's `encodeTransaction` output
+  exactly, prefix included — so the Falcon signing input is the same bytes the
+  ed25519 path already signs
+- an ed25519 `SignedTransaction` encoded by algosdk is byte-identical to one
+  encoded by algokit-utils, so nothing on the existing path can regress if it
+  ever routes through the new code
+- `addressFromPQKey` and `addressFromPQSig` agree with each other and with the
+  plugin's derivation
+
+So the envelope is **not** assembled by hand and `algorand-msgpack` is **not**
+promoted to a direct dependency. Both were the previous plan of record and are
+now dropped: hand-rolling canonical msgpack for a money path when the SDK's own
+schema encoder is available is the wrong trade.
+
+Scope of the new dependency: `algosdk` is used **only** for the PQ envelope and
+the PQ address helpers. Transaction building, grouping and encoding stay on
+algokit-utils. algokit-utils v10 decoupled from algosdk deliberately, and this
+must not become a route back to a dual-SDK codebase.
 
 ## Increment 1: Vault secrets-engine plugin + dev wiring
 
@@ -108,20 +143,24 @@ mnemonic export); salt/pk must persist; private key is cached because deriving
 it costs ~17ms against ~4ms to sign.
 
 Wiring: static musl build via docker (`scripts/build_vault_plugin.sh` →
-`volumes/vault/plugins/`, host-native arch), compose adds `plugin_directory`
-and the plugins volume to the vault service.
+`volumes/vault/plugins/`, host-native arch), compose adds `plugin_directory`,
+the plugins volume and a container-reachable `api_addr` to the vault service.
 
 > **Toolchain pin**: the plugin builds with Go 1.23, not the latest release.
-> Vault 1.15 injects `GODEBUG=x509sha1=1` into every plugin process it spawns
+> Vault 1.15.6 injects `GODEBUG=x509sha1=1` into every plugin process it spawns
 > (regardless of the container's own environment), and Go removed that setting
 > in 1.24 — a plugin built with a newer toolchain aborts during runtime init,
 > which Vault reports only as "Failed to read any lines from plugin's stdout".
 > Raise the pin in `vault/plugin/Dockerfile`, `go.mod` and CI only together with
 > the Vault image.
 
-`vault/development-init.ts` registers the plugin in the catalog by sha256,
-reloads it, and mounts type `algorand-pq` at `pawn/pq-users` (skips with a
-warning if the binary isn't built). Policies are already in place: users get
+`vault/development-init.ts` registers the plugin in the catalog by semantic
+version and sha256, pins that version at the `pawn/pq-users` mount, reloads an
+existing mount, then verifies the catalog and running version/SHA (skips with a
+warning if the binary isn't built). The backend self-reports the version from
+`vault/plugin/VERSION`. `TLSProviderFunc` is intentionally omitted: this plugin
+targets the pinned Vault 1.15.6 deployment and does not support pre-AutoMTLS
+Vault servers. Policies are already in place: users get
 `pawn/pq-users/keys/*` create/read/update; managers additionally list + sign.
 CI runs `go test` natively and builds the plugin before `docker compose up`.
 
@@ -251,15 +290,14 @@ unchanged behaviour and unchanged latency for every account that exists today),
 `pqGetKey` on 404, `NotFoundException` if neither has it.
 
 `getUserInfo` keeps its signature and response shape and is reimplemented on top
-of this — it just reads `.address` instead of deriving one. Its 8 call sites in
-[wallet.service.ts](../src/wallet/wallet.service.ts) need no edit; the four
-call sites that go on to *sign* (`transferAlgoToAddress`, `transferAsset`,
-`appCall`, `groupTransaction`) hold onto the resolved `UserAccount` instead of
-discarding it, so increment 4 has the salt and public key it needs without a
-second round trip.
+of this — it just reads `.address` instead of deriving one. Its read-only call
+sites need no edit. The four call sites that go on to *sign*
+(`transferAlgoToAddress`, `transferAsset`, `appCall`, `groupTransaction`) still
+discard the resolved `UserAccount`; increment 4 must retain and pass it through
+so signing has the account type, salt and public key without another lookup.
 
-`UserInfoResponseDto` gains an optional `account_type`. Additive: clients that
-ignore it are unaffected.
+`UserInfoResponseDto` gains a required `account_type`. It is always populated;
+the wire change remains additive for clients that ignore unknown fields.
 
 ### Listing
 
@@ -283,10 +321,37 @@ address is unchanged in shape, and confirm the cross-mount 409.
 
 ## Increment 4: signing and fees
 
-**Blocked on LocalNet.** The sandbox currently runs **algod 4.7.0**; `pqsig`
-needs algod v5 / consensus v42. Everything below can be written and unit-tested
-against fixtures, but the on-chain e2e assertions cannot run until the sandbox
-image ships v5.
+**Blocked until `algosdk@3.7.0` is added to `dependencies`.** algokit-utils
+cannot emit a `pqsig` envelope in any published version, so no part of this
+increment can be written against the packages currently installed — see
+[TypeScript SDK gap](#typescript-sdk-gap--blocker-for-increment-4) above. That is
+the first task of this increment, not an implementation detail of it.
+
+**Otherwise ready against algod v5 / consensus v42.** Algorand v5 is now
+released, so this is no longer blocked on an unavailable node version. LocalNet
+setup and CI explicitly require algod major version 5 or newer before running
+the suite. Existing 4.7 sandboxes must be refreshed with
+`algokit localnet reset --update`; setup fails with that instruction
+instead of allowing PQ on-chain tests to fail later for an opaque reason.
+
+### Remaining review findings required for this increment
+
+- [ ] **Add `algosdk@3.7.0` to `dependencies`.** Hard blocker; nothing else in
+  this increment can start without it. Scoped to the PQ envelope and PQ address
+  helpers only — transaction building, grouping and encoding stay on
+  algokit-utils. This supersedes the earlier item about promoting
+  `algorand-msgpack`, which is no longer needed: the envelope is not hand-rolled.
+- [ ] **Retain the resolved `UserAccount` at every signing call site.**
+  `transferAlgoToAddress`, `transferAsset`, `appCall` and `groupTransaction`
+  currently reduce account resolution to an address and later call
+  `signTxAsUser(user_id, ...)`. Pass the discriminated account through instead,
+  so the signing/submission path can select ed25519 or Falcon and has the PQ
+  scheme, salt and public key without resolving it again.
+- [ ] **Include the PQ surcharge when prefunding an asset opt-in.**
+  `transferAsset` currently reserves one `minFee` for the user-signed opt-in.
+  A Falcon opt-in needs that base fee plus the two-minimum-fee PQ contribution,
+  so its funding calculation must reserve three `minFee` before grouping and
+  signing. Cover both ed25519 and Falcon insufficient-balance cases in tests.
 
 ### Envelope assembly
 
@@ -296,16 +361,24 @@ New sibling in `ChainService`, leaving `addSignatureToTxn` untouched:
 addPqSignatureToTxn(encodedTxn, pq: { scheme, salt, publicKey, signature }): Uint8Array
 ```
 
-`encodedTxn` is the `"TX"`-prefixed output of `encodeTransaction`, so strip the
-2-byte prefix (or re-encode via `encodeTransactionRaw` after `decodeTransaction`)
-and canonically encode:
+`encodedTxn` is the `"TX"`-prefixed output of `encodeTransaction`. Strip the
+2-byte prefix, hand the rest to algosdk, and let its schema encoder produce the
+canonical envelope:
 
-```
-{ pqsig: { pk: <bin>, sch: "f1", sig: <bin>, slt: <uint> }, txn: <txn map> }
+```ts
+addPqSignatureToTxn(encodedTxn, { scheme, salt, publicKey, signature }) {
+  const txn = algosdk.decodeUnsignedTransaction(encodedTxn.slice(2));
+  return algosdk.encodeMsgpack(
+    new algosdk.SignedTransaction({
+      txn,
+      pqsig: { sch: scheme, slt: salt, pk: publicKey, sig: signature },
+    }),
+  );
+}
 ```
 
-with `algorand-msgpack`'s `encode(..., { sortKeys: true, ignoreUndefined: true })`.
-Both maps must be canonical and the outer keys sort `pqsig` before `txn`.
+Key sorting, canonical map encoding and the `pqsig`-before-`txn` ordering are the
+SDK's problem, not ours. The `.slice(2)` is the only place the two SDKs meet.
 
 ### Signing
 
@@ -340,6 +413,15 @@ flat multiple, replace this with the real formula — verify against algod v5
 before the first mainnet PQ transaction.
 ```
 
+algosdk gives a way to verify that without guessing. `emptyTxnSigner` from
+`addressWithSignersFromRawPQSigner` attaches a `pqsig` envelope with real scheme,
+salt and public key but empty signature bytes; under `simulate` with
+`allowEmptySignatures`, algod derives the authorizer from that envelope and
+charges the genuine post-quantum fee, with no Falcon signature produced. Use it
+to confirm the `2 × minFee` model on LocalNet before the first PQ transaction —
+and if the real pricing is per byte, it is also the mechanism for reading the
+correct fee at runtime instead of modelling it at all.
+
 ### Consolidation
 
 `transferAsset` and `groupTransaction` already contain near-identical
@@ -373,17 +455,34 @@ practical maximum group size for PQ senders on LocalNet before assuming a
 ### Tests
 
 - Unit: `addPqSignatureToTxn` against a fixed transaction + fixture signature,
-  asserting exact canonical bytes; `addPqFeeSurcharge` for both the default and
+  asserting exact canonical bytes and that `algosdk.addressFromPQSig` on the
+  decoded envelope returns the signing account's address; `addPqFeeSurcharge` for both the default and
   the explicitly-pooled case; and that an ed25519 transaction encoded through
   the consolidated path is byte-identical to what the current code produces
   (the actual regression guard for the refactor).
-- E2E, once algod v5 lands: a PQ user receives Algo from the manager, then
+- E2E on algod v5 / consensus v42: a PQ user receives Algo from the manager, then
   sends a payment signed with `pqsig` that the network accepts; the same flow
   for an ed25519 user still passes unchanged; a mixed group with one PQ and one
   ed25519 sender confirms.
 
 ## Deferred / out of scope
 
+- **Atomic account-type reservation.** The current cross-mount conflict check
+  is check-then-create and therefore non-atomic: concurrent ed25519 and Falcon
+  creation for one `user_id` can populate both mounts, after which transit-first
+  resolution masks the PQ account. Revisit this during cleanup with one atomic
+  account-type reservation/provisioning record shared by both creation paths.
+- **Distinguish a missing PQ key from a missing/misconfigured PQ mount.**
+  `pqRequest` currently converts every Vault 404 to `undefined`, and
+  `pqListKeys` documents an unmounted engine as an empty list. A bad mount path
+  can therefore look like “not a PQ account” or “no PQ users.” Add an explicit
+  startup/readiness mount check or preserve enough Vault error information to
+  treat only a key/list miss as empty while surfacing an unavailable engine.
+- **Version and validate stored PQ key entries.** Plugin storage currently has
+  no schema version and trusts decoded lengths and relationships. Before the
+  format evolves, add a version field and read-time validation for entropy,
+  public/private key sizes, canonical salt and derived-key consistency, with a
+  deliberate migration or rejection path for unknown versions.
 - **Manager PQ accounts.** See compatibility contract, point 2.
 - **Mnemonic export.** The plugin persists the 32-byte entropy for it, but no
   path exposes it and none should until there is a reason.
