@@ -38,8 +38,9 @@ type pqBackend struct {
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &pqBackend{}
 	b.Backend = &framework.Backend{
-		Help:        backendHelp,
-		BackendType: logical.TypeLogical,
+		Help:           backendHelp,
+		BackendType:    logical.TypeLogical,
+		RunningVersion: pluginVersion,
 		Paths: []*framework.Path{
 			{
 				Pattern: "keys/?$",

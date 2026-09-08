@@ -13,7 +13,7 @@ services:
     environment:
       # `plugin_directory` holds the custom algorand-pq secrets engine, built
       # by scripts/build_vault_plugin.sh into the bind mount above.
-      VAULT_LOCAL_CONFIG: '{"storage": {"file": {"path": "/vault/file"}},"listener": {"tcp": {"address": "0.0.0.0:8200","tls_disable": true}},"ui": true,"plugin_directory": "/vault/plugins"}'
+      VAULT_LOCAL_CONFIG: '{"storage": {"file": {"path": "/vault/file"}},"listener": {"tcp": {"address": "0.0.0.0:8200","tls_disable": true}},"api_addr": "http://vault:8200","ui": true,"plugin_directory": "/vault/plugins"}'
       VAULT_ADDR: http://127.0.0.1:8200
     cap_add:
       - IPC_LOCK

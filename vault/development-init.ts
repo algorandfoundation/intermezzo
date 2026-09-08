@@ -17,6 +17,7 @@ const VAULT_TRANSIT_MANAGERS_PATH = 'pawn/managers';
 const VAULT_PQ_PLUGIN_NAME = 'algorand-pq';
 const VAULT_PQ_PLUGIN_BINARY = 'vault-plugin-algorand-pq';
 const VAULT_PQ_PLUGIN_FILE = `volumes/vault/plugins/${VAULT_PQ_PLUGIN_BINARY}`;
+const VAULT_PQ_PLUGIN_VERSION = fs.readFileSync('vault/plugin/VERSION', 'utf8').trim();
 const VAULT_PQ_USERS_PATH = 'pawn/pq-users';
 const VAULT_MANAGER_KEY = 'manager';
 const VAULT_SEAL_KEYS_FILE = 'vault-seal-keys.json';
@@ -214,19 +215,21 @@ async function registerAndMountPqPlugin(token: string) {
   }
 
   const headers = { 'X-Vault-Token': token };
-  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(VAULT_PQ_PLUGIN_FILE)).digest('hex');
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(VAULT_PQ_PLUGIN_FILE)).digest();
+  const sha256 = digest.toString('hex');
+  const expectedSha256Values = new Set([sha256, digest.toString('base64')]);
 
   await axios.put(
     `${VAULT_BASE_URL}/v1/sys/plugins/catalog/secret/${VAULT_PQ_PLUGIN_NAME}`,
-    { sha256, command: VAULT_PQ_PLUGIN_BINARY },
+    { sha256, command: VAULT_PQ_PLUGIN_BINARY, version: VAULT_PQ_PLUGIN_VERSION },
     { headers },
   );
-  console.log(`Registered plugin '${VAULT_PQ_PLUGIN_NAME}' (sha256 ${sha256})`);
+  console.log(`Registered plugin '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} (sha256 ${sha256})`);
 
   try {
     await axios.post(
       `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`,
-      { type: VAULT_PQ_PLUGIN_NAME },
+      { type: VAULT_PQ_PLUGIN_NAME, plugin_version: VAULT_PQ_PLUGIN_VERSION },
       { headers },
     );
     console.log(`Mounted '${VAULT_PQ_PLUGIN_NAME}' at ${VAULT_PQ_USERS_PATH}`);
@@ -238,11 +241,31 @@ async function registerAndMountPqPlugin(token: string) {
       throw error;
     }
     console.log(`PASS: PQ secrets engine already mounted at ${VAULT_PQ_USERS_PATH}/`);
-    // Existing mount is still running the previously registered binary; reload
-    // so the sha256 just registered is the one actually serving requests.
-    await axios.put(`${VAULT_BASE_URL}/v1/sys/plugins/reload/backend`, { plugin: VAULT_PQ_PLUGIN_NAME }, { headers });
+    await axios.post(
+      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}/tune`,
+      { plugin_version: VAULT_PQ_PLUGIN_VERSION },
+      { headers },
+    );
+    await axios.post(`${VAULT_BASE_URL}/v1/sys/plugins/reload/backend`, { plugin: VAULT_PQ_PLUGIN_NAME }, { headers });
     console.log(`Reloaded plugin '${VAULT_PQ_PLUGIN_NAME}'`);
   }
+
+  const catalogResponse = await axios.get(`${VAULT_BASE_URL}/v1/sys/plugins/catalog/secret/${VAULT_PQ_PLUGIN_NAME}`, {
+    headers,
+    params: { version: VAULT_PQ_PLUGIN_VERSION },
+  });
+  const catalog = catalogResponse.data?.data ?? catalogResponse.data;
+  assert.strictEqual(catalog.version, VAULT_PQ_PLUGIN_VERSION);
+  assert(expectedSha256Values.has(catalog.sha256), 'Vault catalog SHA does not match the plugin binary');
+
+  const mountResponse = await axios.get(`${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`, {
+    headers,
+  });
+  const mount = mountResponse.data?.data ?? mountResponse.data;
+  assert.strictEqual(mount.plugin_version, VAULT_PQ_PLUGIN_VERSION);
+  assert.strictEqual(mount.running_plugin_version, VAULT_PQ_PLUGIN_VERSION);
+  assert(expectedSha256Values.has(mount.running_sha256), 'Running plugin SHA does not match the plugin binary');
+  console.log(`PASS: '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} is registered and running`);
 }
 
 // Function to initialize manager transit engine
