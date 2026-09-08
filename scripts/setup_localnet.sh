@@ -50,7 +50,20 @@ for i in $(seq 1 60); do
 done
 
 # ---------------------------------------------------------------------------
-# 2. Sync GENESIS_ID / GENESIS_HASH from the running algod into .env.
+# 2. Require the algod v5 baseline that introduced consensus v42 / PQ auth.
+# ---------------------------------------------------------------------------
+VERSIONS_JSON="$(curl -fs -H "X-Algo-API-Token: ${ALGOD_TOKEN}" \
+  "${ALGOD_URL}/versions")"
+ALGOD_MAJOR="$(printf '%s' "${VERSIONS_JSON}" | jq -er '.build.major')"
+if [ "${ALGOD_MAJOR}" -lt 5 ]; then
+  echo "algod v5+ is required for consensus v42 PQ transactions; found major ${ALGOD_MAJOR}." >&2
+  echo "Refresh LocalNet with: algokit localnet reset --update" >&2
+  exit 1
+fi
+echo "algod major ${ALGOD_MAJOR} supports the consensus v42 baseline"
+
+# ---------------------------------------------------------------------------
+# 3. Sync GENESIS_ID / GENESIS_HASH from the running algod into .env.
 # ---------------------------------------------------------------------------
 log "Syncing GENESIS_ID / GENESIS_HASH into .env"
 PARAMS_JSON="$(curl -fs -H "X-Algo-API-Token: ${ALGOD_TOKEN}" \
