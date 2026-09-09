@@ -237,7 +237,9 @@ async function registerAndMountPqPlugin(token: string) {
     const status = error?.response?.status;
     const message: string = error?.response?.data?.errors?.[0] ?? '';
     if (status !== 400 || !message.includes('path is already in use')) {
-      console.error('Failed to mount PQ secrets engine:', error);
+      // Vault puts the real reason (checksum mismatch, plugin exec/handshake
+      // failure) in `errors`; the raw AxiosError dump elides it.
+      console.error(`Failed to mount PQ secrets engine (${status}):`, JSON.stringify(error?.response?.data?.errors));
       throw error;
     }
     console.log(`PASS: PQ secrets engine already mounted at ${VAULT_PQ_USERS_PATH}/`);

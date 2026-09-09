@@ -88,6 +88,11 @@ jobs:
       - name: Initialize Vault (development)
         run: docker compose exec -T pawn yarn vault:development:init
 
+      # Vault logs the plugin exec/handshake failure behind a mount 400.
+      - name: Vault logs
+        if: failure()
+        run: docker compose logs vault
+
       - name: Recreate pawn to pick up updated .env
         run: |
           docker compose up -d --force-recreate --no-deps --wait pawn
