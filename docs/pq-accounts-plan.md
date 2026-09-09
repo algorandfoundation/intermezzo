@@ -11,9 +11,10 @@ the ed25519 code paths stay byte-identical. Concretely:
 
 1. **Ed25519 is the default and stays the default.** `POST /v1/wallet/user/`
    gains one optional field; omitting it produces exactly the account it
-   produces today. No existing request body, response body, or endpoint changes
-    shape. The only response change is one required added field
-   (`account_type`).
+   produces today. No existing request body or endpoint changes shape. User
+   create/detail/list responses add one required field (`account_type`); this is
+   wire-additive, although clients that reject unknown response fields must
+   update their response schema.
 2. **The manager stays ed25519, permanently (for now).** The manager key signs
    `DIDAlgoStorage` deployments, pays MBR, and drives the whole credo/oid4vc
    stack through `buildVaultTransactionSigner` ([src/did/vault-signer.ts](../src/did/vault-signer.ts)),
@@ -29,11 +30,12 @@ the ed25519 code paths stay byte-identical. Concretely:
    address and a zero balance. PQ is opt-in at creation time only. If an
    operator wants a user moved, that is an application-level transfer between
    two accounts, not something this feature does implicitly.
-5. **Account type is discovered, not recorded.** The two Vault mounts already
-   are the source of truth for which kind of key a `user_id` has. Adding a KV
-   record would create a second source of truth that can drift. Resolution
-   probes **transit first, PQ on 404** — so the existing ed25519 path pays zero
-   extra latency and only the new PQ path pays one wasted round trip.
+5. **Runtime account type is discovered from key material.** The two Vault
+   mounts remain the source of truth for which kind of key backs a `user_id`.
+   Resolution probes **transit first, PQ on 404** — so the existing ed25519 path
+   pays zero extra latency and only the new PQ path pays one wasted round trip.
+   Increment 5 will add a separate CAS reservation used only to serialize
+   creation; it will not replace mount-based runtime resolution.
 
 ## Spec facts (verified against go-algorand master source)
 
@@ -59,7 +61,7 @@ the ed25519 code paths stay byte-identical. Concretely:
 - Official test vector (`cmd/algokey/pq_test.go`): entropy bytes `{1,2,...,32}` →
   address `ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU`.
 
-### TypeScript SDK gap — blocker for increment 4
+### TypeScript SDK choice for increment 4
 
 **`algosdk@3.7.0` is a hard prerequisite for increment 4, now installed.**
 It supplies the PQ envelope support absent from the project's algokit-utils
@@ -74,7 +76,7 @@ version. The compatibility notes below describe why this dependency was added.
 signature scheme and are unrelated. Upgrading algokit-utils does not help; it has
 to come from somewhere else.
 
-`algosdk@3.7.0` (npm `latest`) has the full feature, added for consensus v42:
+`algosdk@3.7.0` has the full feature added for consensus v42:
 
 - `SignedTransaction({txn, pqsig})` and `EncodedPQSig {sch, slt, pk, sig}`,
   emitted through the SDK's own canonical schema encoder
@@ -234,8 +236,9 @@ path, and that the signing input is passed through base64 unmodified.
 
 ## Increment 3: user account type — creation, resolution, read endpoints
 
-**Status**: done. Unit suite 213/213, e2e 34/34 against the live stack. Four
-deviations from what is written below:
+**Status**: done. Unit suite 213/213, e2e 34/34 against the live stack at the
+time this increment landed. Shipped behavior and later compatibility hardening
+differ from the initial sketch in these ways:
 
 - **No resolution cache.** The probe costs one extra Vault round trip for PQ
   accounts only, and account type is immutable, so a cache would be correct —
@@ -264,9 +267,12 @@ account_type?: 'ed25519' | 'falcon1024';   // default 'ed25519'
 ```
 
 `WalletService.userCreate` branches on it. The `ed25519` branch is the current
-body verbatim. The `falcon1024` branch calls `pqCreateKey` and returns the
-plugin's `address` directly — no client-side re-derivation, since the plugin is
-the authority and the e2e test already verifies it independently.
+transit create body, preceded by a cross-mount conflict check made with the
+service's manager AppRole token. Existing callers therefore need only their
+original transit permission. The `falcon1024` branch calls `pqCreateKey` with
+the caller token and returns the plugin's `address` directly — no client-side
+re-derivation, since the plugin is the authority and the e2e test already
+verifies it independently.
 
 One guard: refuse to create a key in one mount when the `user_id` already exists
 in the other, with a `409 Conflict`. Without it a `user_id` could resolve to two
@@ -288,11 +294,16 @@ async resolveUserAccount(user_id, token): Promise<UserAccount>
 
 Transit first (existing `getUserPublicKey` + `new Address(pk).toString()`,
 unchanged behaviour and unchanged latency for every account that exists today),
-`pqGetKey` on 404, `NotFoundException` if neither has it.
+`pqGetKey` on 404, `NotFoundException` if neither has it. The transit probe uses
+the caller token and remains the authorization gate. The fallback PQ read uses
+the service's manager AppRole token so a caller with the legacy transit-only
+policy does not receive a new 403 merely because account discovery became
+PQ-aware.
 
-`getUserInfo` keeps its signature and response shape and is reimplemented on top
-of this — it just reads `.address` instead of deriving one. Its read-only call
-sites need no edit. The four call sites that go on to *sign*
+`getUserInfo` keeps its method signature and existing response fields, adding
+the required `account_type`, and is reimplemented on top of this — it reads
+`.address` instead of deriving one. Its read-only call sites need no edit. The
+four call sites that go on to *sign*
 (`transferAlgoToAddress`, `transferAsset`, `appCall`, `groupTransaction`) now
 retain the resolved `UserAccount` through increment 4, so signing has the
 account type, salt and public key without another lookup.
@@ -302,17 +313,14 @@ the wire change remains additive for clients that ignore unknown fields.
 
 ### Listing
 
-`VaultService.getKeys` today lists only the transit mount, so PQ users would be
-invisible in `GET /v1/wallet/users/`. It gains the PQ mount listing, merged.
-
-This is also the moment to fix the existing `// TODO: rename public_address that
-is actually the public key in base64 format` on `vault.service.ts:360`. The
-internal `UserInfoDto` currently carries a base64 *public key* that
-`WalletService.getKeys` converts to an address — which is meaningless for a
-1793-byte Falcon key. Have both branches return a real `address` string plus
-`account_type`, and drop the conversion in `WalletService`. `UserInfoDto` is
-internal; the wire DTO `UserInfoResponseDto.public_address` is already a real
-address, so nothing observable changes.
+`VaultService.getKeys` retains its legacy transit-only contract, including the
+historical base64 public key in `public_address`. `WalletService.getKeys` calls
+it first with the caller token, preserving the original manager-only LIST
+authorization, then converts those keys to addresses as before. Only after that
+succeeds does it call the separate `VaultService.getPqUsers` with the service's
+manager AppRole token and append normalized PQ accounts. This keeps direct
+service callers and transit-only manager tokens compatible while making PQ
+users visible in `GET /v1/wallet/users/`.
 
 **Tests**: extend the e2e "PQ accounts" block to go through the service instead
 of straight to Vault — create with `account_type: 'falcon1024'`, confirm the
@@ -323,12 +331,12 @@ address is unchanged in shape, and confirm the cross-mount 409.
 ## Increment 4: signing and fees
 
 **Status: implemented and PQ acceptance checks passed.** `algosdk@3.7.0`
-is installed. Build and all 226 unit tests pass. Seven on-chain tests pass
+is installed. Build and all 227 unit tests pass. Seven on-chain tests pass
 against algod 5.0.1: ed25519 and PQ payments, mixed groups, fee simulation,
 unfunded PQ asset opt-in, explicit-fee PQ app call, and a 16-payment PQ group.
-The full e2e run before the last two cases were added passed 37/39; the two
-manager identity/credential failures reference stale DID app 1069 after a
-LocalNet reset and are unrelated to PQ signing. Identity state was not changed.
+The current full e2e run passes 39/41; the two manager identity/credential
+failures reference stale DID app 1069 after a LocalNet reset and are unrelated
+to PQ signing. Identity state was not changed.
 
 Implementation details differing from the original sketch:
 
@@ -355,7 +363,7 @@ instead of allowing PQ on-chain tests to fail later for an opaque reason.
   `algorand-msgpack`, which is no longer needed: the envelope is not hand-rolled.
 - [x] **Retain the resolved `UserAccount` at every signing call site.**
   `transferAlgoToAddress`, `transferAsset`, `appCall` and `groupTransaction`
-  pass the discriminated account to `signTxAsUser(account, ...)`,
+  pass the discriminated account to the `signTxAsUser(account, ...)` overload,
   so the signing/submission path can select ed25519 or Falcon and has the PQ
   scheme, salt and public key without resolving it again.
 - [x] **Include the PQ surcharge when prefunding an asset opt-in.**
@@ -393,10 +401,12 @@ SDK's problem, not ours. The `.slice(2)` is the only place the two SDKs meet.
 
 ### Signing
 
-`signTxAsUser` takes a resolved `UserAccount` instead of a `user_id` and
-branches once. The `ed25519` branch is today's body verbatim — same transit
-call, same `vault:v1:` split, same `addSignatureToTxn`. The `falcon1024` branch
-calls `pqSign` and `addPqSignatureToTxn`. `signTxAsManager` is not touched.
+`signTxAsUser` accepts both its original `user_id` form and the resolved
+`UserAccount` form used by the consolidated pipeline. The former resolves then
+delegates, preserving the public service contract; the latter avoids a second
+Vault lookup. The `ed25519` branch is today's body verbatim — same transit call,
+same `vault:v1:` split, same `addSignatureToTxn`. The `falcon1024` branch calls
+`pqSign` and `addPqSignatureToTxn`. `signTxAsManager` is not touched.
 
 ### Fees
 
@@ -473,18 +483,92 @@ go-algorand `e763fb0d/config/consensus.go` and `data/transactions/pqsig.go`.
   the explicitly-pooled case; and that an ed25519 transaction encoded through
   the consolidated path is byte-identical to what the current code produces
   (the actual regression guard for the refactor).
-- E2E on algod v5 / consensus v42: a PQ user receives Algo from the manager, then
-  sends a payment signed with `pqsig` that the network accepts; the same flow
-  for an ed25519 user still passes unchanged; a mixed group with one PQ and one
-  ed25519 sender confirms.
+- E2E on algod v5 / consensus v42: accepted ed25519 and PQ payments, a mixed
+  group, an empty-signature fee-boundary simulation, an unfunded PQ asset
+  opt-in, an explicit-fee PQ app call, and a maximum 16-payment PQ group.
+
+## Increment 5: compatibility hardening and atomic account-type reservation
+
+### Compatibility hardening
+
+**Status: done (commit `96abdfd`).** The review after increment 4 found that a
+caller holding only the original transit permissions could receive a new 403:
+default ed25519 creation probed the PQ mount, missing-user resolution fell
+through to it, and listing always queried it. It also found two direct service
+contract changes that were unnecessary.
+
+The compatibility layer now has these boundaries:
+
+- Existing ed25519 resolution uses the caller token and returns immediately on
+  the transit hit, making no PQ request.
+- After a transit 404, PQ discovery uses the service's cached manager AppRole
+  token. A caller's lack of PQ-mount permissions no longer changes a genuine
+  miss from 404 to 403.
+- `WalletService.getKeys` first calls the legacy transit LIST with the caller
+  token. That remains the authorization gate. Only after it succeeds does the
+  service append PQ users using the manager AppRole token.
+- `VaultService.getKeys` again has its original transit-only contract and
+  returns base64 public keys. `getPqUsers` is the new, separate normalized PQ
+  listing method.
+- `signTxAsUser` accepts both the original `(user_id, tx, token)` form and the
+  resolved-account form used internally, so direct service callers remain
+  source-compatible without adding a duplicate lookup to transaction flows.
+- PQ signing still uses the caller token; the service identity is only for
+  additive discovery/listing and does not elevate signing authorization.
+
+Verified by formatting, lint, build, 227/227 unit tests, and a comparison with
+the pre-PQ services across 13 ed25519/manager scenarios. Payments, app calls,
+asset creation/transfers/clawbacks, opt-in funding variants, and groups produced
+byte-identical submissions with identical signer selection. The live suite
+remains 39/41 for the unrelated stale-DID reason above.
+
+### Atomic reservation
+
+**Status: next required work.** The cross-mount check is still check-then-create.
+Two simultaneous requests can therefore create an ed25519 key and a Falcon key
+for the same `user_id`; this race has been reproduced. Transit-first resolution
+then hides the Falcon account.
+
+Implement a creation-only registry in Vault KV v2 at
+`intermezzo/account-types/<sha256(user_id)>`. The record is not the runtime key
+source of truth; it only serializes creation:
+
+```ts
+{
+  schemaVersion: 1,
+  userId: string,
+  accountType: 'ed25519' | 'falcon1024',
+  status: 'reserved' | 'ready',
+  address?: string
+}
+```
+
+Add a KV-v2 create helper that writes with `options.cas: 0`. Exactly one first
+writer wins across processes. A CAS mismatch reads the winning record: the same
+type may retry idempotently, while the other type receives 409. Other Vault
+400/403/500 responses remain errors. After key creation, finalize the record as
+`ready` with its address using the expected KV version. A failure after
+reservation leaves a retryable same-type reservation and still prevents the
+opposite type from creating a second account.
+
+Before enforcing reservations on an existing deployment, backfill records from
+both mounts under a manager token. Fail the migration if a `user_id` already
+exists in both mounts. Runtime resolution stays transit-first so existing
+ed25519 reads retain their latency and failure behavior.
+
+Required tests:
+
+- concurrent mixed-type creates: exactly one type succeeds and only its mount
+  receives a create call
+- concurrent same-type creates remain idempotent
+- provisioning failure followed by same-type retry
+- CAS conflicts map to 409 while unrelated Vault errors propagate
+- backfill of existing ed25519 and PQ keys, including dual-mount rejection
+- live concurrent HTTP creation against Vault, verifying only one mount holds
+  the resulting `user_id`
 
 ## Deferred / out of scope
 
-- **Atomic account-type reservation.** The current cross-mount conflict check
-  is check-then-create and therefore non-atomic: concurrent ed25519 and Falcon
-  creation for one `user_id` can populate both mounts, after which transit-first
-  resolution masks the PQ account. Revisit this during cleanup with one atomic
-  account-type reservation/provisioning record shared by both creation paths.
 - **Distinguish a missing PQ key from a missing/misconfigured PQ mount.**
   `pqRequest` currently converts every Vault 404 to `undefined`, and
   `pqListKeys` documents an unmounted engine as an empty list. A bad mount path
@@ -515,7 +599,7 @@ makes the e2e suite fail in ways that have nothing to do with the code:
 - the DID app id cached at `secret/intermezzo/manager/app-id` can point at an
   application that no longer exists (`404: application does not exist`) — delete
   that KV path and the registrar redeploys on the next run
-- the suite finishes in ~13s but jest then hangs on an open handle; run it with
+- the suite finishes in ~16s but jest then hangs on an open handle; run it with
   `--forceExit` until the handle is tracked down
 
 CI hits none of these: it wipes `volumes/vault` and re-syncs genesis every run.

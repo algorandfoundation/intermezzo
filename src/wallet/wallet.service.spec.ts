@@ -14,6 +14,7 @@ import { randomBytes } from 'crypto';
 import { Address } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction, encodeSignedTransaction } from '@algorandfoundation/algokit-utils/transact';
 import * as algosdk from 'algosdk';
+import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import {
   TruncatedAccountAssetResponse,
   TruncatedAccountResponse,
@@ -27,6 +28,7 @@ describe('WalletService', () => {
   let configServiceMock: jest.Mocked<ConfigService>;
   let didServiceMock: jest.Mocked<DidService>;
   let oid4vcAgentProviderMock: jest.Mocked<Oid4vcAgentProvider>;
+  let managerTokenProviderMock: jest.Mocked<ManagerVaultTokenProvider>;
 
   let chainService: ChainService;
   let httpService: HttpService;
@@ -43,12 +45,15 @@ describe('WalletService', () => {
     });
     didServiceMock.deriveDid.mockReturnValue('did:algo:test:app:1:derived');
     oid4vcAgentProviderMock = createMockInstance(Oid4vcAgentProvider);
+    managerTokenProviderMock = createMockInstance(ManagerVaultTokenProvider);
+    managerTokenProviderMock.getToken.mockResolvedValue('service_vault_token');
     walletService = new WalletService(
       vaultServiceMock,
       chainServiceMock,
       configServiceMock,
       didServiceMock,
       oid4vcAgentProviderMock,
+      managerTokenProviderMock,
     );
 
     httpService = createMockInstance(HttpService);
@@ -80,6 +85,8 @@ describe('WalletService', () => {
 
     const result = await walletService.userCreate(userId, 'vault_token');
 
+    expect(vaultServiceMock.pqGetKey).toHaveBeenCalledWith(userId, 'service_vault_token');
+    expect(vaultServiceMock.transitCreateKey).toHaveBeenCalledWith(userId, undefined, 'vault_token');
     expect(result).toStrictEqual({
       public_address: new Address(pubKey).toString(),
       user_id: userId,
@@ -95,10 +102,10 @@ describe('WalletService', () => {
     vaultServiceMock.getKeys.mockResolvedValueOnce([
       {
         user_id: userId,
-        public_address: new Address(pubKey).toString(),
-        account_type: 'ed25519',
+        public_address: pubKey.toString('base64'),
       },
     ]);
+    vaultServiceMock.getPqUsers.mockResolvedValueOnce([]);
 
     const result = await walletService.getKeys('vault_token');
     expect(result).toStrictEqual([
@@ -108,6 +115,17 @@ describe('WalletService', () => {
         account_type: 'ed25519',
       },
     ]);
+    expect(vaultServiceMock.getKeys).toHaveBeenCalledWith('vault_token');
+    expect(vaultServiceMock.getPqUsers).toHaveBeenCalledWith('service_vault_token');
+  });
+
+  it('keeps the original transit LIST as the authorization gate', async () => {
+    vaultServiceMock.getKeys.mockRejectedValueOnce(new ForbiddenException());
+
+    await expect(walletService.getKeys('transit_only_token')).rejects.toThrow(ForbiddenException);
+
+    expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();
+    expect(vaultServiceMock.getPqUsers).not.toHaveBeenCalled();
   });
 
   it('getUserInfo() test', async () => {
@@ -169,6 +187,7 @@ describe('WalletService', () => {
 
         const result = await walletService.userCreate(userId, 'vault_token');
 
+        expect(vaultServiceMock.pqGetKey).toHaveBeenCalledWith(userId, 'service_vault_token');
         expect(vaultServiceMock.pqCreateKey).not.toHaveBeenCalled();
         expect(result.account_type).toEqual('ed25519');
         expect(result.public_address).toEqual(new Address(pubKey).toString());
@@ -214,6 +233,7 @@ describe('WalletService', () => {
 
         const account = await walletService.resolveUserAccount(userId, 'vault_token');
 
+        expect(vaultServiceMock.pqGetKey).toHaveBeenCalledWith(userId, 'service_vault_token');
         expect(account).toStrictEqual({
           type: 'falcon1024',
           userId,
@@ -229,6 +249,7 @@ describe('WalletService', () => {
         vaultServiceMock.pqGetKey.mockResolvedValueOnce(undefined);
 
         await expect(walletService.resolveUserAccount('ghost', 'vault_token')).rejects.toThrow(NotFoundException);
+        expect(vaultServiceMock.pqGetKey).toHaveBeenCalledWith('ghost', 'service_vault_token');
       });
 
       it('(FAIL) should propagate a non-404 transit error rather than probing PQ', async () => {
@@ -238,6 +259,26 @@ describe('WalletService', () => {
 
         await expect(walletService.resolveUserAccount(userId, 'vault_token')).rejects.toThrow(ForbiddenException);
         expect(vaultServiceMock.pqGetKey).not.toHaveBeenCalled();
+        expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('signTxAsUser compatibility', () => {
+      it('accepts the legacy user-id signature and resolves before signing', async () => {
+        const publicKey = randomBytes(32);
+        const unsigned = new Uint8Array([1, 2, 3]);
+        const signed = new Uint8Array([4, 5, 6]);
+        const rawSignature = Buffer.alloc(64, 9);
+        vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(publicKey);
+        vaultServiceMock.signAsUser.mockResolvedValueOnce(Buffer.from(`vault:v1:${rawSignature.toString('base64')}`));
+        chainServiceMock.addSignatureToTxn.mockReturnValueOnce(signed);
+
+        await expect(walletService.signTxAsUser(userId, unsigned, 'transit_only_token')).resolves.toBe(signed);
+
+        expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, 'transit_only_token');
+        expect(vaultServiceMock.signAsUser).toHaveBeenCalledWith(userId, unsigned, 'transit_only_token');
+        expect(vaultServiceMock.pqGetKey).not.toHaveBeenCalled();
+        expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();
       });
     });
 

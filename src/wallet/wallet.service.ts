@@ -15,6 +15,7 @@ import { Address } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
+import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 
 /**
  * A user's account as resolved from Vault: which scheme backs it, its
@@ -36,7 +37,13 @@ export class WalletService {
     private readonly configService: ConfigService,
     private readonly didService: DidService,
     private readonly oid4vcAgentProvider: Oid4vcAgentProvider,
+    private readonly managerTokenProvider: ManagerVaultTokenProvider,
   ) {}
+
+  /** Use the service identity for additive PQ discovery, not the caller's ACL. */
+  private getServiceVaultToken(): Promise<string> {
+    return this.managerTokenProvider.getToken();
+  }
 
   async getManagerIdentity(): Promise<ManagerIdentityDto> {
     await this.didService.ensureAppIdLoaded();
@@ -155,7 +162,7 @@ export class WalletService {
     const ed25519 = await this.getTransitAccount(user_id, vault_token);
     if (ed25519) return ed25519;
 
-    const pq = await this.vaultService.pqGetKey(user_id, vault_token);
+    const pq = await this.vaultService.pqGetKey(user_id, await this.getServiceVaultToken());
     if (!pq) throw new NotFoundException(`No account found for user ${user_id}`);
 
     return {
@@ -217,7 +224,7 @@ export class WalletService {
     const existing =
       account_type === 'falcon1024'
         ? await this.getTransitAccount(user_id, vault_token)
-        : await this.vaultService.pqGetKey(user_id, vault_token);
+        : await this.vaultService.pqGetKey(user_id, await this.getServiceVaultToken());
     if (existing) {
       throw new ConflictException(
         `User ${user_id} already exists as a ${account_type === 'falcon1024' ? 'ed25519' : 'falcon1024'} account. ` +
@@ -242,9 +249,18 @@ export class WalletService {
 
   // Get all users
   async getKeys(vault_token: string): Promise<UserInfoResponseDto[]> {
-    // `VaultService.getKeys` merges both mounts and already returns
-    // real addresses, so there is nothing left to convert here.
-    return (await this.vaultService.getKeys(vault_token)) as UserInfoResponseDto[];
+    // The transit LIST uses the caller token and remains the authorization
+    // gate. Only after it succeeds do we use the service identity to append
+    // PQ users, so legacy manager tokens need no new mount permissions.
+    const transitUsers = await this.vaultService.getKeys(vault_token);
+    const ed25519Users = transitUsers.map((user) => ({
+      user_id: user.user_id,
+      public_address: new Address(Buffer.from(user.public_address, 'base64')).toString(),
+      account_type: 'ed25519',
+    }));
+    const pqUsers = await this.vaultService.getPqUsers(await this.getServiceVaultToken());
+
+    return [...ed25519Users, ...pqUsers] as UserInfoResponseDto[];
   }
   /**
    *
@@ -273,10 +289,22 @@ export class WalletService {
    * @returns The signed transaction, as a Uint8Array.
    */
   async signTxAsUser(
+    user_id: string,
+    tx: Uint8Array<ArrayBufferLike>,
+    vault_token: string,
+  ): Promise<Uint8Array<ArrayBufferLike>>;
+  async signTxAsUser(
     account: UserAccount,
     tx: Uint8Array<ArrayBufferLike>,
     vault_token: string,
+  ): Promise<Uint8Array<ArrayBufferLike>>;
+  async signTxAsUser(
+    userOrAccount: string | UserAccount,
+    tx: Uint8Array<ArrayBufferLike>,
+    vault_token: string,
   ): Promise<Uint8Array<ArrayBufferLike>> {
+    const account =
+      typeof userOrAccount === 'string' ? await this.resolveUserAccount(userOrAccount, vault_token) : userOrAccount;
     if (account.type === 'falcon1024') {
       const signature = await this.vaultService.pqSign(account.userId, tx, vault_token);
       return this.chainService.addPqSignatureToTxn(tx, { ...account, signature });

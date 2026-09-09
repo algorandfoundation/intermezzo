@@ -3,7 +3,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosResponse } from 'axios';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
-import { Address } from '@algorandfoundation/algokit-utils';
 import { UserInfoDto } from './user-info.dto';
 
 export type KeyType = 'ed25519' | 'ecdsa-p256';
@@ -23,6 +22,9 @@ export type PqKey = {
   publicKey: Buffer;
   address: string;
 };
+
+/** The legacy shape returned by `getKeys`: public keys are base64 encoded. */
+export type TransitUserKey = Pick<UserInfoDto, 'user_id' | 'public_address'>;
 
 @Injectable()
 export class VaultService {
@@ -464,7 +466,7 @@ export class VaultService {
    * @param token - manager token
    * @returns
    */
-  async getKeys(token: string): Promise<UserInfoDto[]> {
+  async getKeys(token: string): Promise<TransitUserKey[]> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
@@ -487,25 +489,33 @@ export class VaultService {
 
     const users: string[] = result?.data?.data?.keys ?? [];
 
-    // for each add the public address to an array of user object (id, public address)
-    const usersObjs: UserInfoDto[] = [];
+    // Preserve the original service contract: despite the historical field
+    // name, `public_address` contains the transit public key in base64.
+    const usersObjs: TransitUserKey[] = [];
     for (let i = 0; i < users.length; i++) {
-      const userObj: UserInfoDto = {
-        public_address: new Address(await this.getKey(users[i], transitKeyPath, token)).toString(),
+      const userObj: TransitUserKey = {
+        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'),
         user_id: users[i],
-        account_type: 'ed25519',
       };
       usersObjs.push(userObj);
     }
 
-    // ...then the PQ mount. The plugin already returns the derived
-    // address, so unlike transit there is nothing to encode here.
+    return usersObjs;
+  }
+
+  /**
+   * Return normalized PQ users separately from the legacy transit listing.
+   * WalletService combines the two only after the caller has passed the
+   * original transit LIST authorization check.
+   */
+  async getPqUsers(token: string): Promise<UserInfoDto[]> {
+    const users: UserInfoDto[] = [];
     for (const name of await this.pqListKeys(token)) {
       const key = await this.pqGetKey(name, token);
       if (!key) continue; // deleted between LIST and read
-      usersObjs.push({ user_id: name, public_address: key.address, account_type: 'falcon1024' });
+      users.push({ user_id: name, public_address: key.address, account_type: 'falcon1024' });
     }
 
-    return usersObjs;
+    return users;
   }
 }
