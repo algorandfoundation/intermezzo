@@ -10,6 +10,7 @@ import { ChainService } from '../src/chain/chain.service';
 import { Address, getApplicationAddress } from '@algorandfoundation/algokit-utils';
 import { HttpService } from '@nestjs/axios';
 import { base58 } from '@scure/base';
+import * as algosdk from 'algosdk';
 
 const APP_BASE_URL = 'http://localhost:3000/v1';
 const VAULT_BASE_URL = 'http://localhost:8200';
@@ -380,6 +381,201 @@ describe('App E2E', () => {
         createUser(accessToken, { user_id: randomBytes(16).toString('hex'), account_type: 'dilithium' }),
       ).rejects.toMatchObject({ response: { status: 400 } });
     });
+  });
+
+  describe('PQ accounts (on-chain)', () => {
+    let vaultToken: string;
+    let accessToken: string;
+    let managerAddress: string;
+    let chain: ChainService;
+    let algod: algosdk.Algodv2;
+
+    const post = async (path: string, body: unknown) => {
+      try {
+        return (
+          await axios.post(`${APP_BASE_URL}/${path}`, body, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+        ).data;
+      } catch (error) {
+        const detail = axios.isAxiosError(error) ? (error.response?.data ?? error.message) : String(error);
+        throw new Error(`${path}: ${JSON.stringify(detail)}`);
+      }
+    };
+
+    const fundedUser = async (accountType: 'ed25519' | 'falcon1024') => {
+      const user = await post('wallet/user/', {
+        user_id: randomBytes(16).toString('hex'),
+        account_type: accountType,
+      });
+      await post('wallet/transactions/transfer-algo/', {
+        fromUserId: 'manager',
+        toAddress: user.public_address,
+        amount: 1000000,
+      });
+      return user;
+    };
+
+    beforeEach(async () => {
+      vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      accessToken = await signInToPawn(vaultToken);
+      managerAddress = await getManagerAddress();
+      const config = new ConfigService();
+      chain = new ChainService(config, new HttpService());
+      algod = new algosdk.Algodv2(
+        config.get<string>('NODE_TOKEN'),
+        `${config.get<string>('NODE_HTTP_SCHEME')}://${config.get<string>('NODE_HOST')}`,
+        config.get<string>('NODE_PORT'),
+      );
+    });
+
+    it.each(['ed25519', 'falcon1024'] as const)(
+      'confirms a %s user payment',
+      async (accountType) => {
+        const user = await fundedUser(accountType);
+        const result = await post('wallet/transactions/transfer-algo/', {
+          fromUserId: user.user_id,
+          toAddress: managerAddress,
+          amount: 10000,
+        });
+        const pending = await algod.pendingTransactionInformation(result.transaction_id).do();
+        expect(pending.confirmedRound).toBeGreaterThan(0n);
+        expect(pending.txn.txn.fee).toBe(accountType === 'falcon1024' ? 3000n : 1000n);
+        if (accountType === 'falcon1024') {
+          expect(algosdk.addressFromPQSig(pending.txn.pqsig!).toString()).toBe(user.public_address);
+          expect(pending.txn.pqsig!.sig.length).toBeGreaterThan(1000);
+        } else {
+          expect(pending.txn.pqsig).toBeUndefined();
+          expect(pending.txn.sig).toHaveLength(64);
+        }
+        expect(await chain.getAccountBalance(user.public_address)).toBe(
+          accountType === 'falcon1024' ? 987000n : 989000n,
+        );
+      },
+      60000,
+    );
+
+    it('confirms a mixed PQ and ed25519 group', async () => {
+      const pq = await fundedUser('falcon1024');
+      const ed = await fundedUser('ed25519');
+      const result = await post('wallet/transactions/group-transaction/', {
+        transactions: [pq, ed].map((user) => ({
+          type: 'payment',
+          payload: { fromUserId: user.user_id, toAddress: managerAddress, amount: 10000 },
+        })),
+      });
+      const pending = await algod.pendingTransactionInformation(result.group_id).do();
+      expect(pending.confirmedRound).toBeGreaterThan(0n);
+      expect(pending.txn.txn.group).toBeDefined();
+      expect(pending.txn.pqsig).toBeDefined();
+      expect(await chain.getAccountBalance(pq.public_address)).toBe(987000n);
+      expect(await chain.getAccountBalance(ed.public_address)).toBe(989000n);
+    }, 60000);
+
+    it('verifies the PQ minimum fee with empty-signature simulation', async () => {
+      const user = await fundedUser('falcon1024');
+      const key = (
+        await axios.get(`${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${user.user_id}`, {
+          headers: { 'X-Vault-Token': vaultToken },
+        })
+      ).data.data;
+      const pqSigner = jest.fn(async () => {
+        throw new Error('Simulation must not sign');
+      });
+      const signer = algosdk.addressWithSignersFromRawPQSigner({
+        pqScheme: Buffer.from(key.scheme),
+        pqPublicKey: Buffer.from(key.public_key, 'base64'),
+        pqSigner,
+      });
+      const unsigned = await chain.craftPaymentTx(user.public_address, managerAddress, 0);
+      const simulate = async (fee: bigint) => {
+        const txn = algosdk.decodeUnsignedTransaction(unsigned.slice(2));
+        txn.fee = fee;
+        const [empty] = await signer.emptyTxnSigner([txn], [0]);
+        try {
+          const response = await algod
+            .simulateTransactions(
+              new algosdk.modelsv2.SimulateRequest({
+                allowEmptySignatures: true,
+                txnGroups: [
+                  new algosdk.modelsv2.SimulateRequestTransactionGroup({
+                    txns: [algosdk.decodeSignedTransaction(empty)],
+                  }),
+                ],
+              }),
+            )
+            .do();
+          return response.txnGroups[0].failureMessage ?? '';
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+      expect(await simulate(2999n)).toMatch(/fee/i);
+      expect(await simulate(3000n)).toBe('');
+      expect(pqSigner).not.toHaveBeenCalled();
+    }, 60000);
+
+    it('prefunds and confirms an asset opt-in for an unfunded PQ user', async () => {
+      const user = await post('wallet/user/', {
+        user_id: randomBytes(16).toString('hex'),
+        account_type: 'falcon1024',
+      });
+      const created = await post('wallet/transactions/create-asset/', {
+        total: 100,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'PQ',
+        assetName: 'PQ opt-in test',
+        url: 'https://example.com',
+      });
+      const asset = await algod.pendingTransactionInformation(created.transaction_id).do();
+      const result = await post('wallet/transactions/transfer-asset/', {
+        assetId: Number(asset.assetIndex),
+        userId: user.user_id,
+        amount: 10,
+      });
+      const funding = await algod.pendingTransactionInformation(result.transaction_id).do();
+      expect(funding.txn.txn.payment!.amount).toBe(203000n);
+      const account = await algod.accountInformation(user.public_address).do();
+      expect(account.amount).toBe(200000n);
+      expect(account.assets).toEqual(
+        expect.arrayContaining([expect.objectContaining({ assetId: asset.assetIndex, amount: 10n })]),
+      );
+    }, 60000);
+
+    it('confirms a PQ app call with an explicit fee', async () => {
+      const user = await fundedUser('falcon1024');
+      const program = await algod.compile('#pragma version 8\nint 1').do();
+      const created = await post('wallet/transactions/app-call/', {
+        fromUserId: 'manager',
+        approvalProgram: program.result,
+        clearProgram: program.result,
+      });
+      const application = await algod.pendingTransactionInformation(created.transaction_id).do();
+      const result = await post('wallet/transactions/app-call/', {
+        fromUserId: user.user_id,
+        appId: Number(application.applicationIndex),
+        fee: 5000,
+      });
+      const pending = await algod.pendingTransactionInformation(result.transaction_id).do();
+      expect(pending.confirmedRound).toBeGreaterThan(0n);
+      expect(pending.txn.txn.fee).toBe(7000n);
+      expect(algosdk.addressFromPQSig(pending.txn.pqsig!).toString()).toBe(user.public_address);
+    }, 60000);
+
+    it('confirms the maximum 16-payment PQ group', async () => {
+      const user = await fundedUser('falcon1024');
+      const transactions = Array.from({ length: 16 }, (_, index) => ({
+        type: 'payment',
+        payload: { fromUserId: user.user_id, toAddress: managerAddress, amount: index + 1 },
+      }));
+      const result = await post('wallet/transactions/group-transaction/', { transactions });
+      const pending = await algod.pendingTransactionInformation(result.group_id).do();
+      expect(pending.confirmedRound).toBeGreaterThan(0n);
+      expect(pending.txn.pqsig).toBeDefined();
+      expect(algosdk.encodeMsgpack(pending.txn).length).toBeGreaterThan(3000);
+      expect(await chain.getAccountBalance(user.public_address)).toBe(1000000n - 48000n - 136n);
+    }, 60000);
   });
 
   describe('Users List', () => {

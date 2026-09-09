@@ -32,6 +32,7 @@ import { Address } from '@algorandfoundation/algokit-utils';
 import { AppCallRequestDto } from '../wallet/app-call-request.dto';
 import { base64ToBytes, encodeString, encodeUint64 } from './encoding';
 import { sha512_256 } from 'js-sha512';
+import * as algosdk from 'algosdk';
 
 @Injectable()
 export class ChainService {
@@ -48,6 +49,26 @@ export class ChainService {
     const decodedTxn = decodeTransaction(encodedTransaction);
     const stxn: SignedTransaction = { txn: decodedTxn, sig: signature };
     return encodeSignedTransaction(stxn);
+  }
+
+  addPqSignatureToTxn(
+    encodedTransaction: Uint8Array,
+    pq: { scheme: string; salt: number; publicKey: Uint8Array; signature: Uint8Array },
+  ): Uint8Array {
+    const txn = algosdk.decodeUnsignedTransaction(encodedTransaction.slice(2));
+    return algosdk.encodeMsgpack(
+      new algosdk.SignedTransaction({
+        txn,
+        pqsig: { sch: Buffer.from(pq.scheme), slt: pq.salt, pk: pq.publicKey, sig: pq.signature },
+      }),
+    );
+  }
+
+  addPqFeeSurcharge(encodedTransaction: Uint8Array, minFee: number | bigint): Uint8Array {
+    const txn = decodeTransaction(encodedTransaction);
+    if (txn.group) throw new Error('PQ fee surcharge must be applied before grouping');
+    txn.fee += 2n * BigInt(minFee);
+    return encodeTransaction(txn);
   }
 
   /**

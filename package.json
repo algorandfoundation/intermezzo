@@ -37,6 +37,7 @@
     "@nestjs/jwt": "^11.0.0",
     "@nestjs/platform-express": "^11.1.18",
     "@nestjs/swagger": "^11.4.2",
+    "algosdk": "3.7.0",
     "axios": "^1.8.2",
     "bip39": "^3.1.0",
     "class-transformer": "^0.5.1",

@@ -61,9 +61,9 @@ the ed25519 code paths stay byte-identical. Concretely:
 
 ### TypeScript SDK gap — blocker for increment 4
 
-**`algosdk@3.7.0` is a hard prerequisite for increment 4.** Increment 4 cannot be
-implemented on the packages currently in `package.json`, and the gap is not
-closed by any published `algokit-utils` release.
+**`algosdk@3.7.0` is a hard prerequisite for increment 4, now installed.**
+It supplies the PQ envelope support absent from the project's algokit-utils
+version. The compatibility notes below describe why this dependency was added.
 
 `@algorandfoundation/algokit-utils` has **no `pqsig` support** — checked through
 `10.0.0-beta.4`, the newest version on npm (the project is on `10.0.0-beta.2`).
@@ -240,7 +240,8 @@ deviations from what is written below:
 - **No resolution cache.** The probe costs one extra Vault round trip for PQ
   accounts only, and account type is immutable, so a cache would be correct —
   but nothing has measured it as a problem yet. Add it when signing starts
-  resolving per transaction (increment 4), not before.
+  resolving per transaction (increment 4), not before. Increment 4 now reuses
+  resolved accounts within each group request; there is no cross-request cache.
 - **`UserInfoResponseDto.account_type` is required, not optional.** It is always
   populated on the way out, so an optional field would only weaken the type for
   consumers.
@@ -292,9 +293,9 @@ unchanged behaviour and unchanged latency for every account that exists today),
 `getUserInfo` keeps its signature and response shape and is reimplemented on top
 of this — it just reads `.address` instead of deriving one. Its read-only call
 sites need no edit. The four call sites that go on to *sign*
-(`transferAlgoToAddress`, `transferAsset`, `appCall`, `groupTransaction`) still
-discard the resolved `UserAccount`; increment 4 must retain and pass it through
-so signing has the account type, salt and public key without another lookup.
+(`transferAlgoToAddress`, `transferAsset`, `appCall`, `groupTransaction`) now
+retain the resolved `UserAccount` through increment 4, so signing has the
+account type, salt and public key without another lookup.
 
 `UserInfoResponseDto` gains a required `account_type`. It is always populated;
 the wire change remains additive for clients that ignore unknown fields.
@@ -321,11 +322,23 @@ address is unchanged in shape, and confirm the cross-mount 409.
 
 ## Increment 4: signing and fees
 
-**Blocked until `algosdk@3.7.0` is added to `dependencies`.** algokit-utils
-cannot emit a `pqsig` envelope in any published version, so no part of this
-increment can be written against the packages currently installed — see
-[TypeScript SDK gap](#typescript-sdk-gap--blocker-for-increment-4) above. That is
-the first task of this increment, not an implementation detail of it.
+**Status: implemented and PQ acceptance checks passed.** `algosdk@3.7.0`
+is installed. Build and all 226 unit tests pass. Seven on-chain tests pass
+against algod 5.0.1: ed25519 and PQ payments, mixed groups, fee simulation,
+unfunded PQ asset opt-in, explicit-fee PQ app call, and a 16-payment PQ group.
+The full e2e run before the last two cases were added passed 37/39; the two
+manager identity/credential failures reference stale DID app 1069 after a
+LocalNet reset and are unrelated to PQ signing. Identity state was not changed.
+
+Implementation details differing from the original sketch:
+
+- `pqsig.sch` is encoded as `Buffer.from(scheme)`, not a string; the SDK schema
+  requires bytes.
+- `signAndSubmit` receives the already-fetched `minFee` and an explicit
+  `grouped` flag. Singles remain ungrouped; existing group endpoints still
+  group even a single transaction, preserving ed25519 wire bytes.
+- Account reuse is scoped to a group request, not a global cache across tokens.
+- The fee helper rejects already-grouped transactions to prevent stale hashes.
 
 **Otherwise ready against algod v5 / consensus v42.** Algorand v5 is now
 released, so this is no longer blocked on an unavailable node version. LocalNet
@@ -334,21 +347,19 @@ the suite. Existing 4.7 sandboxes must be refreshed with
 `algokit localnet reset --update`; setup fails with that instruction
 instead of allowing PQ on-chain tests to fail later for an opaque reason.
 
-### Remaining review findings required for this increment
+### Completed review findings
 
-- [ ] **Add `algosdk@3.7.0` to `dependencies`.** Hard blocker; nothing else in
-  this increment can start without it. Scoped to the PQ envelope and PQ address
+- [x] **Add `algosdk@3.7.0` to `dependencies`.** Scoped to the PQ envelope and PQ address
   helpers only — transaction building, grouping and encoding stay on
   algokit-utils. This supersedes the earlier item about promoting
   `algorand-msgpack`, which is no longer needed: the envelope is not hand-rolled.
-- [ ] **Retain the resolved `UserAccount` at every signing call site.**
+- [x] **Retain the resolved `UserAccount` at every signing call site.**
   `transferAlgoToAddress`, `transferAsset`, `appCall` and `groupTransaction`
-  currently reduce account resolution to an address and later call
-  `signTxAsUser(user_id, ...)`. Pass the discriminated account through instead,
+  pass the discriminated account to `signTxAsUser(account, ...)`,
   so the signing/submission path can select ed25519 or Falcon and has the PQ
   scheme, salt and public key without resolving it again.
-- [ ] **Include the PQ surcharge when prefunding an asset opt-in.**
-  `transferAsset` currently reserves one `minFee` for the user-signed opt-in.
+- [x] **Include the PQ surcharge when prefunding an asset opt-in.**
+  `transferAsset` reserves one `minFee` for an ed25519 user-signed opt-in.
   A Falcon opt-in needs that base fee plus the two-minimum-fee PQ contribution,
   so its funding calculation must reserve three `minFee` before grouping and
   signing. Cover both ed25519 and Falcon insufficient-balance cases in tests.
@@ -371,7 +382,7 @@ addPqSignatureToTxn(encodedTxn, { scheme, salt, publicKey, signature }) {
   return algosdk.encodeMsgpack(
     new algosdk.SignedTransaction({
       txn,
-      pqsig: { sch: scheme, slt: salt, pk: publicKey, sig: signature },
+      pqsig: { sch: Buffer.from(scheme), slt: salt, pk: publicKey, sig: signature },
     }),
   );
 }
@@ -406,21 +417,19 @@ matching the spec; an explicitly pooled fee `F` goes to `F + 2 × minFee`, which
 still covers the inner transactions it was sized for. `max(fee, 3 × minFee)`
 would silently underpay the pooled case.
 
-```
-ponytail: surcharge modelled as 2 × minFee, from the 3× figure in the spec
-notes. If consensus v42 prices the Falcon signature per byte rather than as a
-flat multiple, replace this with the real formula — verify against algod v5
-before the first mainnet PQ transaction.
-```
+Verified against algod 5.0.1: an empty-signature PQ payment fails simulation
+at 2,999 microAlgos and succeeds at 3,000, without invoking the Falcon signer.
+`PQSchemeFeeContribution` in go-algorand `e763fb0d/config/consensus.go` returns
+`2e6` for Falcon-1024, exactly two basic minimum fees. This is independent of
+the separate size surcharge for oversized notes, app arguments and programs;
+the existing builders' handling of those fields is unchanged.
 
 algosdk gives a way to verify that without guessing. `emptyTxnSigner` from
 `addressWithSignersFromRawPQSigner` attaches a `pqsig` envelope with real scheme,
 salt and public key but empty signature bytes; under `simulate` with
 `allowEmptySignatures`, algod derives the authorizer from that envelope and
-charges the genuine post-quantum fee, with no Falcon signature produced. Use it
-to confirm the `2 × minFee` model on LocalNet before the first PQ transaction —
-and if the real pricing is per byte, it is also the mechanism for reading the
-correct fee at runtime instead of modelling it at all.
+charges the genuine post-quantum fee, with no Falcon signature produced. The
+on-chain test uses this to pin the fee boundary alongside real signed payments.
 
 ### Consolidation
 
@@ -435,6 +444,8 @@ private async signAndSubmit(
   unsignedTxs: Uint8Array[],
   senders: Map<string, UserAccount | 'manager'>,
   vault_token: string,
+  minFee: number | bigint,
+  grouped = false,
 ): Promise<string>
 ```
 
@@ -445,12 +456,14 @@ rule and the envelope rule each have exactly one home.
 
 ### Size limits
 
-A Falcon signature is ~1.2 KB against ed25519's 64 B, so a PQ signed
-transaction is roughly 20× larger. Whatever per-transaction size ceiling
-consensus applies must have moved in v42 for this to work at all — that is
-presumably part of why the fee is 3×. Confirm the actual ceiling and the
-practical maximum group size for PQ senders on LocalNet before assuming a
-16-transaction PQ group fits.
+A PQ envelope includes a 1,793-byte public key as well as a roughly 1.2 KB
+signature. The live test confirms a group of 16 PQ payments, each signed
+envelope over 3 KB, is accepted. The consensus group limit remains 16, and
+`MaxTxnBytesPerBlock` is 5 MiB in v42. There is no single small universal
+per-transaction byte ceiling in `ConsensusParams`: field-specific bounds and
+the generated `SignedTxnMaxSize` wire bound apply. `PQSig` explicitly feeds
+its public-key and signature allocation bounds into that wire bound. See
+go-algorand `e763fb0d/config/consensus.go` and `data/transactions/pqsig.go`.
 
 ### Tests
 
