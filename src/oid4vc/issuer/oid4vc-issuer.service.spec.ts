@@ -11,7 +11,8 @@ import { Oid4vcIssuerService } from './oid4vc-issuer.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
 const HOLDER_DID_KEY = 'did:key:z6MkExampleHolderKey';
-const LIST_URI = 'http://localhost:3000/v1/credential/status/list/default';
+const LIST_ID = 'f538cd53-79e5-4877-b6c2-51c09c51f8ab';
+const LIST_URI = `http://localhost:3000/v1/credential/status/list/${LIST_ID}`;
 
 /**
  * The mapper is private and installed on the agent provider during
@@ -29,7 +30,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
   beforeEach(async () => {
     findOneBy = jest.fn(async () => ({ id: 'local-session-1', credoIssuanceSessionId: 'credo-session-1' }));
     save = jest.fn(async (entity: Record<string, unknown>) => entity);
-    allocate = jest.fn(async () => ({ listId: 'default', idx: 7, uri: LIST_URI }));
+    allocate = jest.fn(async () => ({ listId: LIST_ID, idx: 7, uri: LIST_URI }));
     // Defaults only, unless a test opts into dynamic Vault configurations.
     isConfigured = jest.fn(() => false);
     kvList = jest.fn(async () => []);
@@ -54,7 +55,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
       { findOneBy, save } as unknown as Oid4vcIssuanceSessionRepository,
       { kvList, kvRead } as unknown as VaultService,
       { isConfigured, getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
-      { allocate } as unknown as Oid4vcStatusService,
+      { allocateForSession: allocate } as unknown as Oid4vcStatusService,
     );
 
     await service.onModuleInit();
@@ -90,35 +91,8 @@ describe('Oid4vcIssuerService credential mapper', () => {
         status: { status_list: { uri: LIST_URI, idx: 7 } },
       });
 
-      // Recorded before the credential is handed back, keyed on the Credo
-      // session id the offer was persisted with.
-      expect(findOneBy).toHaveBeenCalledWith({ credoIssuanceSessionId: 'credo-session-1' });
-      expect(save).toHaveBeenCalledWith({
-        id: 'local-session-1',
-        credoIssuanceSessionId: 'credo-session-1',
-        statusEntries: [{ listId: 'default', idx: 7 }],
-      });
-    });
-
-    it('appends to the entries a session already has', async () => {
-      // A session that already redeemed one credential. Replacing its entry
-      // would leave that credential live with nothing pointing at its bit.
-      findOneBy.mockResolvedValue({
-        id: 'local-session-1',
-        credoIssuanceSessionId: 'credo-session-1',
-        statusEntries: [{ listId: 'default', idx: 3 }],
-      });
-
-      await issue('device-attestation-credential', { _holderDidKey: HOLDER_DID_KEY });
-
-      expect(save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          statusEntries: [
-            { listId: 'default', idx: 3 },
-            { listId: 'default', idx: 7 },
-          ],
-        }),
-      );
+      expect(allocate).toHaveBeenCalledWith('credo-session-1');
+      expect(save).not.toHaveBeenCalled();
     });
 
     it('keeps `status` out of the disclosure frame', async () => {
@@ -143,18 +117,18 @@ describe('Oid4vcIssuerService credential mapper', () => {
     });
 
     it('issues nothing when the status entry cannot be recorded', async () => {
-      findOneBy.mockResolvedValue(null);
+      allocate.mockRejectedValue(new Error('Session write failed'));
 
       await expect(issue('device-attestation-credential', { _holderDidKey: HOLDER_DID_KEY })).rejects.toThrow(
-        /never be revocable/,
+        /Session write failed/,
       );
     });
 
     it('issues nothing when allocation fails', async () => {
-      allocate.mockRejectedValue(new Error('Status list default is full (16384 entries).'));
+      allocate.mockRejectedValue(new Error('Allocation unavailable'));
 
       await expect(issue('device-attestation-credential', { _holderDidKey: HOLDER_DID_KEY })).rejects.toThrow(
-        /is full/,
+        /Allocation unavailable/,
       );
       expect(save).not.toHaveBeenCalled();
     });

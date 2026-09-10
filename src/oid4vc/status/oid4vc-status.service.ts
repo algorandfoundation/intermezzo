@@ -1,4 +1,13 @@
-import { Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
+import { isUUID } from 'class-validator';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { StatusList, createHeaderAndPayload } from '@sd-jwt/jwt-status-list';
 import { AgentContext, SdJwtVcService } from '@credo-ts/core';
 
@@ -17,20 +26,10 @@ import {
 } from '../entities/status-list.entity';
 import { StatusListRepository } from './status-list.repository';
 
-/** Id of the list every credential is currently allocated on. */
-export const DEFAULT_STATUS_LIST_ID = 'default';
-
 /** Shape of the one `SdJwtVcService` member Phase 4 replaces. */
 type StatusListFetcherHost = {
   getStatusListFetcher(agentContext: AgentContext): (uri: string) => Promise<string>;
 };
-
-/**
- * List ids we are willing to resolve without leaving the process. Anything
- * else under our own base URL (a nested path, a query string) falls through to
- * the network rather than being guessed at.
- */
-const LIST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 /** Attempts a conditional write gets before contention is reported as an error. */
 const CAS_ATTEMPTS = 5;
@@ -55,29 +54,11 @@ export interface AllocatedStatusEntry extends StatusListEntry {
 export class Oid4vcStatusService implements OnModuleInit {
   private readonly logger = new Logger(Oid4vcStatusService.name);
 
-  /**
-   * Signed list tokens by list id, dropped whenever a bit changes.
-   *
-   * Worth caching because every credential verification dereferences the
-   * list, while writes are rare.
-   *
-   * ponytail: per-process cache with no expiry. A revocation performed by
-   * another instance would not evict this one's entry, so that instance would
-   * keep serving a token saying the credential is live. Give the entry a
-   * short TTL, or invalidate across instances, before running more than one.
-   */
-  private readonly cachedJwt = new Map<string, string>();
+  /** A Vault read validates the status data before any cached signature is reused. */
+  private readonly cachedJwt = new Map<string, { encodedList: string; jwt: string }>();
 
-  /**
-   * Serialises every read-modify-write against a list record.
-   *
-   * Correctness across processes comes from the compare-and-set in
-   * {@link mutate}, not from here. This queue exists so that in-process
-   * concurrency — the common case, several redemptions in flight — resolves
-   * without burning retries, and so that a bit flip cannot interleave with
-   * {@link getStatusListJwt} building and caching a token from the record it
-   * read a moment earlier.
-   */
+  // ponytail: one queue per process; use per-list queues only if measured contention warrants it.
+  // Vault CAS, not this queue, protects writes across processes.
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -113,7 +94,7 @@ export class Oid4vcStatusService implements OnModuleInit {
     const prefix = `${this.config.statusListBaseUrl}/`;
     if (!uri.startsWith(prefix)) return undefined;
     const listId = uri.slice(prefix.length);
-    return LIST_ID_PATTERN.test(listId) ? listId : undefined;
+    return isUUID(listId, '4') ? listId : undefined;
   }
 
   /**
@@ -153,30 +134,46 @@ export class Oid4vcStatusService implements OnModuleInit {
     this.logger.log(`Status lists under ${this.config.statusListBaseUrl} will resolve in-process`);
   }
 
-  /**
-   * Reserves the next entry on the default list, creating the list on first
-   * use. Returns everything the credential mapper needs to embed a
-   * `status.status_list` claim.
-   */
-  async allocate(listId: string = DEFAULT_STATUS_LIST_ID): Promise<AllocatedStatusEntry> {
-    // No cache invalidation: allocating hands out an index that is already
-    // `0` in the bitstring, so the published list is unchanged.
-    return this.serialise(() =>
-      this.mutate(listId, true, (record) => {
-        if (record.nextIndex >= record.size) {
-          // ponytail: single list. Rollover is cheap to add later because the
-          // list id is stored per credential — mint `${listId}-2` and point new
-          // allocations at it.
-          throw new Error(
-            `Status list ${listId} is full (${record.size} entries). ` +
-              'Credentials cannot be issued until a second list is provisioned.',
-          );
+  /** Allocate on the active UUID list, electing its successor with CAS when full. */
+  async allocate(): Promise<AllocatedStatusEntry> {
+    return this.serialise(async () => {
+      for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
+        const active = await this.repo.loadActive();
+        if (!active.listId) {
+          await this.repo.saveActive(randomUUID(), active.version);
+          continue;
         }
-        const idx = record.nextIndex;
-        record.nextIndex = idx + 1;
-        return { listId: record.id, idx, uri: this.config.statusListUri(record.id) };
-      }),
-    );
+        const { record, version } = await this.repo.load(active.listId);
+        // The pointer is committed first. A restart between pointer election and
+        // list creation resumes here; competing creators use CAS version zero.
+        const target = record ?? this.emptyList(active.listId);
+        if (target.nextIndex >= target.size) {
+          await this.repo.saveActive(randomUUID(), active.version);
+          continue;
+        }
+        const idx = target.nextIndex++;
+        if (await this.repo.saveIfUnchanged(target, version)) {
+          return { listId: target.id, idx, uri: this.config.statusListUri(target.id) };
+        }
+      }
+      throw new ServiceUnavailableException('Status list allocation is under contention. Retry.');
+    });
+  }
+
+  /** Persist the allocation before issuance; session CAS fences concurrent revocation. */
+  async allocateForSession(credoIssuanceSessionId: string): Promise<AllocatedStatusEntry> {
+    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
+    if (!session) throw new NotFoundException(`No local issuance session for ${credoIssuanceSessionId}`);
+    const entry = await this.allocate();
+    await this.sessions.mutate(session.id, (current) => {
+      if (current.statusChange?.pending || current.statusChange?.value === STATUS_REVOKED) {
+        throw new ConflictException(`Issuance session ${session.id} is revoked or changing status`);
+      }
+      current.statusEntries = [...(current.statusEntries ?? []), { listId: entry.listId, idx: entry.idx }];
+    });
+    // Failed issuance may consume a slot. Never recycle it: a failed response
+    // does not prove that nobody received the credential.
+    return entry;
   }
 
   /**
@@ -196,20 +193,12 @@ export class Oid4vcStatusService implements OnModuleInit {
    * Returns the signed status list token served at
    * {@link Oid4vcConfig.statusListUri}.
    */
-  async getStatusListJwt(listId: string = DEFAULT_STATUS_LIST_ID): Promise<string> {
-    const cached = this.cachedJwt.get(listId);
-    if (cached) return cached;
-
-    // Build inside the queue so a concurrent `setStatus` cannot flip a bit
-    // between reading the record and populating the cache — that interleaving
-    // would publish, and then keep serving, a token that still says a revoked
-    // credential is valid. Re-check the cache first so concurrent misses sign
-    // once rather than once each.
+  async getStatusListJwt(listId: string): Promise<string> {
     return this.serialise(async () => {
-      const fresh = this.cachedJwt.get(listId);
-      if (fresh) return fresh;
-
       const record = await this.requireList(listId);
+      const cached = this.cachedJwt.get(listId);
+      if (cached?.encodedList === record.encodedList) return cached.jwt;
+
       const list = StatusList.decompressStatusList(record.encodedList, record.bits);
       const issuer = await this.agentProvider.ensureIssuerDid();
       const { header, payload } = createHeaderAndPayload(
@@ -223,12 +212,12 @@ export class Oid4vcStatusService implements OnModuleInit {
       );
 
       // No `exp`. `@sd-jwt` only checks expiry when the claim is present, and
-      // an expired list fails every credential that points at it — an
-      // availability cliff bought for nothing, since the token is regenerated
-      // on every write anyway.
+      // an expired list fails every credential that points at it. Adding one
+      // requires scheduled token refresh even when no status bits change.
+      // HTTP remains no-store; external token caching policy is documented.
       const signingInput = `${encodeSegment(header)}.${encodeSegment(payload)}`;
       const jwt = `${signingInput}.${await this.sign(signingInput)}`;
-      this.cachedJwt.set(listId, jwt);
+      this.cachedJwt.set(listId, { encodedList: record.encodedList, jwt });
       return jwt;
     });
   }
@@ -239,58 +228,59 @@ export class Oid4vcStatusService implements OnModuleInit {
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
   }
 
-  private async setSessionStatus(sessionId: string, value: number, reason?: string): Promise<AllocatedStatusEntry[]> {
-    const session = await this.sessions.findOneById(sessionId);
-    if (!session) {
-      throw new NotFoundException(`Issuance session ${sessionId} not found`);
-    }
-    const entries = session.statusEntries ?? [];
-    if (entries.length === 0) {
-      throw new NotFoundException(
-        `Issuance session ${sessionId} has no status list entry. ` +
-          'The offer was never redeemed, or the credential predates status list support.',
-      );
-    }
-
-    // Every credential the session issued, not just the last one. Applied one
-    // at a time and not rolled back on failure: a partly-applied revocation
-    // is strictly better than none, and the operation is idempotent, so the
-    // caller's retry finishes the job.
-    for (const entry of entries) {
-      await this.setStatus(entry.listId, entry.idx, value);
-    }
-
-    // Audit after the bit, never before: the revocation is the part that
-    // matters, and a failure to record who did it must not leave a credential
-    // live. Deliberately not rolled back if this write fails.
-    const revoked = value !== STATUS_VALID;
-    try {
-      await this.sessions.update(
-        { id: sessionId },
-        { revokedAt: revoked ? new Date() : undefined, revokedReason: revoked ? reason : undefined },
-      );
-    } catch (err) {
-      this.logger.error(
-        `Status of session ${sessionId} was set to ${value} but the audit fields could not be written: ` +
-          `${(err as Error).message}`,
-      );
-    }
-
-    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
-  }
-
-  private async setStatus(listId: string, idx: number, value: number): Promise<void> {
-    await this.serialise(async () => {
-      await this.mutate(listId, false, (record) => {
-        if (!Number.isInteger(idx) || idx < 0 || idx >= record.size) {
-          throw new NotFoundException(`Status list ${listId} has no entry ${idx}`);
+  private async setSessionStatus(sessionId: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {
+    const session = await this.sessions.mutate(sessionId, (current) => {
+      if (!current.statusEntries?.length) {
+        throw new NotFoundException(`Issuance session ${sessionId} has no status list entry`);
+      }
+      if (current.statusChange?.pending) {
+        if (current.statusChange.value !== value) {
+          throw new ConflictException(
+            `Issuance session ${sessionId} has an unfinished status change; retry that operation first`,
+          );
         }
-        const list = StatusList.decompressStatusList(record.encodedList, record.bits);
-        list.setStatus(idx, value);
-        record.encodedList = list.compressStatusList();
-      });
-      this.cachedJwt.delete(listId);
+        return; // Resume the durable intent, preserving its original reason and operation id.
+      }
+      current.statusChange = { id: randomUUID(), value, pending: true, requestedAt: new Date().toISOString(), reason };
     });
+    const operation = session.statusChange!;
+    const entries = session.statusEntries!;
+    const byList = new Map<string, number[]>();
+    for (const entry of entries) {
+      if (!byList.has(entry.listId)) byList.set(entry.listId, []);
+      byList.get(entry.listId)!.push(entry.idx);
+    }
+    for (const [listId, indices] of byList) {
+      await this.serialise(() =>
+        this.mutate(listId, async (record) => {
+          // Read the LIST first, then the session intent, then CAS the list.
+          // A newer operation either changes the intent before this check or
+          // writes the list after our snapshot, causing our CAS to lose. Even
+          // no-op bit updates must commit, to fence delayed workers from retries.
+          const current = await this.sessions.findOneById(sessionId);
+          if (current?.statusChange?.id !== operation.id) {
+            throw new ConflictException(`Status change for session ${sessionId} was superseded`);
+          }
+          const list = StatusList.decompressStatusList(record.encodedList, record.bits);
+          for (const idx of indices) {
+            if (!Number.isSafeInteger(idx) || idx < 0 || idx >= record.nextIndex) {
+              throw new NotFoundException(`Status list ${listId} has no allocated entry ${idx}`);
+            }
+            list.setStatus(idx, value);
+          }
+          record.encodedList = list.compressStatusList();
+        }),
+      );
+    }
+    await this.sessions.mutate(sessionId, (current) => {
+      if (current.statusChange?.id !== operation.id) {
+        throw new ConflictException(`Status change for session ${sessionId} was superseded`);
+      }
+      current.statusChange.pending = false;
+      current.revokedAt = value === STATUS_REVOKED ? new Date(operation.requestedAt) : undefined;
+      current.revokedReason = value === STATUS_REVOKED ? operation.reason : undefined;
+    });
+    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
   }
 
   /**
@@ -304,19 +294,14 @@ export class Oid4vcStatusService implements OnModuleInit {
    * so it must derive everything it returns from that record and have no
    * effect outside it.
    */
-  private async mutate<T>(
-    listId: string,
-    createIfMissing: boolean,
-    apply: (record: StatusListRecord) => T,
-  ): Promise<T> {
+  private async mutate<T>(listId: string, apply: (record: StatusListRecord) => T | Promise<T>): Promise<T> {
     for (let attempt = 1; attempt <= CAS_ATTEMPTS; attempt++) {
       const { record, version } = await this.repo.load(listId);
-      if (!record && !createIfMissing) {
+      if (!record) {
         throw new NotFoundException(`Status list ${listId} does not exist`);
       }
-      const target = record ?? this.emptyList(listId);
-      const result = apply(target);
-      if (await this.repo.saveIfUnchanged(target, version)) return result;
+      const result = await apply(record);
+      if (await this.repo.saveIfUnchanged(record, version)) return result;
       this.logger.warn(`Status list ${listId} changed mid-write; retrying (attempt ${attempt}/${CAS_ATTEMPTS})`);
     }
     throw new ServiceUnavailableException(
@@ -325,12 +310,13 @@ export class Oid4vcStatusService implements OnModuleInit {
   }
 
   private async requireList(listId: string): Promise<StatusListRecord> {
+    if (!isUUID(listId, '4')) throw new NotFoundException('Unknown status list');
     const { record } = await this.repo.load(listId);
     if (!record) throw new NotFoundException(`Status list ${listId} does not exist`);
     return record;
   }
 
-  /** An unsaved, all-valid list. Persisted by the first {@link mutate} that needs it. */
+  /** An unsaved, all-valid list. The first allocation persists it using CAS. */
   private emptyList(listId: string): StatusListRecord {
     this.logger.log(`Creating status list ${listId} with ${STATUS_LIST_SIZE} entries`);
     const empty = new StatusList(new Array(STATUS_LIST_SIZE).fill(STATUS_VALID), 1);

@@ -80,6 +80,15 @@ export class Oid4vcIssuanceSession {
    */
   statusEntries?: StatusListEntry[];
 
+  /** Durable intent. Pending operations can be resumed with the same revoke/reactivate request. */
+  statusChange?: {
+    id: string;
+    value: 0 | 1;
+    pending: boolean;
+    requestedAt: string;
+    reason?: string;
+  };
+
   /** When the credential was revoked, if it has been. */
   revokedAt?: Date;
 

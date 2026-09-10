@@ -122,13 +122,13 @@ describe('Credential status list (e2e)', () => {
 
   /** Allocates an entry, records the session, and issues a credential against it. */
   async function issueCredential(sessionId: string): Promise<string> {
-    const entry = await statusService.allocate();
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     await sessions.save({
       id: sessionId,
-      statusEntries: [{ listId: entry.listId, idx: entry.idx }],
+      credoIssuanceSessionId: sessionId,
     } as Partial<Oid4vcIssuanceSession>);
 
+    const entry = await statusService.allocateForSession(sessionId);
     return sdjwt.issue({
       iss: ISSUER_DID,
       vct: 'device-attestation-credential',
@@ -146,7 +146,10 @@ describe('Credential status list (e2e)', () => {
     await expect(sdjwt.verify(credentialB)).resolves.toBeDefined();
 
     // 2. The list is served publicly, with the media type the fetcher requires.
-    const served = await request(app.getHttpServer()).get('/v1/credential/status/list/default').expect(200);
+    const session = await app.get(Oid4vcIssuanceSessionRepository).findOneById('session-a');
+    const served = await request(app.getHttpServer())
+      .get(`/v1/credential/status/list/${session!.statusEntries![0].listId}`)
+      .expect(200);
     expect(served.headers['content-type']).toBe('application/statuslist+jwt');
     expect(served.headers['cache-control']).toBe('no-store');
 
@@ -172,6 +175,45 @@ describe('Credential status list (e2e)', () => {
       .expect(201);
 
     await expect(sdjwt.verify(credentialA)).resolves.toBeDefined();
+  });
+
+  it('keeps both UUID URLs verifiable and revocable after rollover', async () => {
+    const oldCredential = await issueCredential('rollover-session');
+    const sessions = app.get(Oid4vcIssuanceSessionRepository);
+    const lists = app.get(StatusListRepository);
+    const before = await sessions.findOneById('rollover-session');
+    const oldId = before!.statusEntries![0].listId;
+    const { record, version } = await lists.load(oldId);
+    record!.nextIndex = record!.size; // Boundary fixture; allocation logic remains real.
+    expect(await lists.saveIfUnchanged(record!, version)).toBe(true);
+    const newCredential = await issueCredential('rollover-session');
+    const after = await sessions.findOneById('rollover-session');
+    expect(after!.statusEntries).toHaveLength(2);
+    expect(after!.statusEntries![1].listId).not.toBe(oldId);
+    await expect(sdjwt.verify(oldCredential)).resolves.toBeDefined();
+    await expect(sdjwt.verify(newCredential)).resolves.toBeDefined();
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ sessionId: 'rollover-session' })
+      .expect(201);
+    await expect(sdjwt.verify(oldCredential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(newCredential)).rejects.toThrow('Status is not valid');
+  });
+
+  it('publishes another instance’s revocation through an already-warm HTTP cache', async () => {
+    const credential = await issueCredential('remote-session');
+    await expect(sdjwt.verify(credential)).resolves.toBeDefined();
+    const other = new Oid4vcStatusService(
+      app.get(Oid4vcConfig),
+      app.get(StatusListRepository),
+      app.get(Oid4vcIssuanceSessionRepository),
+      app.get(Oid4vcAgentProvider),
+      app.get(VaultService),
+      app.get(AlgoVaultTokenProvider),
+    );
+    await other.revokeBySessionId('remote-session');
+    await expect(sdjwt.verify(credential)).rejects.toThrow('Status is not valid');
+    await request(app.getHttpServer()).get('/v1/credential/status/list/default').expect(404);
   });
 
   it('refuses to revoke a session that never redeemed an offer', async () => {

@@ -68,12 +68,16 @@ describe('Oid4vcConfig', () => {
     it('derives status list URIs from the base URL, prefix included', async () => {
       const cfg = await build({});
       expect(cfg.statusListBaseUrl).toBe('http://localhost:3000/v1/credential/status/list');
-      expect(cfg.statusListUri('default')).toBe('http://localhost:3000/v1/credential/status/list/default');
+      expect(cfg.statusListUri('f538cd53-79e5-4877-b6c2-51c09c51f8ab')).toBe(
+        'http://localhost:3000/v1/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab',
+      );
     });
 
     it('tracks a non-default base URL', async () => {
       const cfg = await build({ OID4VC_BASE_URL: 'https://api.example.com/v1/' });
-      expect(cfg.statusListUri('default')).toBe('https://api.example.com/v1/credential/status/list/default');
+      expect(cfg.statusListUri('f538cd53-79e5-4877-b6c2-51c09c51f8ab')).toBe(
+        'https://api.example.com/v1/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab',
+      );
     });
 
     it('warns when the base URL carries no path, because the API is served behind a global prefix', async () => {
@@ -82,7 +86,9 @@ describe('Oid4vcConfig', () => {
       try {
         // Still returns a URL — the warning exists so a misconfiguration is
         // visible before it is baked into issued credentials, not to block boot.
-        expect(cfg.statusListUri('default')).toBe('https://api.example.com/credential/status/list/default');
+        expect(cfg.statusListUri('f538cd53-79e5-4877-b6c2-51c09c51f8ab')).toBe(
+          'https://api.example.com/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab',
+        );
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('has no path segment'));
       } finally {
         warn.mockRestore();

@@ -61,10 +61,16 @@ as controller).
 - Individual credentials are revocable through an IETF Token Status List
   served at `/v1/credential/status/list/:listId` and signed by the same
   manager key as the credentials themselves. A revoked credential fails
-  verification for **every** verifier, including third parties, because the
-  pointer travels inside the credential. Credentials issued before this
-  mechanism existed carry no `status` claim and are permanently
-  unrevocable — reissue rather than assume otherwise.
+  verification when the verifier reads current status. Internal checks
+  read Vault on each fetch, including when a signed token is cached.
+  Third-party token caching can delay enforcement. Fresh installations
+  require an issuer UUID status reference for device-attestation wallet
+  authentication; status-free credentials are rejected.
+- A session's revocation intent blocks further issuance before its bits
+  change. Partial failures remain pending and are resumed by repeating the
+  same request. A successful response means all recorded entries were
+  updated and completion was persisted. In-flight verification that read
+  status before a revocation committed may still complete successfully.
 - The governance layer ("is this issuer in the registry?") is
   intentionally **pluggable** and currently **not wired in**. A future
   integration — e.g. the [CREDEBL](https://credebl.id/) ecosystem

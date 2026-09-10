@@ -19,8 +19,12 @@ describe('Oid4vcStatusController', () => {
     getStatusListJwt = jest.fn(async () => TOKEN);
     // Arrays: a session can hold an entry per credential it issued, and all
     // of them are flipped together.
-    revokeBySessionId = jest.fn(async () => [{ listId: 'default', idx: 7, uri: 'https://host/v1/x' }]);
-    reactivateBySessionId = jest.fn(async () => [{ listId: 'default', idx: 7, uri: 'https://host/v1/x' }]);
+    revokeBySessionId = jest.fn(async () => [
+      { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
+    ]);
+    reactivateBySessionId = jest.fn(async () => [
+      { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
+    ]);
 
     const moduleRef = await Test.createTestingModule({
       controllers: [Oid4vcStatusController],
@@ -44,7 +48,9 @@ describe('Oid4vcStatusController', () => {
 
   describe('GET list/:listId', () => {
     it('serves the token as application/statuslist+jwt and forbids caching', async () => {
-      const response = await request(app.getHttpServer()).get('/credential/status/list/default').expect(200);
+      const response = await request(app.getHttpServer())
+        .get('/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab')
+        .expect(200);
 
       // Exact match, no `; charset=utf-8` suffix. `@sd-jwt`'s default fetcher
       // compares this header with strict equality, and Express would append a
@@ -53,7 +59,7 @@ describe('Oid4vcStatusController', () => {
       // A cached list is a window in which a revoked credential still verifies.
       expect(response.headers['cache-control']).toBe('no-store');
       expect(response.text).toBe(TOKEN);
-      expect(getStatusListJwt).toHaveBeenCalledWith('default');
+      expect(getStatusListJwt).toHaveBeenCalledWith('f538cd53-79e5-4877-b6c2-51c09c51f8ab');
     });
 
     it('is public — verifiers dereference it without credentials', () => {
