@@ -8,6 +8,24 @@ import { UserInfoDto } from './user-info.dto';
 export type KeyType = 'ed25519' | 'ecdsa-p256';
 export type HashAlgorithm = 'sha2-256' | 'sha2-512';
 
+/**
+ * A Falcon-1024 key as held by the `algorand-pq` secrets engine.
+ *
+ * `salt` is not decoration: the Algorand PQ address digest is
+ * `SHA512-256("PQA" || scheme || salt || pk)`, and one public key can
+ * control up to 256 addresses, so the salt has to travel with the key
+ * for the address to be reproducible.
+ */
+export type PqKey = {
+  scheme: string;
+  salt: number;
+  publicKey: Buffer;
+  address: string;
+};
+
+/** The legacy shape returned by `getKeys`: public keys are base64 encoded. */
+export type TransitUserKey = Pick<UserInfoDto, 'user_id' | 'public_address'>;
+
 @Injectable()
 export class VaultService {
   constructor(
@@ -203,6 +221,118 @@ export class VaultService {
   }
 
   // ────────────────────────────────────────────────────────────────
+  // Algorand PQ (Falcon-1024) secrets engine
+  //
+  // Backed by the custom `algorand-pq` plugin in `vault/plugin`,
+  // whose API deliberately mirrors transit so these wrappers keep the
+  // same shape as their ed25519 siblings above. Two differences are
+  // real and intentional:
+  //
+  //   - Signatures come back raw. There is no `vault:v1:` envelope to
+  //     split, so `decodeVaultSignature` (which asserts a 64-byte
+  //     ed25519 length) must never see one of these.
+  //   - A missing key is an answer, not an error. The account-type
+  //     probe reads a 404 from `pqGetKey` as "not a PQ account", so
+  //     that method returns `undefined` where transit's `getKey`
+  //     throws.
+  //
+  // The mount defaults to `pawn/pq-users` (what `development-init.ts`
+  // mounts) and can be overridden with `VAULT_PQ_USERS_PATH`.
+  // ────────────────────────────────────────────────────────────────
+
+  private getPqMount(): string {
+    return this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users';
+  }
+
+  /**
+   * Single request path for the PQ engine. Returns the inner `data`
+   * object, or `undefined` when Vault answers 404 — callers that
+   * cannot treat a miss as an answer turn that back into a throw.
+   */
+  private async pqRequest(
+    method: 'GET' | 'POST' | 'LIST',
+    path: string,
+    token: string,
+    body?: Record<string, unknown>,
+  ): Promise<any | undefined> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+
+    try {
+      const result: AxiosResponse = await this.httpService.axiosRef.request({
+        url: `${baseUrl}/v1/${this.getPqMount()}/${path}`,
+        method,
+        ...(body ? { data: body } : {}),
+        headers: {
+          'X-Vault-Token': token,
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+        },
+      });
+      return result.data.data;
+    } catch (error) {
+      const status = error?.response?.status ?? 500;
+      if (status === 404) return undefined;
+      throw new HttpErrorByCode[status]('VaultException');
+    }
+  }
+
+  private static toPqKey(data: any): PqKey {
+    return {
+      scheme: data.scheme,
+      salt: data.salt,
+      publicKey: Buffer.from(data.public_key, 'base64'),
+      address: data.address,
+    };
+  }
+
+  /**
+   * Idempotently create a Falcon-1024 key. Re-creating an existing
+   * key returns the key that is already stored rather than rotating
+   * it, matching the transit engine's `allow_deletion: false` usage.
+   */
+  async pqCreateKey(keyName: string, token: string): Promise<PqKey> {
+    const data = await this.pqRequest('POST', `keys/${keyName}`, token, {});
+    if (!data) throw new HttpErrorByCode[404]('VaultException');
+
+    return VaultService.toPqKey(data);
+  }
+
+  /**
+   * Read a Falcon-1024 key, or `undefined` when the key does not
+   * exist. The miss is load-bearing: it is how a caller learns that a
+   * `user_id` is not a PQ account.
+   */
+  async pqGetKey(keyName: string, token: string): Promise<PqKey | undefined> {
+    const data = await this.pqRequest('GET', `keys/${keyName}`, token);
+
+    return data ? VaultService.toPqKey(data) : undefined;
+  }
+
+  /**
+   * Falcon-sign raw bytes. As with transit, the caller owns any
+   * domain prefix (`"TX"` for transactions) — this signs exactly the
+   * bytes it is given and returns the compressed signature.
+   */
+  async pqSign(keyName: string, data: Uint8Array, token: string): Promise<Buffer> {
+    const result = await this.pqRequest('POST', `sign/${keyName}`, token, {
+      input: Buffer.from(data).toString('base64'),
+    });
+    if (!result) throw new HttpErrorByCode[404]('VaultException');
+
+    return Buffer.from(result.signature, 'base64');
+  }
+
+  /**
+   * List PQ key names. An unmounted or empty engine lists as `[]` so
+   * callers can merge this with the transit listing unconditionally.
+   */
+  async pqListKeys(token: string): Promise<string[]> {
+    const data = await this.pqRequest('LIST', 'keys', token);
+
+    return data?.keys ?? [];
+  }
+
+  // ────────────────────────────────────────────────────────────────
   // KV v2 helpers
   //
   // Small, generic wrappers around Vault's KV-v2 secret engine so
@@ -330,10 +460,13 @@ export class VaultService {
    * Expecting a manager token to retrieve all keys from the vault and return an array of user objects including
    * it's user id and public address.
    *
+   * Lists both user mounts, since a `user_id` lives in exactly one of
+   * them and the caller should not have to know which.
+   *
    * @param token - manager token
    * @returns
    */
-  async getKeys(token: string): Promise<UserInfoDto[]> {
+  async getKeys(token: string): Promise<TransitUserKey[]> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
@@ -348,21 +481,41 @@ export class VaultService {
       });
     } catch (error) {
       const status = error?.response?.status ?? 500;
-      throw new HttpErrorByCode[status]('VaultException');
+      // Vault answers LIST on an empty mount with a 404. Treating that
+      // as "no ed25519 users" rather than an error matters now that a
+      // deployment can hold PQ users and no transit ones at all.
+      if (status !== 404) throw new HttpErrorByCode[status]('VaultException');
     }
 
-    const users: string[] = result.data.data.keys;
+    const users: string[] = result?.data?.data?.keys ?? [];
 
-    // for each add the public address to an array of user object (id, public address)
-    const usersObjs: UserInfoDto[] = [];
+    // Preserve the original service contract: despite the historical field
+    // name, `public_address` contains the transit public key in base64.
+    const usersObjs: TransitUserKey[] = [];
     for (let i = 0; i < users.length; i++) {
-      const userObj = {
-        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'), // TODO: rename public_address that is actually the public key in base64 format
+      const userObj: TransitUserKey = {
+        public_address: (await this.getKey(users[i], transitKeyPath, token)).toString('base64'),
         user_id: users[i],
       };
       usersObjs.push(userObj);
     }
 
     return usersObjs;
+  }
+
+  /**
+   * Return normalized PQ users separately from the legacy transit listing.
+   * WalletService combines the two only after the caller has passed the
+   * original transit LIST authorization check.
+   */
+  async getPqUsers(token: string): Promise<UserInfoDto[]> {
+    const users: UserInfoDto[] = [];
+    for (const name of await this.pqListKeys(token)) {
+      const key = await this.pqGetKey(name, token);
+      if (!key) continue; // deleted between LIST and read
+      users.push({ user_id: name, public_address: key.address, account_type: 'falcon1024' });
+    }
+
+    return users;
   }
 }

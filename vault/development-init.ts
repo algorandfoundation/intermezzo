@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import axios from 'axios';
 import assert from 'assert';
@@ -10,6 +11,14 @@ const VAULT_UNSEAL_ENDPOINT = '/v1/sys/unseal';
 const VAULT_MOUNTS_ENDPOINT = '/v1/sys/mounts';
 const VAULT_TRANSIT_USERS_PATH = 'pawn/users';
 const VAULT_TRANSIT_MANAGERS_PATH = 'pawn/managers';
+// Custom secrets engine for Algorand post-quantum (Falcon-1024) accounts —
+// Vault has no native Falcon support. Built by scripts/build_vault_plugin.sh
+// into the `plugin_directory` the vault container bind-mounts.
+const VAULT_PQ_PLUGIN_NAME = 'algorand-pq';
+const VAULT_PQ_PLUGIN_BINARY = 'vault-plugin-algorand-pq';
+const VAULT_PQ_PLUGIN_FILE = `volumes/vault/plugins/${VAULT_PQ_PLUGIN_BINARY}`;
+const VAULT_PQ_PLUGIN_VERSION = fs.readFileSync('vault/plugin/VERSION', 'utf8').trim();
+const VAULT_PQ_USERS_PATH = 'pawn/pq-users';
 const VAULT_MANAGER_KEY = 'manager';
 const VAULT_SEAL_KEYS_FILE = 'vault-seal-keys.json';
 
@@ -192,6 +201,73 @@ async function initKvSecretEngine(token: string) {
   }
 }
 
+// Idempotently register the Algorand PQ plugin in Vault's plugin catalog and
+// mount it at `pawn/pq-users`. Vault verifies the binary against the registered
+// sha256, so the catalog entry is re-upserted (and the plugin reloaded) on every
+// run — a rebuilt binary is picked up without resetting the dev vault.
+async function registerAndMountPqPlugin(token: string) {
+  if (!fs.existsSync(VAULT_PQ_PLUGIN_FILE)) {
+    console.warn(
+      `SKIP: PQ plugin binary not found at '${VAULT_PQ_PLUGIN_FILE}'. ` +
+        `Run './scripts/build_vault_plugin.sh' then re-run this script to enable ${VAULT_PQ_USERS_PATH}.`,
+    );
+    return;
+  }
+
+  const headers = { 'X-Vault-Token': token };
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(VAULT_PQ_PLUGIN_FILE)).digest();
+  const sha256 = digest.toString('hex');
+  const expectedSha256Values = new Set([sha256, digest.toString('base64')]);
+
+  await axios.put(
+    `${VAULT_BASE_URL}/v1/sys/plugins/catalog/secret/${VAULT_PQ_PLUGIN_NAME}`,
+    { sha256, command: VAULT_PQ_PLUGIN_BINARY, version: VAULT_PQ_PLUGIN_VERSION },
+    { headers },
+  );
+  console.log(`Registered plugin '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} (sha256 ${sha256})`);
+
+  try {
+    await axios.post(
+      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`,
+      { type: VAULT_PQ_PLUGIN_NAME, plugin_version: VAULT_PQ_PLUGIN_VERSION },
+      { headers },
+    );
+    console.log(`Mounted '${VAULT_PQ_PLUGIN_NAME}' at ${VAULT_PQ_USERS_PATH}`);
+  } catch (error: any) {
+    const status = error?.response?.status;
+    const message: string = error?.response?.data?.errors?.[0] ?? '';
+    if (status !== 400 || !message.includes('path is already in use')) {
+      console.error(`Failed to mount PQ secrets engine (${status}):`, error?.response?.data?.errors ?? error?.message);
+      throw error;
+    }
+    console.log(`PASS: PQ secrets engine already mounted at ${VAULT_PQ_USERS_PATH}/`);
+    await axios.post(
+      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}/tune`,
+      { plugin_version: VAULT_PQ_PLUGIN_VERSION },
+      { headers },
+    );
+    await axios.post(`${VAULT_BASE_URL}/v1/sys/plugins/reload/backend`, { plugin: VAULT_PQ_PLUGIN_NAME }, { headers });
+    console.log(`Reloaded plugin '${VAULT_PQ_PLUGIN_NAME}'`);
+  }
+
+  const catalogResponse = await axios.get(`${VAULT_BASE_URL}/v1/sys/plugins/catalog/secret/${VAULT_PQ_PLUGIN_NAME}`, {
+    headers,
+    params: { version: VAULT_PQ_PLUGIN_VERSION },
+  });
+  const catalog = catalogResponse.data?.data ?? catalogResponse.data;
+  assert.strictEqual(catalog.version, VAULT_PQ_PLUGIN_VERSION);
+  assert(expectedSha256Values.has(catalog.sha256), 'Vault catalog SHA does not match the plugin binary');
+
+  const mountResponse = await axios.get(`${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`, {
+    headers,
+  });
+  const mount = mountResponse.data?.data ?? mountResponse.data;
+  assert.strictEqual(mount.plugin_version, VAULT_PQ_PLUGIN_VERSION);
+  assert.strictEqual(mount.running_plugin_version, VAULT_PQ_PLUGIN_VERSION);
+  assert(expectedSha256Values.has(mount.running_sha256), 'Running plugin SHA does not match the plugin binary');
+  console.log(`PASS: '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} is registered and running`);
+}
+
 // Function to initialize manager transit engine
 async function initManagersTransitEngine(token: string) {
   try {
@@ -245,6 +321,11 @@ async function createACLPolicies(token: string) {
           [`${VAULT_TRANSIT_USERS_PATH}/keys/+/+`]: {
             capabilities: ['deny'],
           },
+          // PQ (Falcon-1024) accounts — custom secrets engine. It has no
+          // sub-paths, so no `keys/+/+` deny is needed.
+          [`${VAULT_PQ_USERS_PATH}/keys/*`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
         },
       },
       [MANAGERS_POLICY_NAME]: {
@@ -280,6 +361,18 @@ async function createACLPolicies(token: string) {
           },
           // 4 allow /sign path
           [`${VAULT_TRANSIT_USERS_PATH}/sign/*`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
+
+          // PQ (Falcon-1024) user accounts — custom secrets engine, same
+          // create/read/list/sign shape as the transit user paths above.
+          [`${VAULT_PQ_USERS_PATH}/keys/*`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
+          [`${VAULT_PQ_USERS_PATH}/keys`]: {
+            capabilities: ['list'],
+          },
+          [`${VAULT_PQ_USERS_PATH}/sign/*`]: {
             capabilities: ['create', 'read', 'update'],
           },
 
@@ -626,6 +719,7 @@ async function main() {
   // KV-v2 is mounted here so existing dev vaults (initialized before
   // this script learned about KV) pick it up without a full reset.
   await initKvSecretEngine(sealKeys.root_token);
+  await registerAndMountPqPlugin(sealKeys.root_token);
   await createACLPolicies(sealKeys.root_token);
   await enableAppRoleIfNotEnabledAuth(sealKeys.root_token);
   await getOrCreateAppRoles(sealKeys.root_token);

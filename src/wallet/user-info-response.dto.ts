@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString } from 'class-validator';
+import { IsIn, IsString } from 'class-validator';
+import { AccountType } from '../vault/user-info.dto';
 
 export class UserInfoResponseDto {
   @IsString()
@@ -23,4 +24,12 @@ export class UserInfoResponseDto {
     description: 'The balance of Algorand held by the User in microAlgos',
   })
   algoBalance: string;
+
+  @IsIn(['ed25519', 'falcon1024'])
+  @ApiProperty({
+    enum: ['ed25519', 'falcon1024'],
+    example: 'ed25519',
+    description: 'The signature scheme backing the account. Fixed at creation time.',
+  })
+  account_type: AccountType;
 }
