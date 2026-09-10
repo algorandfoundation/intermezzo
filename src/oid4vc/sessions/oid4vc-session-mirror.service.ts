@@ -44,11 +44,11 @@ export class Oid4vcSessionMirrorService implements OnModuleInit {
   private async onIssuanceStateChanged(event: OpenId4VcIssuanceSessionStateChangedEvent): Promise<void> {
     const { issuanceSession, previousState } = event.payload;
     try {
-      const result = await this.issuanceRepo.update(
-        { credoIssuanceSessionId: issuanceSession.id },
-        { state: issuanceSession.state },
-      );
-      if (result.affected) {
+      const session = await this.issuanceRepo.findOneBy({ credoIssuanceSessionId: issuanceSession.id });
+      if (session) {
+        await this.issuanceRepo.mutate(session.id, (current) => {
+          current.state = issuanceSession.state;
+        });
         this.logger.debug(`Issuance session ${issuanceSession.id}: ${previousState ?? '∅'} → ${issuanceSession.state}`);
       }
     } catch (e) {

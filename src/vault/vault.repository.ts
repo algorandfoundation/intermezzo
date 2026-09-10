@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import * as crypto from 'crypto';
-import { VaultService } from './vault.service';
+import { VaultCasConflictError, VaultService } from './vault.service';
 import { AlgoVaultTokenProvider } from '../oid4vc/algo/algo-vault-token.provider';
 
 export interface BaseEntity {
@@ -63,6 +63,44 @@ export class VaultRepository<T extends BaseEntity> {
     }
 
     return data;
+  }
+
+  /**
+   * Read a record together with the Vault KV version that
+   * {@link saveIfUnchanged} needs.
+   *
+   * A record that does not exist yet reports version `0`, which is what a
+   * compare-and-set write uses to mean "only if nobody has created it", so
+   * creating and updating a record go through the same pair of calls.
+   */
+  async load(id: string): Promise<{ record: T | null; version: number }> {
+    const token = await this.tokenProvider.getToken();
+    const { data, version } = await this.vault.kvReadVersioned<T>(`${this.folder}/records/${id}`, token);
+    if (!data) return { record: null, version };
+    return { record: this.mapDates(data), version };
+  }
+
+  /**
+   * Write `record` only if the stored entry is still at `version`, and report
+   * whether that held.
+   *
+   * `false` means another process committed first and the caller's copy is
+   * stale: re-read, re-apply, try again. Ordinary {@link save} is
+   * last-writer-wins and must not be used for a status list, where losing a
+   * write can lose an allocation or revocation. This does not update secondary
+   * indexes: indexed fields must remain unchanged on conditional updates.
+   */
+  async saveIfUnchanged(record: T, version: number): Promise<boolean> {
+    const token = await this.tokenProvider.getToken();
+    const now = new Date();
+    const data = { ...record, createdAt: record.createdAt ?? now, updatedAt: now };
+    try {
+      await this.vault.kvWrite(`${this.folder}/records/${record.id}`, data as never, token, version);
+      return true;
+    } catch (error) {
+      if (error instanceof VaultCasConflictError) return false;
+      throw error;
+    }
   }
 
   async findOneById(id: string): Promise<T | null> {

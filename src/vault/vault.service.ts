@@ -8,6 +8,17 @@ import { UserInfoDto } from './user-info.dto';
 export type KeyType = 'ed25519' | 'ecdsa-p256';
 export type HashAlgorithm = 'sha2-256' | 'sha2-512';
 
+/**
+ * Thrown when a compare-and-set write loses to a concurrent writer. Callers
+ * are expected to re-read and retry rather than force the write through.
+ */
+export class VaultCasConflictError extends Error {
+  constructor(readonly path: string) {
+    super(`Vault KV entry ${path} was modified since it was read`);
+    this.name = 'VaultCasConflictError';
+  }
+}
+
 @Injectable()
 export class VaultService {
   constructor(
@@ -229,6 +240,22 @@ export class VaultService {
     path: string,
     token: string,
   ): Promise<T | undefined> {
+    return (await this.kvReadVersioned<T>(path, token)).data;
+  }
+
+  /**
+   * Read a KV-v2 entry along with the version it is currently at, which is
+   * what a compare-and-set write needs in order to prove that nothing
+   * changed in between.
+   *
+   * A missing entry reports version `0` — the same value `cas` uses to mean
+   * "only write this if it does not exist yet" — so a caller can create and
+   * update through one code path.
+   */
+  async kvReadVersioned<T extends Record<string, unknown> = Record<string, unknown>>(
+    path: string,
+    token: string,
+  ): Promise<{ data?: T; version: number }> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
     const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
@@ -240,38 +267,48 @@ export class VaultService {
           ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
         },
       });
-      const data = result.data?.data?.data;
-      // KV-v2 returns `data: null` for soft-deleted versions.
-      return (data ?? undefined) as T | undefined;
+      const body = result.data?.data;
+      // KV-v2 returns `data: null` for soft-deleted versions. The version
+      // still counts: a `cas` write has to follow on from it, not from 0.
+      return { data: (body?.data ?? undefined) as T | undefined, version: body?.metadata?.version ?? 0 };
     } catch (error) {
       const status = error?.response?.status;
-      if (status === 404) return undefined;
+      if (status === 404) return { version: 0 };
       throw new HttpErrorByCode[status ?? 500]('VaultException');
     }
   }
 
   /**
    * Write a KV-v2 entry at `path` (creates a new version on update).
+   *
+   * Pass `cas` (from {@link kvReadVersioned}) to make the write conditional
+   * on the entry still being at that version — Vault rejects it otherwise
+   * and this throws {@link VaultCasConflictError}. Without `cas` the write
+   * is last-writer-wins, which is fine for entries only one caller ever
+   * touches and wrong for any read-modify-write.
    */
-  async kvWrite(path: string, data: Record<string, unknown>, token: string): Promise<void> {
+  async kvWrite(path: string, data: Record<string, unknown>, token: string, cas?: number): Promise<void> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
     const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
     const url = `${baseUrl}/v1/${mount}/data/${path}`;
     try {
-      await this.httpService.axiosRef.post(
-        url,
-        { data },
-        {
-          headers: {
-            'X-Vault-Token': token,
-            'Content-Type': 'application/json',
-            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
-          },
+      await this.httpService.axiosRef.post(url, cas === undefined ? { data } : { data, options: { cas } }, {
+        headers: {
+          'X-Vault-Token': token,
+          'Content-Type': 'application/json',
+          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
         },
-      );
+      });
     } catch (error) {
       const status = error?.response?.status ?? 500;
+      // Vault answers a lost compare-and-set with a 400 like any other bad
+      // request, so match on the message rather than treating every 400 on a
+      // conditional write as a conflict.
+      const errors: string[] = error?.response?.data?.errors ?? [];
+      if (cas !== undefined && status === 400 && errors.some((message) => message.includes('check-and-set'))) {
+        throw new VaultCasConflictError(path);
+      }
       throw new HttpErrorByCode[status]('VaultException');
     }
   }
