@@ -237,7 +237,7 @@ async function registerAndMountPqPlugin(token: string) {
     const status = error?.response?.status;
     const message: string = error?.response?.data?.errors?.[0] ?? '';
     if (status !== 400 || !message.includes('path is already in use')) {
-      console.error('Failed to mount PQ secrets engine:', error);
+      console.error(`Failed to mount PQ secrets engine (${status}):`, error?.response?.data?.errors ?? error?.message);
       throw error;
     }
     console.log(`PASS: PQ secrets engine already mounted at ${VAULT_PQ_USERS_PATH}/`);
