@@ -104,3 +104,9 @@ jobs:
         run: yarn
       - name: E2E tests
         run: yarn test:e2e
+
+      # Scoped to failures so passing runs stay quiet: the Vault-side reason a
+      # plugin mount or a signing call failed is only ever in the server log.
+      - name: Vault logs
+        if: failure()
+        run: docker compose logs --no-color vault
