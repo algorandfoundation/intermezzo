@@ -17,6 +17,15 @@ services:
       VAULT_ADDR: http://127.0.0.1:8200
     cap_add:
       - IPC_LOCK
+    # Vault spawns plugins with mlock enabled, and the plugin binary has no
+    # cap_ipc_lock of its own (setcap does not survive the bind mount), so it
+    # is bounded by RLIMIT_MEMLOCK. Docker Desktop defaults that to unlimited;
+    # dockerd on Linux (GitHub runners) defaults to 8 MiB, which the ~15 MB
+    # static plugin exceeds. It then dies with "cannot allocate memory" before
+    # the go-plugin handshake and Vault only reports the misleading "not
+    # compiled for this architecture" error.
+    ulimits:
+      memlock: -1
     command: server
 
   pawn:
