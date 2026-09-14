@@ -10,6 +10,7 @@ import * as algosdk from 'algosdk';
 
 const APP_BASE_URL = 'http://localhost:3000/v1';
 const VAULT_BASE_URL = 'http://localhost:8200';
+const VAULT_TRANSIT_USERS_PATH = 'pawn/users';
 const VAULT_PQ_USERS_PATH = 'pawn/pq-users';
 
 // Load role and secret information from JSON files
@@ -252,6 +253,31 @@ describe('PQ accounts E2E', () => {
       await expect(createUser(accessToken, { user_id: pqUser, account_type: 'ed25519' })).rejects.toMatchObject({
         response: { status: 409 },
       });
+    });
+
+    it('atomically creates only one account type for concurrent requests', async () => {
+      const { vaultToken, accessToken } = await managerTokens();
+      const userId = randomBytes(16).toString('hex');
+      const created = await Promise.allSettled([
+        createUser(accessToken, { user_id: userId, account_type: 'ed25519' }),
+        createUser(accessToken, { user_id: userId, account_type: 'falcon1024' }),
+      ]);
+
+      expect(created.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(created.filter((result) => result.status === 'rejected')).toEqual([
+        expect.objectContaining({
+          reason: expect.objectContaining({ response: expect.objectContaining({ status: 409 }) }),
+        }),
+      ]);
+
+      const stored = await Promise.allSettled(
+        [VAULT_TRANSIT_USERS_PATH, VAULT_PQ_USERS_PATH].map((mount) =>
+          axios.get(`${VAULT_BASE_URL}/v1/${mount}/keys/${userId}`, {
+            headers: { 'X-Vault-Token': vaultToken },
+          }),
+        ),
+      );
+      expect(stored.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     });
 
     it('(FAIL) Rejects an unknown account_type', async () => {

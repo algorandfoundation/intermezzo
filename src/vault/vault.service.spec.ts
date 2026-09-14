@@ -356,6 +356,41 @@ describe('VaultService', () => {
     });
   });
 
+  describe('canCreateUserKey', () => {
+    const baseUrl = 'http://vault';
+    const path = 'pawn/pq-users/keys/pq-user';
+
+    beforeEach(() => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        return undefined;
+      });
+    });
+
+    it('checks the exact target path', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: { [path]: ['create', 'update'] } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBe(true);
+      expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+        `${baseUrl}/v1/sys/capabilities-self`,
+        { paths: [path] },
+        { headers: { 'X-Vault-Token': 'token' } },
+      );
+    });
+
+    it('returns false when Vault denies the target path', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: { [path]: ['deny'] } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBe(false);
+    });
+
+    it('skips the preflight when capabilities-self is unavailable', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBeUndefined();
+    });
+  });
+
   describe('kv helpers', () => {
     const baseUrl = 'http://vault';
     const defaultMount = 'secret';
@@ -467,6 +502,44 @@ describe('VaultService', () => {
         (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
 
         await expect(vaultService.kvWrite('foo', { x: 1 }, 'token')).rejects.toThrow(HttpErrorByCode[403]);
+      });
+    });
+
+    describe('kvCreate', () => {
+      it('uses CAS zero and reports whether the claim was created', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: {} });
+        const claim = { schemaVersion: 1, userId: 'alice', accountType: 'ed25519' };
+
+        await expect(vaultService.kvCreate('intermezzo/account-types/hash', claim, 'token')).resolves.toBe(true);
+        expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/data/intermezzo/account-types/hash`,
+          { data: claim, options: { cas: 0 } },
+          {
+            headers: {
+              'X-Vault-Token': 'token',
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+      });
+
+      it('returns false only for a CAS conflict', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['check-and-set parameter did not match the current version'] } },
+        });
+
+        await expect(vaultService.kvCreate('claim', { x: 1 }, 'token')).resolves.toBe(false);
+      });
+
+      it('preserves unrelated Vault errors', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['expected a map'] } },
+        });
+
+        await expect(vaultService.kvCreate('claim', { x: 1 }, 'token')).rejects.toThrow(HttpErrorByCode[400]);
       });
     });
 

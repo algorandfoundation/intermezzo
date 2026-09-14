@@ -15,6 +15,8 @@ import { Address } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction, encodeSignedTransaction } from '@algorandfoundation/algokit-utils/transact';
 import * as algosdk from 'algosdk';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
+import { validate } from 'class-validator';
+import { CreateUserDto } from './create-user.dto';
 import {
   TruncatedAccountAssetResponse,
   TruncatedAccountResponse,
@@ -47,6 +49,8 @@ describe('WalletService', () => {
     oid4vcAgentProviderMock = createMockInstance(Oid4vcAgentProvider);
     managerTokenProviderMock = createMockInstance(ManagerVaultTokenProvider);
     managerTokenProviderMock.getToken.mockResolvedValue('service_vault_token');
+    vaultServiceMock.canCreateUserKey.mockResolvedValue(true);
+    vaultServiceMock.kvCreate.mockResolvedValue(true);
     walletService = new WalletService(
       vaultServiceMock,
       chainServiceMock,
@@ -93,6 +97,13 @@ describe('WalletService', () => {
       algoBalance: '0',
       account_type: 'ed25519',
     });
+  });
+
+  it('rejects user IDs that can alias a Vault path', async () => {
+    const dto = Object.assign(new CreateUserDto(), { user_id: 'x/../foo' });
+    await expect(validate(dto)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ property: 'user_id' })]),
+    );
   });
 
   it('\(OK) getKeys()', async () => {
@@ -206,6 +217,79 @@ describe('WalletService', () => {
         vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqKey);
 
         await expect(walletService.userCreate(userId, 'vault_token', 'ed25519')).rejects.toThrow(ConflictException);
+        expect(vaultServiceMock.transitCreateKey).not.toHaveBeenCalled();
+      });
+
+      it('does not reserve an ID when the caller cannot create the target key', async () => {
+        vaultServiceMock.canCreateUserKey.mockResolvedValueOnce(false);
+
+        await expect(walletService.userCreate(userId, 'denied-token', 'falcon1024')).rejects.toThrow(
+          ForbiddenException,
+        );
+        expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();
+        expect(vaultServiceMock.kvCreate).not.toHaveBeenCalled();
+        expect(vaultServiceMock.pqCreateKey).not.toHaveBeenCalled();
+      });
+
+      it('atomically admits one type across service instances', async () => {
+        const other = new WalletService(
+          vaultServiceMock,
+          chainServiceMock,
+          configServiceMock,
+          didServiceMock,
+          oid4vcAgentProviderMock,
+          managerTokenProviderMock,
+        );
+        let claim: Record<string, unknown> | undefined;
+        vaultServiceMock.getUserPublicKey.mockRejectedValue(new NotFoundException());
+        vaultServiceMock.pqGetKey.mockResolvedValue(undefined);
+        vaultServiceMock.kvCreate.mockImplementation(async (_path, data) => {
+          if (claim) return false;
+          claim = data;
+          return true;
+        });
+        vaultServiceMock.kvRead.mockImplementation(async () => claim);
+        vaultServiceMock.transitCreateKey.mockResolvedValue(randomBytes(32));
+        vaultServiceMock.pqCreateKey.mockResolvedValue(pqKey);
+
+        const results = await Promise.allSettled([
+          walletService.userCreate(userId, 'vault_token', 'ed25519'),
+          other.userCreate(userId, 'vault_token', 'falcon1024'),
+        ]);
+
+        expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+        expect(results.filter((result) => result.status === 'rejected')).toEqual([
+          expect.objectContaining({ reason: expect.any(ConflictException) }),
+        ]);
+        expect(
+          vaultServiceMock.transitCreateKey.mock.calls.length + vaultServiceMock.pqCreateKey.mock.calls.length,
+        ).toBe(1);
+      });
+
+      it('retries the same type after key provisioning fails', async () => {
+        const claim = { schemaVersion: 1, userId, accountType: 'ed25519' } as const;
+        vaultServiceMock.pqGetKey.mockResolvedValue(undefined);
+        vaultServiceMock.kvCreate.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+        vaultServiceMock.kvRead.mockResolvedValue(claim);
+        vaultServiceMock.transitCreateKey.mockRejectedValueOnce(new Error('provisioning failed'));
+
+        await expect(walletService.userCreate(userId, 'vault_token')).rejects.toThrow('provisioning failed');
+
+        const publicKey = randomBytes(32);
+        vaultServiceMock.transitCreateKey.mockResolvedValueOnce(publicKey);
+        await expect(walletService.userCreate(userId, 'vault_token')).resolves.toMatchObject({
+          user_id: userId,
+          account_type: 'ed25519',
+          public_address: new Address(publicKey).toString(),
+        });
+      });
+
+      it('rejects case variants that share a normalized claim key', async () => {
+        vaultServiceMock.pqGetKey.mockResolvedValue(undefined);
+        vaultServiceMock.kvCreate.mockResolvedValueOnce(false);
+        vaultServiceMock.kvRead.mockResolvedValueOnce({ schemaVersion: 1, userId: 'PQ-User', accountType: 'ed25519' });
+
+        await expect(walletService.userCreate('pq-user', 'vault_token')).rejects.toThrow(ConflictException);
         expect(vaultServiceMock.transitCreateKey).not.toHaveBeenCalled();
       });
     });

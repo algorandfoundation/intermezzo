@@ -1,4 +1,12 @@
-import { ConflictException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { AccountType } from '../vault/user-info.dto';
 import { ChainService } from '../chain/chain.service';
@@ -16,6 +24,7 @@ import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
+import { createHash } from 'crypto';
 
 /**
  * A user's account as resolved from Vault: which scheme backs it, its
@@ -28,6 +37,8 @@ import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider'
 export type UserAccount =
   | { type: 'ed25519'; userId: string; address: string; publicKey: Buffer }
   | { type: 'falcon1024'; userId: string; address: string; publicKey: Buffer; salt: number; scheme: string };
+
+type AccountTypeClaim = { schemaVersion: 1; userId: string; accountType: AccountType };
 
 @Injectable()
 export class WalletService {
@@ -43,6 +54,25 @@ export class WalletService {
   /** Use the service identity for additive PQ discovery, not the caller's ACL. */
   private getServiceVaultToken(): Promise<string> {
     return this.managerTokenProvider.getToken();
+  }
+
+  private async claimAccountType(userId: string, accountType: AccountType, token: string): Promise<void> {
+    const path = `intermezzo/account-types/${createHash('sha256').update(userId.toLowerCase()).digest('hex')}`;
+    const claim: AccountTypeClaim = { schemaVersion: 1, userId, accountType };
+    if (await this.vaultService.kvCreate(path, claim, token)) return;
+
+    const existing = await this.vaultService.kvRead<AccountTypeClaim>(path, token);
+    if (
+      !existing ||
+      existing.schemaVersion !== 1 ||
+      typeof existing.userId !== 'string' ||
+      !['ed25519', 'falcon1024'].includes(existing.accountType)
+    ) {
+      throw new InternalServerErrorException(`Invalid account-type claim for user ${userId}`);
+    }
+    if (existing.userId !== userId || existing.accountType !== accountType) {
+      throw new ConflictException(`User ${userId} is already claimed as ${existing.accountType}`);
+    }
   }
 
   async getManagerIdentity(): Promise<ManagerIdentityDto> {
@@ -214,6 +244,10 @@ export class WalletService {
     vault_token: string,
     account_type: AccountType = 'ed25519',
   ): Promise<UserInfoResponseDto> {
+    const canCreate = await this.vaultService.canCreateUserKey(user_id, account_type, vault_token);
+    if (canCreate === false) throw new ForbiddenException(`Cannot create ${account_type} key for user ${user_id}`);
+    const serviceToken = await this.getServiceVaultToken();
+
     // A `user_id` present in both mounts would resolve to a different
     // address depending on probe order — i.e. funds sent to whichever
     // account the resolver happened to find. Refuse to create the
@@ -221,13 +255,15 @@ export class WalletService {
     const existing =
       account_type === 'falcon1024'
         ? await this.getTransitAccount(user_id, vault_token)
-        : await this.vaultService.pqGetKey(user_id, await this.getServiceVaultToken());
+        : await this.vaultService.pqGetKey(user_id, serviceToken);
     if (existing) {
       throw new ConflictException(
         `User ${user_id} already exists as a ${account_type === 'falcon1024' ? 'ed25519' : 'falcon1024'} account. ` +
           'Account type is fixed at creation time — the two schemes derive different addresses.',
       );
     }
+
+    await this.claimAccountType(user_id, account_type, serviceToken);
 
     if (account_type === 'falcon1024') {
       // The plugin is the authority on the address: it owns the salt
