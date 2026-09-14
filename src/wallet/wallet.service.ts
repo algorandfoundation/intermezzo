@@ -152,11 +152,8 @@ export class WalletService {
   /**
    * Resolve which kind of account a `user_id` has, and its address.
    *
-   * The two Vault mounts are the source of truth: a `user_id` exists
-   * in exactly one of them, so nothing records the account type
-   * separately and nothing can drift. Transit is probed first, which
-   * means every account that exists today resolves in exactly the
-   * request it takes now — only PQ accounts pay for the miss.
+   * Transit is probed first, preserving the existing ed25519 path;
+   * PQ accounts pay for the transit miss.
    */
   async resolveUserAccount(user_id: string, vault_token: string): Promise<UserAccount> {
     const ed25519 = await this.getTransitAccount(user_id, vault_token);
@@ -283,7 +280,7 @@ export class WalletService {
   /**
    * Signs a transaction as a user and adds the signature to the transaction.
    *
-   * @param account The resolved account signing the transaction.
+   * @param userOrAccount A legacy ed25519 user ID or a resolved account.
    * @param tx The transaction to be signed, as a Uint8Array.
    * @param vault_token The token used to authenticate with the vault.
    * @returns The signed transaction, as a Uint8Array.
@@ -303,13 +300,12 @@ export class WalletService {
     tx: Uint8Array<ArrayBufferLike>,
     vault_token: string,
   ): Promise<Uint8Array<ArrayBufferLike>> {
-    const account =
-      typeof userOrAccount === 'string' ? await this.resolveUserAccount(userOrAccount, vault_token) : userOrAccount;
-    if (account.type === 'falcon1024') {
-      const signature = await this.vaultService.pqSign(account.userId, tx, vault_token);
-      return this.chainService.addPqSignatureToTxn(tx, { ...account, signature });
+    if (typeof userOrAccount !== 'string' && userOrAccount.type === 'falcon1024') {
+      const signature = await this.vaultService.pqSign(userOrAccount.userId, tx, vault_token);
+      return this.chainService.addPqSignatureToTxn(tx, { ...userOrAccount, signature });
     }
-    const vaultRawSig: Buffer = await this.vaultService.signAsUser(account.userId, tx, vault_token);
+    const userId = typeof userOrAccount === 'string' ? userOrAccount : userOrAccount.userId;
+    const vaultRawSig: Buffer = await this.vaultService.signAsUser(userId, tx, vault_token);
     // split vault specific prefixes vault:${version}:signature
     const signature = vaultRawSig.toString().split(':')[2];
     // vault default base64 decode

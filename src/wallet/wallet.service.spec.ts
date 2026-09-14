@@ -264,18 +264,17 @@ describe('WalletService', () => {
     });
 
     describe('signTxAsUser compatibility', () => {
-      it('accepts the legacy user-id signature and resolves before signing', async () => {
-        const publicKey = randomBytes(32);
+      it('preserves signing for tokens without key-read permission', async () => {
         const unsigned = new Uint8Array([1, 2, 3]);
         const signed = new Uint8Array([4, 5, 6]);
         const rawSignature = Buffer.alloc(64, 9);
-        vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(publicKey);
+        vaultServiceMock.getUserPublicKey.mockRejectedValueOnce(new ForbiddenException());
         vaultServiceMock.signAsUser.mockResolvedValueOnce(Buffer.from(`vault:v1:${rawSignature.toString('base64')}`));
         chainServiceMock.addSignatureToTxn.mockReturnValueOnce(signed);
 
         await expect(walletService.signTxAsUser(userId, unsigned, 'transit_only_token')).resolves.toBe(signed);
 
-        expect(vaultServiceMock.getUserPublicKey).toHaveBeenCalledWith(userId, 'transit_only_token');
+        expect(vaultServiceMock.getUserPublicKey).not.toHaveBeenCalled();
         expect(vaultServiceMock.signAsUser).toHaveBeenCalledWith(userId, unsigned, 'transit_only_token');
         expect(vaultServiceMock.pqGetKey).not.toHaveBeenCalled();
         expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();

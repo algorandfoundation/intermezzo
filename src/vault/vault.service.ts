@@ -220,25 +220,7 @@ export class VaultService {
     return this.getKey(manager_id, transitKeyPath, token);
   }
 
-  // ────────────────────────────────────────────────────────────────
   // Algorand PQ (Falcon-1024) secrets engine
-  //
-  // Backed by the custom `algorand-pq` plugin in `vault/plugin`,
-  // whose API deliberately mirrors transit so these wrappers keep the
-  // same shape as their ed25519 siblings above. Two differences are
-  // real and intentional:
-  //
-  //   - Signatures come back raw. There is no `vault:v1:` envelope to
-  //     split, so `decodeVaultSignature` (which asserts a 64-byte
-  //     ed25519 length) must never see one of these.
-  //   - A missing key is an answer, not an error. The account-type
-  //     probe reads a 404 from `pqGetKey` as "not a PQ account", so
-  //     that method returns `undefined` where transit's `getKey`
-  //     throws.
-  //
-  // The mount defaults to `pawn/pq-users` (what `development-init.ts`
-  // mounts) and can be overridden with `VAULT_PQ_USERS_PATH`.
-  // ────────────────────────────────────────────────────────────────
 
   private getPqMount(): string {
     return this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users';
@@ -460,8 +442,8 @@ export class VaultService {
    * Expecting a manager token to retrieve all keys from the vault and return an array of user objects including
    * it's user id and public address.
    *
-   * Lists both user mounts, since a `user_id` lives in exactly one of
-   * them and the caller should not have to know which.
+   * This legacy method lists transit keys only. WalletService appends PQ users
+   * after this call succeeds, preserving transit LIST as the authorization gate.
    *
    * @param token - manager token
    * @returns

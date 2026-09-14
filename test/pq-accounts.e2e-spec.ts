@@ -1,11 +1,8 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
 import * as fs from 'fs';
-import { AppModule } from './../src/app.module';
 import axios from 'axios';
 import * as crypto from 'crypto';
 import { randomBytes } from 'crypto';
-import { ConfigService } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
 import { Address } from '@algorandfoundation/algokit-utils';
 import { HttpService } from '@nestjs/axios';
@@ -20,17 +17,7 @@ const MANAGER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('manager-role-and-sec
 const USER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('user-role-and-secrets.json').toString());
 
 describe('PQ accounts E2E', () => {
-  let app: INestApplication;
-
-  // Initialize the NestJS application before each test
-  beforeEach(async () => {
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleFixture.createNestApplication();
-    await app.init();
-  });
+  beforeAll(() => ConfigModule.forRoot());
 
   // Function to login to Vault and retrieve a token
   const loginToVault = async (roleAndSecret: any) => {
@@ -55,8 +42,7 @@ describe('PQ accounts E2E', () => {
     return manager_detail_response.data.public_address;
   };
 
-  // The `algorand-pq` secrets engine is a custom plugin (vault/plugin/), so
-  // these talk to Vault directly — no service endpoints expose PQ accounts yet.
+  // Exercise the custom Vault plugin directly before the service-level tests.
   describe('PQ accounts (algorand-pq plugin)', () => {
     const pqKey = (token: string, name: string) =>
       axios.get(`${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${name}`, {

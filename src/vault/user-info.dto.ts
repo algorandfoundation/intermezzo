@@ -1,10 +1,8 @@
 /**
  * Which key material backs a user's Algorand account.
  *
- * `ed25519` keys live in the transit mount, `falcon1024` keys in the
- * `algorand-pq` mount. The mount a `user_id` exists in is the only
- * source of truth for this — nothing records it separately, so the
- * two can never disagree.
+ * `ed25519` keys live in transit; `falcon1024` keys live in the
+ * `algorand-pq` mount.
  */
 export type AccountType = 'ed25519' | 'falcon1024';
 
