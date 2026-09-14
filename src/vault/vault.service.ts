@@ -3,7 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosResponse } from 'axios';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
-import { UserInfoDto } from './user-info.dto';
+import { AccountType, UserInfoDto } from './user-info.dto';
 
 export type KeyType = 'ed25519' | 'ecdsa-p256';
 export type HashAlgorithm = 'sha2-256' | 'sha2-512';
@@ -220,6 +220,41 @@ export class VaultService {
     return this.getKey(manager_id, transitKeyPath, token);
   }
 
+  /**
+   * Check whether the caller can create or update its target key. Tokens
+   * without access to capabilities-self return `undefined`; Vault still
+   * authorizes the actual key request.
+   */
+  async canCreateUserKey(keyName: string, accountType: AccountType, token: string): Promise<boolean | undefined> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const mount =
+      accountType === 'falcon1024'
+        ? (this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users')
+        : this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
+    const path = `${mount}/keys/${keyName}`;
+
+    try {
+      const result = await this.httpService.axiosRef.post(
+        `${baseUrl}/v1/sys/capabilities-self`,
+        { paths: [path] },
+        {
+          headers: {
+            'X-Vault-Token': token,
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          },
+        },
+      );
+      const data = result.data?.data ?? result.data;
+      const capabilities: string[] = data?.[path] ?? data?.capabilities ?? [];
+      return capabilities.some((capability) => ['create', 'update', 'sudo', 'root'].includes(capability));
+    } catch (error) {
+      const status = error?.response?.status ?? 500;
+      if (status === 403) return undefined;
+      throw new HttpErrorByCode[status]('VaultException');
+    }
+  }
+
   // Algorand PQ (Falcon-1024) secrets engine
 
   private getPqMount(): string {
@@ -384,6 +419,38 @@ export class VaultService {
       );
     } catch (error) {
       const status = error?.response?.status ?? 500;
+      throw new HttpErrorByCode[status]('VaultException');
+    }
+  }
+
+  /** Create a KV-v2 entry only if no version has ever existed. */
+  async kvCreate(path: string, data: Record<string, unknown>, token: string): Promise<boolean> {
+    const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    const url = `${baseUrl}/v1/${this.getKvMount()}/data/${path}`;
+    try {
+      await this.httpService.axiosRef.post(
+        url,
+        { data, options: { cas: 0 } },
+        {
+          headers: {
+            'X-Vault-Token': token,
+            'Content-Type': 'application/json',
+            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          },
+        },
+      );
+      return true;
+    } catch (error) {
+      const status = error?.response?.status ?? 500;
+      const errors = error?.response?.data?.errors;
+      if (
+        status === 400 &&
+        Array.isArray(errors) &&
+        errors.some((message) => String(message).includes('check-and-set parameter did not match'))
+      ) {
+        return false;
+      }
       throw new HttpErrorByCode[status]('VaultException');
     }
   }
