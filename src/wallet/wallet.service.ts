@@ -51,11 +51,6 @@ export class WalletService {
     private readonly managerTokenProvider: ManagerVaultTokenProvider,
   ) {}
 
-  /** Use the service identity for additive PQ discovery, not the caller's ACL. */
-  private getServiceVaultToken(): Promise<string> {
-    return this.managerTokenProvider.getToken();
-  }
-
   private async claimAccountType(userId: string, accountType: AccountType, token: string): Promise<void> {
     const path = `intermezzo/account-types/${createHash('sha256').update(userId.toLowerCase()).digest('hex')}`;
     const claim: AccountTypeClaim = { schemaVersion: 1, userId, accountType };
@@ -189,7 +184,7 @@ export class WalletService {
     const ed25519 = await this.getTransitAccount(user_id, vault_token);
     if (ed25519) return ed25519;
 
-    const pq = await this.vaultService.pqGetKey(user_id, await this.getServiceVaultToken());
+    const pq = await this.vaultService.pqGetKey(user_id, await this.managerTokenProvider.getToken());
     if (!pq) throw new NotFoundException(`No account found for user ${user_id}`);
 
     return {
@@ -246,7 +241,7 @@ export class WalletService {
   ): Promise<UserInfoResponseDto> {
     const canCreate = await this.vaultService.canCreateUserKey(user_id, account_type, vault_token);
     if (canCreate === false) throw new ForbiddenException(`Cannot create ${account_type} key for user ${user_id}`);
-    const serviceToken = await this.getServiceVaultToken();
+    const serviceToken = await this.managerTokenProvider.getToken();
 
     // A `user_id` present in both mounts would resolve to a different
     // address depending on probe order — i.e. funds sent to whichever
@@ -291,7 +286,7 @@ export class WalletService {
       public_address: new Address(Buffer.from(user.public_address, 'base64')).toString(),
       account_type: 'ed25519',
     }));
-    const pqUsers = await this.vaultService.getPqUsers(await this.getServiceVaultToken());
+    const pqUsers = await this.vaultService.getPqUsers(await this.managerTokenProvider.getToken());
 
     return [...ed25519Users, ...pqUsers] as UserInfoResponseDto[];
   }
@@ -321,16 +316,6 @@ export class WalletService {
    * @param vault_token The token used to authenticate with the vault.
    * @returns The signed transaction, as a Uint8Array.
    */
-  async signTxAsUser(
-    user_id: string,
-    tx: Uint8Array<ArrayBufferLike>,
-    vault_token: string,
-  ): Promise<Uint8Array<ArrayBufferLike>>;
-  async signTxAsUser(
-    account: UserAccount,
-    tx: Uint8Array<ArrayBufferLike>,
-    vault_token: string,
-  ): Promise<Uint8Array<ArrayBufferLike>>;
   async signTxAsUser(
     userOrAccount: string | UserAccount,
     tx: Uint8Array<ArrayBufferLike>,

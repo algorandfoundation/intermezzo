@@ -1,100 +1,82 @@
-# Algorand PQ accounts
+# Algorand PQ accounts: merge-readiness plan
 
-Add opt-in Falcon-1024 user accounts without changing existing ed25519 behavior.
-Work lives on `feat/pq-accounts`; it is not yet merged to `master`.
+## Scope and decision
 
-## Status
+Ship opt-in Falcon-1024 user accounts in PR #40, reviewed against `master`.
+Keep one account type per user ID. Reuse the immutable Vault KV-v2 CAS claim
+implemented on `fix/pq-account-creation-conflicts`; do not introduce a lock
+service or a provisioning state machine.
 
-| Increment | Status | Evidence |
-| --- | --- | --- |
-| 1. Vault Falcon plugin and dev wiring | Done | `f01a566` |
-| 2. `VaultService` PQ methods | Done | `372922f` |
-| 3. Account creation, resolution, and listing | Done | `2280c87` |
-| 4. Transaction signing and fees | Done | `e068545` |
-| 5a. Legacy compatibility hardening | Done | `54bff03` |
-| 5b. Atomic account-type claim | Implemented; rollout pending | CAS claim and live race test pass |
+Falcon generalization is a future nice-to-have, outside this PR.
 
-PQ accounts can be created, listed, resolved, and used for payments, asset
-transactions, app calls, and mixed groups. The remaining release work is an
-existing-data audit and controlled deployment.
+## Current state
 
-## Compatibility contract
+- `feat/pq-accounts` implements the Vault plugin, account creation,
+  discovery/listing, transaction signing, PQ fees, and legacy compatibility.
+- PR #40 is still a draft targeting `master`.
+- The creation-race fix is integrated as `e6d5b8f` and `56bd16b`.
+- CI passed for `4f16327`. That result does not validate the combined changes.
+- Stage 1 checks on 2026-09-16: lint, format, and Go plugin race tests pass.
+  Full TypeScript and live E2E validation remains in stage 4.
 
-- Ed25519 remains the default. Omitting `account_type` preserves existing create
-  behavior.
-- User responses add `account_type`; other existing request and response fields
-  are unchanged.
-- Manager accounts remain ed25519 because the DID/OID4VC stack uses the existing
-  Algorand transaction signer interface.
-- An existing ed25519 account cannot be converted into a PQ account: its key
-  scheme determines its address. PQ accounts must be created fresh with a new
-  address.
-- Algorand rekeying is the only workaround: a new PQ account can become the
-  authorized signer for an existing ed25519 address. That preserves the old
-  address but is not a conversion, and this service does not support it.
-- Runtime resolution remains transit-first, then PQ on a transit miss. The
-  account-type claim coordinates creation only; it does not become the
-  source of truth for keys.
-- PQ signing uses `algosdk@3.7.0` only for PQ addresses and envelopes. Existing
-  transaction building remains on algokit-utils.
+## Merge gates, in order
 
-## Shipped behavior
+1. **Integrate the existing fix.** Done. The validation, authorization, CAS,
+   retry, and concurrent-creation tests are present on this branch.
+2. **Add a read-only rollout audit.** Verify both Vault mounts exist and are
+   accessible before treating a key-list miss as empty. Detect cross-mount
+   duplicate IDs and case aliases incompatible with the claim normalization.
+   Exit unsuccessfully on collisions, unavailable mounts, or unreadable data;
+   never repair or delete keys automatically. Include a runnable check of the
+   audit's failure cases.
+3. **Document deployment and compatibility.** Add a short PQ setup/API section
+   to the README and a cutover procedure. Explain the required account_type
+   response field, new-ID validation, permissions, and same-type retry behavior.
+   Move durable details out of this working plan before removing it.
+4. **Validate the combined branch.** Refresh dependencies from the frozen
+   lockfile; run build, lint, format, unit tests, Go tests with the race detector,
+   and the full live E2E suite. Verify concurrent mixed-type creation, same-type
+   retries after provisioning failure, caller authorization, unchanged Ed25519
+   behavior, PQ fees, and mixed transaction groups. Require successful CI on
+   the final PR head and report current results rather than historical counts.
+5. **Review and prepare PR #40.** Review the complete diff against current
+   `master`, address actionable review comments, and remove unrelated changes
+   and obsolete planning prose. Keep commits organized around plugin/lifecycle,
+   account handling/safety, and transaction support, with their relevant tests.
+   Update the PR description to the final behavior, validation, and rollout
+   requirements; mark ready for review when these gates are satisfied.
 
-- `POST /v1/wallet/user/` accepts optional
-  `account_type: "ed25519" | "falcon1024"`.
-- Falcon keys are generated and signed inside the custom Vault plugin; private
-  key material never enters the application.
-- The application derives account type from the Vault mount holding the key.
-- PQ transactions receive the required `2 * minFee` surcharge before grouping
-  and are encoded with the SDK's canonical `pqsig` envelope.
-- Existing ed25519 signing and manager signing retain their previous contracts.
-- Creation writes one immutable KV claim with CAS 0 before provisioning a key.
-  Same-type retries resume; a competing type receives `409 Conflict`.
-- New user IDs are restricted to Vault-safe characters, and claim keys normalize
-  case so aliases such as `FOO` and `foo` cannot select different account types.
-- Algod 5 / consensus v42 or newer is required for PQ transactions.
+## Creation invariant
 
-## Open risk
-
-The application race is closed, but the guarantee only holds after every writer
-runs this code. Before rollout, audit both mounts for an existing duplicate ID
-and confirm both mounts are available; then pause or drain old writers during
-deployment. Direct Vault writers can still bypass the application claim.
-
-## Remaining plan
-
-- [x] Verify Vault authorization, CAS, tombstone, and key-path behavior.
-- [x] Add a CAS-0 immutable account-type claim. Tombstones and malformed records
-  fail closed; same-type retries can finish provisioning.
-- [x] Preserve caller authorization, validate new IDs, normalize case, and cover
-  mixed-type races, retries, and separate service instances.
-- [ ] Add a read-only collision and mount-availability audit. Existing accounts
-  need no claim backfill because cross-mount checks remain in the create path.
-- [ ] Cut over operationally: pause or drain creation writers, run the audit,
-  deploy claim-aware instances everywhere, then resume creation. Reads and
-  signing may continue during the cutover.
-
-Claims live in Vault KV v2 under
+Claims live in Vault KV v2 at
 `intermezzo/account-types/<sha256(lowercase(user_id))>` and contain only
-`{ schemaVersion, userId, accountType }`. Service credentials manage claims;
-caller credentials still authorize actual key creation.
+`{ schemaVersion, userId, accountType }`.
 
-## Verification
+After authorization and existing-account checks, CAS 0 chooses one account
+type before key provisioning. An exact same-user/same-type retry may resume;
+competing types or case aliases receive 409. Malformed or tombstoned claims
+fail closed. A provisioning failure leaves the claim for a same-type retry;
+there is no ready state, expiry, or automatic claim deletion.
 
-Current local verification (2026-09-14):
+The claim coordinates creation only. Vault key mounts remain the source of
+truth for resolution and signing. Actual key creation and signing retain caller
+credentials; service credentials manage claims. Review authorization before
+claim creation as well as authorization of the eventual key operation.
 
-- `yarn build` passes.
-- `yarn lint` and `yarn format` pass.
-- 238/238 unit tests pass.
-- 46/46 e2e tests pass against the local Vault and Algorand stack, including the
-  live concurrent HTTP test and all PQ on-chain scenarios.
+## Deployment gate (after merge)
+
+Pause or drain account-creation writers, run the audit, deploy claim-aware
+instances everywhere, and then resume creation. Reads and signing may continue.
+Existing accounts need no claim backfill while cross-mount checks remain in
+the create path. Old instances and direct Vault writers can bypass claims;
+creation must use the coordinated application path for the invariant to hold.
 
 ## Deferred
 
-- PQ manager accounts.
-- Mnemonic export.
-- Key rotation and deletion.
-- Rekeying existing ed25519 addresses to newly created PQ authorizers.
-- Stored PQ key schema versioning and consistency validation.
-- Distinguishing a missing PQ key from a missing or misconfigured PQ mount at
-  runtime; the rollout audit must still check mount availability explicitly.
+- General-purpose Falcon key/signing API and non-Algorand adapters (nice-to-have).
+- PQ manager accounts and DID/OID4VC changes.
+- Mnemonic export, rotation, deletion, and rekeying support.
+- Stored PQ key schema versioning and consistency validation, before a future
+  storage-format change.
+- Runtime distinction between missing PQ keys and missing/misconfigured mounts;
+  the rollout audit must explicitly verify mounts in this release.
