@@ -51,6 +51,18 @@ export class StatusListRecord {
 export interface StatusListEntry {
   listId: string;
   idx: number;
+
+  /**
+   * Credential configuration the entry was issued under, so a revocation
+   * narrowed by `credentialConfigurationId` can flip this credential's bit
+   * without touching its siblings on the same session.
+   *
+   * Absent on entries allocated before this was recorded. A session that
+   * offered a single configuration is still unambiguous — every one of its
+   * entries must be that configuration — so only sessions that offered
+   * several reject a narrowed revocation.
+   */
+  credentialConfigurationId?: string;
 }
 
 /** A credential whose entry reads `0` is valid. */

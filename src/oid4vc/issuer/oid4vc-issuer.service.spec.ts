@@ -91,7 +91,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
         status: { status_list: { uri: LIST_URI, idx: 7 } },
       });
 
-      expect(allocate).toHaveBeenCalledWith('credo-session-1');
+      expect(allocate).toHaveBeenCalledWith('credo-session-1', 'device-attestation-credential');
       expect(save).not.toHaveBeenCalled();
     });
 
@@ -228,6 +228,15 @@ describe('Oid4vcIssuerService createOffer / listSessions', () => {
     await service.listSessions(HOLDER_DID_KEY);
 
     expect(sessionRepo.findByHolder).toHaveBeenCalledWith(HOLDER_DID_KEY);
+    expect(sessionRepo.find).not.toHaveBeenCalled();
+  });
+
+  // `?holderDidKey=` is a malformed filter, not an absent one: it must reach
+  // findByHolder's did:key check rather than widening to every session.
+  it('passes an explicitly empty holderDidKey through for rejection', async () => {
+    await service.listSessions('');
+
+    expect(sessionRepo.findByHolder).toHaveBeenCalledWith('');
     expect(sessionRepo.find).not.toHaveBeenCalled();
   });
 });

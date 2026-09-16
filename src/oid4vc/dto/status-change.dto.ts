@@ -8,10 +8,12 @@ import { IsInt, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, Min, Valid
  *  - `holderDidKey` (optionally narrowed by `credentialConfigurationId`) acts on every credential issued to that
  *    holder — the natural handle when a session id was never recorded or has been lost.
  *  - `uri` + `idx`, the pair embedded in a credential's `status.status_list` claim, acts on the single credential
- *    that entry was allocated to. This is the only form that does not require looking up an issuance session at all.
+ *    that entry was allocated to, leaving its siblings from the same offer untouched. Supplying one half without
+ *    the other is rejected rather than treated as the holder form.
  *
- * A session cannot be addressed directly: `sessionId` is not accepted, because losing it would otherwise make a
- * credential permanently unrevokable.
+ * Either form acts on the matched credentials' own status list entries only. A session cannot be addressed
+ * directly: `sessionId` is not accepted, because losing it would otherwise make a credential permanently
+ * unrevokable.
  */
 export class ChangeCredentialStatusDto {
   @ApiPropertyOptional({
@@ -32,6 +34,9 @@ export class ChangeCredentialStatusDto {
   })
   @IsOptional()
   @IsString()
+  // Rejected rather than ignored: `''` would otherwise read as "no filter" and
+  // silently widen a narrowed revocation to every credential the holder has.
+  @IsNotEmpty({ message: 'credentialConfigurationId must not be empty; omit it to act on every configuration.' })
   credentialConfigurationId?: string;
 
   @ApiPropertyOptional({

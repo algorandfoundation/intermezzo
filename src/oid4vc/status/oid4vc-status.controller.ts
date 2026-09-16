@@ -57,8 +57,9 @@ export class Oid4vcStatusController {
   /**
    * Revokes every credential matched by the request body's addressing form:
    * `holderDidKey` (every credential issued to that holder, optionally
-   * narrowed by `credentialConfigurationId`), or `uri`+`idx` (the single
-   * credential that entry was allocated to).
+   * narrowed by `credentialConfigurationId`), or `uri`+`idx` (only the single
+   * credential that entry was allocated to — credentials issued from the same
+   * offer keep their own status).
    */
   @ApiBearerAuth()
   @Post('revoke')

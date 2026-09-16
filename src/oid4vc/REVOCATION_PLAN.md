@@ -24,6 +24,8 @@ or merging that PR is separate from this implementation.
 - [x] Revoke/reactivate addressed by holder `did:key` (optionally narrowed
   to one credential configuration) or by `uri`+`idx`. The issuance session
   id is no longer accepted, so losing it cannot strand a credential.
+  Both forms act on exactly the entries they name, not on every entry of
+  the sessions those entries belong to.
 - [x] Unit and HTTP tests for races, failures, rollover, and enforcement.
 - [x] Separate opt-in million-allocation check and real-Vault validation.
 
@@ -45,8 +47,13 @@ Vault paths:
   without contending. The `did:key:` prefix is stripped to keep colons out
   of the path, and the multibase segment is revalidated before use because
   it reaches the repository from an unvalidated query parameter.
-- Issuance sessions retain `statusEntries: [{ listId, idx }, ...]`, audit
-  fields, and `statusChange: { id, value, pending, requestedAt, reason? }`.
+- Issuance sessions retain
+  `statusEntries: [{ listId, idx, credentialConfigurationId? }, ...]`, audit
+  fields, and
+  `statusChange: { id, value, pending, requestedAt, reason?, entries }`.
+  The configuration id is recorded per entry so a narrowed revocation flips
+  only the credentials issued under it; `entries` records which of them an
+  operation covers, so a resumed operation cannot widen.
 
 The allocator CAS-elects an active UUID before creating its list. If the
 process stops between those writes, the next allocator creates the same
@@ -61,10 +68,14 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
 
 ## Session concurrency and recovery
 
-0. A request first resolves its addressing form to session ids: `uri`+`idx`
-   reads the entry-owner key; `holderDidKey` lists the holder index and
-   keeps sessions that actually hold entries. Resolution is a read-only
+0. A request first resolves its addressing form to the entries it names,
+   grouped by owning session: `uri`+`idx`
+   reads the entry-owner key and yields that one entry; `holderDidKey`
+   lists the holder index and selects the entries matching the
+   configuration filter, if any. Resolution is a read-only
    step, so an unknown holder or entry fails with 404 before any bit moves.
+   Supplying half of `uri`+`idx` is rejected rather than falling through to
+   the holder form, which would widen a single-credential request.
    A holder matching several sessions runs the steps below once per session
    rather than as one atomic operation: a failure part-way leaves earlier
    sessions revoked, and re-sending the same request finishes the rest.
@@ -72,10 +83,12 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
    appends it. A pending status operation or revoked session rejects the
    append, aborting issuance. A competing successful append is included
    when revocation retries its session CAS.
-2. Revoke/reactivate conditionally persists its target value and unique
+2. Revoke/reactivate conditionally persists its target value, the entries
+   it covers, and a unique
    operation ID before changing bits. A request matching a pending target
    resumes that operation and preserves the original reason. The opposite
-   target returns 409 until the pending operation finishes.
+   target, or one covering a different set of entries, returns 409 until the
+   pending operation finishes.
 3. Entries are grouped by list and updated together. For each CAS attempt,
    the service reads the **list first**, then checks the session operation
    ID, then writes the list conditionally. This ordering fences delayed
@@ -86,6 +99,9 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
    returned to the caller, leaving retryable intent. No bit changes are
    rolled back. Retrying the same request finishes partial work,
    including after a process restart. There is no background retry worker.
+   `revokedAt` / `revokedReason` are session-level, so only an operation
+   covering the whole session sets them; a narrowed one leaves them clear
+   and the status list bit remains the per-credential answer.
 5. Credo state mirroring uses the same session CAS path. Ordinary session
    `save` is used for initial offer creation, not concurrent mutation.
 
@@ -195,7 +211,10 @@ The real-Vault check was not re-run for this change; the holder and
 entry-owner indexes are new KV paths under `intermezzo/`, which the manager
 policy already globs, but that remains unverified against a live Vault.
 Existing sessions are not backfilled: both indexes populate only for offers
-created and credentials issued after this change.
+created and credentials issued after this change. Per-entry
+`credentialConfigurationId` is recorded from the same point; a narrowed
+revocation against an older session that offered several configurations
+returns 409 rather than revoking configurations the caller did not name.
 
 ## Deferred, with explicit boundaries
 

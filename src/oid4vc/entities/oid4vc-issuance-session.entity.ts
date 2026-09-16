@@ -87,9 +87,26 @@ export class Oid4vcIssuanceSession {
     pending: boolean;
     requestedAt: string;
     reason?: string;
+
+    /**
+     * The entries this operation covers — a subset when the request addressed
+     * a single credential or narrowed by configuration id. Recorded so a
+     * resumed operation replays the same selection rather than widening to
+     * every entry on the session.
+     *
+     * Absent on intents written before revocation became entry-granular; those
+     * covered the whole session.
+     */
+    entries?: StatusListEntry[];
   };
 
-  /** When the credential was revoked, if it has been. */
+  /**
+   * When every credential on this session was revoked, if it has been.
+   *
+   * Only set by an operation covering the whole session. A revocation aimed at
+   * one credential leaves this unset: the session as a whole is not revoked,
+   * and the authoritative per-credential state is the status list bit.
+   */
   revokedAt?: Date;
 
   /** Operator-supplied note recorded alongside {@link revokedAt}. */

@@ -101,14 +101,23 @@ curl -X POST http://localhost:3000/v1/credential/status/revoke \
 
 `POST .../reactivate` with the same body reverses it. A `holderDidKey`
 operation covers every credential currently issued to that holder, across
-lists; `uri`+`idx` covers only the one credential's owning session,
-including its other entries if it redeemed more than once. Revocation
+lists; narrowed by `credentialConfigurationId` it covers only the
+credentials issued under that configuration, leaving the rest of the same
+offer valid. `uri`+`idx` covers only the one credential that entry was
+allocated to. Revocation
 intent is persisted before the bits change, preventing further issuance
 from an affected session. A failed operation remains pending: retry the
 same request to finish it, including after a restart. The original reason
-is preserved. An opposite operation while pending returns 409; finish the
-pending operation before reversing it. Completion/audit write failures
+is preserved. An opposite operation, or one addressing a different set of
+credentials, returns 409 while another is pending; finish the pending
+operation first. Completion/audit write failures
 return an error, even when all bits already changed.
+
+`credentialConfigurationId` is matched per credential, recorded on each
+status entry at issuance. Sessions issued before that was recorded can
+still be revoked whole or by `uri`+`idx`; a narrowed request against one
+that offered several configurations returns 409 rather than guess which
+siblings to revoke with it.
 
 The list itself is
 public, because verifiers must be able to dereference it:
@@ -241,8 +250,10 @@ App-level mappings persisted in Vault KV:
 - `oid4vc_issuance_session` / `oid4vc_verification_session` — correlate
   Credo session ids with the holder `did:key` and credential
   configuration for status queries. The issuance session also carries
-  `statusEntries` — one `(listId, idx)` per credential the session issued —
-  plus durable `statusChange` intent and `revokedAt` / `revokedReason` on completion.
+  `statusEntries` — one `(listId, idx, credentialConfigurationId)` per
+  credential the session issued —
+  plus durable `statusChange` intent (including the entries it covers) and
+  `revokedAt` / `revokedReason`, set on completion of a whole-session operation.
 - `intermezzo/oid4vc/status-lists/records/<id>` — one record per status
   list: a 16,384-entry bitstring (2 KiB raw; compressed size depends on
   the status distribution) and the next free index.

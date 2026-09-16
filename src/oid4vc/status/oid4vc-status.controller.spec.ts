@@ -142,6 +142,16 @@ describe('Oid4vcStatusController', () => {
       expect(revoke).not.toHaveBeenCalled();
     });
 
+    // `''` used to read as "no filter" and silently widen the revocation to
+    // every credential the holder holds.
+    it('rejects an empty credentialConfigurationId rather than ignoring it', async () => {
+      await request(app.getHttpServer())
+        .post('/credential/status/revoke')
+        .send({ holderDidKey: HOLDER_DID_KEY, credentialConfigurationId: '' })
+        .expect(400);
+      expect(revoke).not.toHaveBeenCalled();
+    });
+
     it('rejects a negative idx', async () => {
       await request(app.getHttpServer()).post('/credential/status/revoke').send({ uri: URI, idx: -1 }).expect(400);
       expect(revoke).not.toHaveBeenCalled();

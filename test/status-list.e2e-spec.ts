@@ -183,6 +183,26 @@ describe('Credential status list (e2e)', () => {
     await expect(sdjwt.verify(a.credential)).resolves.toBeDefined();
   });
 
+  it('revokes one credential without touching a sibling issued from the same session', async () => {
+    const first = await issueCredential('multi-credential-session');
+    // A second redemption of the same offer: another entry on the same session.
+    const entry = await statusService.allocateForSession('multi-credential-session');
+    const second = await sdjwt.issue({
+      iss: ISSUER_DID,
+      vct: 'device-attestation-credential',
+      iat: Math.floor(Date.now() / 1000),
+      status: { status_list: { uri: entry.uri, idx: entry.idx } },
+    });
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ uri: first.uri, idx: first.idx })
+      .expect(201);
+
+    await expect(sdjwt.verify(first.credential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(second)).resolves.toBeDefined();
+  });
+
   it('rejects the legacy sessionId body: neither addressing form is present', async () => {
     await request(app.getHttpServer())
       .post('/v1/credential/status/revoke')

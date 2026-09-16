@@ -92,9 +92,9 @@ describe('Oid4vcStatusService', () => {
     service = makeService();
   });
 
-  async function issue(id = 'session-a', svc = service) {
+  async function issue(id = 'session-a', svc = service, credentialConfigurationId?: string) {
     if (!(await sessions.findOneById(id))) await sessions.save({ id, credoIssuanceSessionId: id });
-    return svc.allocateForSession(id);
+    return svc.allocateForSession(id, credentialConfigurationId);
   }
 
   function storedList(id: string): StatusListRecord {
@@ -567,10 +567,54 @@ describe('Oid4vcStatusService', () => {
       expect(await service.getStatus(b.listId, b.idx)).toBe(0);
     });
 
+    it('narrows to one configuration within a single multi-configuration session', async () => {
+      await sessions.save({
+        id: 'session-a',
+        credoIssuanceSessionId: 'session-a',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['device-attestation-credential', 'other-credential'],
+      });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      const attestation = await issue('session-a', service, 'device-attestation-credential');
+      const other = await issue('session-a', service, 'other-credential');
+
+      await service.revoke({ holderDidKey: 'did:key:zA', credentialConfigurationId: 'device-attestation-credential' });
+
+      expect(await service.getStatus(attestation.listId, attestation.idx)).toBe(1);
+      expect(await service.getStatus(other.listId, other.idx)).toBe(0);
+      // Not the whole session, so the session-level audit stamp stays clear.
+      expect((await sessions.findOneById('session-a'))!.revokedAt).toBeUndefined();
+    });
+
+    it('refuses to narrow a session issued before configuration ids were recorded', async () => {
+      await sessions.save({
+        id: 'session-a',
+        credoIssuanceSessionId: 'session-a',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['device-attestation-credential', 'other-credential'],
+      });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      await issue('session-a'); // no configuration id, as legacy entries have
+
+      await expect(
+        service.revoke({ holderDidKey: 'did:key:zA', credentialConfigurationId: 'device-attestation-credential' }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('revokes one credential by uri + idx without touching its siblings on the same session', async () => {
+      const first = await issue('session-a');
+      const second = await issue('session-a');
+
+      await service.revoke({ uri: first.uri, idx: first.idx });
+
+      expect(await service.getStatus(first.listId, first.idx)).toBe(1);
+      expect(await service.getStatus(second.listId, second.idx)).toBe(0);
+      expect((await sessions.findOneById('session-a'))!.revokedAt).toBeUndefined();
+    });
+
     it('404s for an unknown holder', async () => {
       await expect(service.revoke({ holderDidKey: 'did:key:zUnknown' })).rejects.toThrow(NotFoundException);
     });
-
     it('404s when the holder only has unredeemed offers', async () => {
       await sessions.save({ id: 'session-a', credoIssuanceSessionId: 'session-a', holderDidKey: 'did:key:zA' });
       await sessions.indexHolder('did:key:zA', 'session-a');
@@ -582,6 +626,21 @@ describe('Oid4vcStatusService', () => {
       await expect(service.revoke({ holderDidKey: 'did:key:zA', uri: entry.uri, idx: entry.idx })).rejects.toThrow(
         BadRequestException,
       );
+    });
+
+    // A stray `idx` used to fall through to the holder form and revoke everything that holder had.
+    it('rejects a holder target carrying a stray idx rather than widening it', async () => {
+      await sessions.save({ id: 'session-a', credoIssuanceSessionId: 'session-a', holderDidKey: 'did:key:zA' });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      const entry = await issue('session-a');
+
+      await expect(service.revoke({ holderDidKey: 'did:key:zA', idx: entry.idx })).rejects.toThrow(BadRequestException);
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+    });
+
+    it('rejects an idx without a uri', async () => {
+      const entry = await issue();
+      await expect(service.revoke({ idx: entry.idx })).rejects.toThrow(BadRequestException);
     });
 
     it('rejects a uri without an idx', async () => {
