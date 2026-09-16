@@ -120,30 +120,36 @@ describe('Credential status list (e2e)', () => {
     await app.close();
   });
 
-  /** Allocates an entry, records the session, and issues a credential against it. */
-  async function issueCredential(sessionId: string): Promise<string> {
+  /** Allocates an entry, records the session (and holder index), and issues a credential against it. */
+  async function issueCredential(
+    sessionId: string,
+    holderDidKey?: string,
+  ): Promise<{ credential: string; uri: string; idx: number }> {
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     await sessions.save({
       id: sessionId,
       credoIssuanceSessionId: sessionId,
+      holderDidKey,
     } as Partial<Oid4vcIssuanceSession>);
+    if (holderDidKey) await sessions.indexHolder(holderDidKey, sessionId);
 
     const entry = await statusService.allocateForSession(sessionId);
-    return sdjwt.issue({
+    const credential = await sdjwt.issue({
       iss: ISSUER_DID,
       vct: 'device-attestation-credential',
       iat: Math.floor(Date.now() / 1000),
       status: { status_list: { uri: entry.uri, idx: entry.idx } },
     });
+    return { credential, uri: entry.uri, idx: entry.idx };
   }
 
-  it('revokes one credential without touching the other', async () => {
-    const credentialA = await issueCredential('session-a');
-    const credentialB = await issueCredential('session-b');
+  it('revokes one credential by uri+idx without touching the other', async () => {
+    const a = await issueCredential('session-a');
+    const b = await issueCredential('session-b');
 
     // 1. Both verify. The verifier fetches the list over HTTP from the app.
-    await expect(sdjwt.verify(credentialA)).resolves.toBeDefined();
-    await expect(sdjwt.verify(credentialB)).resolves.toBeDefined();
+    await expect(sdjwt.verify(a.credential)).resolves.toBeDefined();
+    await expect(sdjwt.verify(b.credential)).resolves.toBeDefined();
 
     // 2. The list is served publicly, with the media type the fetcher requires.
     const session = await app.get(Oid4vcIssuanceSessionRepository).findOneById('session-a');
@@ -158,27 +164,54 @@ describe('Credential status list (e2e)', () => {
     const signature = Buffer.from(served.text.slice(served.text.lastIndexOf('.') + 1), 'base64url');
     expect(crypto.verify(null, Buffer.from(signingInput), publicKey, signature)).toBe(true);
 
-    // 3. Revoke A over HTTP.
+    // 3. Revoke A over HTTP, addressed by the uri+idx embedded in its own credential.
     await request(app.getHttpServer())
       .post('/v1/credential/status/revoke')
-      .send({ sessionId: 'session-a', reason: 'device reported stolen' })
+      .send({ uri: a.uri, idx: a.idx, reason: 'device reported stolen' })
       .expect(201);
 
     // 4. The whole point: A now fails verification, B is unaffected.
-    await expect(sdjwt.verify(credentialA)).rejects.toThrow('Status is not valid');
-    await expect(sdjwt.verify(credentialB)).resolves.toBeDefined();
+    await expect(sdjwt.verify(a.credential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(b.credential)).resolves.toBeDefined();
 
     // 5. And a revocation made in error can be undone.
     await request(app.getHttpServer())
       .post('/v1/credential/status/reactivate')
-      .send({ sessionId: 'session-a' })
+      .send({ uri: a.uri, idx: a.idx })
       .expect(201);
 
-    await expect(sdjwt.verify(credentialA)).resolves.toBeDefined();
+    await expect(sdjwt.verify(a.credential)).resolves.toBeDefined();
+  });
+
+  it('rejects the legacy sessionId body: neither addressing form is present', async () => {
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ sessionId: 'session-a' })
+      .expect(400);
+  });
+
+  it('revokes every credential issued to a holder in one call', async () => {
+    const holderDidKey = 'did:key:z6MkTwoCredsA';
+    const a = await issueCredential('holder-session-a', holderDidKey);
+    const b = await issueCredential('holder-session-b', holderDidKey);
+    const other = await issueCredential('other-holder-session', 'did:key:z6MkTwoCredsB');
+
+    await expect(sdjwt.verify(a.credential)).resolves.toBeDefined();
+    await expect(sdjwt.verify(b.credential)).resolves.toBeDefined();
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ holderDidKey, reason: 'lost device' })
+      .expect(201);
+
+    await expect(sdjwt.verify(a.credential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(b.credential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(other.credential)).resolves.toBeDefined();
   });
 
   it('keeps both UUID URLs verifiable and revocable after rollover', async () => {
-    const oldCredential = await issueCredential('rollover-session');
+    const holderDidKey = 'did:key:z6MkRoverA';
+    const oldEntry = await issueCredential('rollover-session', holderDidKey);
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     const lists = app.get(StatusListRepository);
     const before = await sessions.findOneById('rollover-session');
@@ -186,22 +219,19 @@ describe('Credential status list (e2e)', () => {
     const { record, version } = await lists.load(oldId);
     record!.nextIndex = record!.size; // Boundary fixture; allocation logic remains real.
     expect(await lists.saveIfUnchanged(record!, version)).toBe(true);
-    const newCredential = await issueCredential('rollover-session');
+    const newEntry = await issueCredential('rollover-session', holderDidKey);
     const after = await sessions.findOneById('rollover-session');
     expect(after!.statusEntries).toHaveLength(2);
     expect(after!.statusEntries![1].listId).not.toBe(oldId);
-    await expect(sdjwt.verify(oldCredential)).resolves.toBeDefined();
-    await expect(sdjwt.verify(newCredential)).resolves.toBeDefined();
-    await request(app.getHttpServer())
-      .post('/v1/credential/status/revoke')
-      .send({ sessionId: 'rollover-session' })
-      .expect(201);
-    await expect(sdjwt.verify(oldCredential)).rejects.toThrow('Status is not valid');
-    await expect(sdjwt.verify(newCredential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(oldEntry.credential)).resolves.toBeDefined();
+    await expect(sdjwt.verify(newEntry.credential)).resolves.toBeDefined();
+    await request(app.getHttpServer()).post('/v1/credential/status/revoke').send({ holderDidKey }).expect(201);
+    await expect(sdjwt.verify(oldEntry.credential)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(newEntry.credential)).rejects.toThrow('Status is not valid');
   });
 
   it('publishes another instance’s revocation through an already-warm HTTP cache', async () => {
-    const credential = await issueCredential('remote-session');
+    const { credential } = await issueCredential('remote-session');
     await expect(sdjwt.verify(credential)).resolves.toBeDefined();
     const other = new Oid4vcStatusService(
       app.get(Oid4vcConfig),
@@ -216,13 +246,12 @@ describe('Credential status list (e2e)', () => {
     await request(app.getHttpServer()).get('/v1/credential/status/list/default').expect(404);
   });
 
-  it('refuses to revoke a session that never redeemed an offer', async () => {
+  it('refuses to revoke a holder whose offer was never redeemed', async () => {
+    const holderDidKey = 'did:key:z6MkNeverRedeemA';
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
-    await sessions.save({ id: 'never-redeemed' } as Partial<Oid4vcIssuanceSession>);
+    await sessions.save({ id: 'never-redeemed', holderDidKey } as Partial<Oid4vcIssuanceSession>);
+    await sessions.indexHolder(holderDidKey, 'never-redeemed');
 
-    await request(app.getHttpServer())
-      .post('/v1/credential/status/revoke')
-      .send({ sessionId: 'never-redeemed' })
-      .expect(404);
+    await request(app.getHttpServer()).post('/v1/credential/status/revoke').send({ holderDidKey }).expect(404);
   });
 });

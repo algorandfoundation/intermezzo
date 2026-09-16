@@ -38,8 +38,9 @@ App-level orchestration endpoints (Nest):
 | GET    | `/v1/credential/issuer/sessions/:id`   | Inspect an issuance session                |
 | POST   | `/v1/credential/verifier/requests`     | Create a presentation request              |
 | GET    | `/v1/credential/verifier/sessions/:id` | Inspect a verification session + claims    |
+| GET    | `/v1/credential/issuer/sessions?holderDidKey=` | List sessions for one holder `did:key`     |
 | GET    | `/v1/credential/status/list/:listId`   | **Public.** Signed status list token       |
-| POST   | `/v1/credential/status/revoke`         | Revoke all credentials in a session               |
+| POST   | `/v1/credential/status/revoke`         | Revoke credential(s) by holder `did:key`, or by `uri`+`idx` |
 | POST   | `/v1/credential/status/reactivate`     | Undo a revocation                          |
 
 The OID4VCI/OID4VP **protocol endpoints** themselves (token, credential,
@@ -75,24 +76,39 @@ its signature, reads the bit and rejects the credential unless it is `0`.
 The wallet authentication guard also requires a well-formed reference to an
 issuer UUID list; status-free device-attestation credentials are rejected.
 
-Revoke by issuance session id (the id from
-`GET /v1/credential/issuer/sessions`):
+The request body takes exactly one addressing form — there is no
+`sessionId` form, so losing track of a session id never makes a credential
+permanently unrevokable:
+
+- **`holderDidKey`** — every credential ever issued to that wallet-local
+  `did:key`, optionally narrowed to one `credentialConfigurationId`.
+- **`uri` + `idx`** — the single credential that status list entry was
+  allocated to, taken straight from its own `status.status_list` claim.
 
 ```sh
+# Revoke every credential issued to a holder
 curl -X POST http://localhost:3000/v1/credential/status/revoke \
   -H "Authorization: Bearer $MANAGER_JWT" \
   -H 'Content-Type: application/json' \
-  -d '{"sessionId":"<issuance-session-id>","reason":"device reported stolen"}'
+  -d '{"holderDidKey":"did:key:z6Mk...","reason":"device reported stolen"}'
+
+# Revoke one credential, addressed by its own status list entry
+curl -X POST http://localhost:3000/v1/credential/status/revoke \
+  -H "Authorization: Bearer $MANAGER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"uri":"https://host/v1/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab","idx":42}'
 ```
 
-`POST .../reactivate` with the same body reverses it. Both operations cover
-all entries recorded on that session, including entries on older lists.
-Revocation intent is persisted before the bits change, preventing further
-issuance from that session. A failed operation remains pending: retry the
-same endpoint and session id to finish it, including after a restart. The
-original reason is preserved. An opposite operation while pending returns
-409; finish the pending operation before reversing it. Completion/audit
-write failures return an error, even when all bits already changed.
+`POST .../reactivate` with the same body reverses it. A `holderDidKey`
+operation covers every credential currently issued to that holder, across
+lists; `uri`+`idx` covers only the one credential's owning session,
+including its other entries if it redeemed more than once. Revocation
+intent is persisted before the bits change, preventing further issuance
+from an affected session. A failed operation remains pending: retry the
+same request to finish it, including after a restart. The original reason
+is preserved. An opposite operation while pending returns 409; finish the
+pending operation before reversing it. Completion/audit write failures
+return an error, even when all bits already changed.
 
 The list itself is
 public, because verifiers must be able to dereference it:

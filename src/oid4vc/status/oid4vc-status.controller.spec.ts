@@ -12,17 +12,17 @@ const TOKEN = 'eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJkaWQ6YWxnbyJ9.c2ln';
 describe('Oid4vcStatusController', () => {
   let app: INestApplication;
   let getStatusListJwt: jest.Mock;
-  let revokeBySessionId: jest.Mock;
-  let reactivateBySessionId: jest.Mock;
+  let revoke: jest.Mock;
+  let reactivate: jest.Mock;
 
   beforeEach(async () => {
     getStatusListJwt = jest.fn(async () => TOKEN);
-    // Arrays: a session can hold an entry per credential it issued, and all
-    // of them are flipped together.
-    revokeBySessionId = jest.fn(async () => [
+    // Arrays: a target can match more than one credential (a holder's whole
+    // history), and all matched entries are flipped together.
+    revoke = jest.fn(async () => [
       { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
     ]);
-    reactivateBySessionId = jest.fn(async () => [
+    reactivate = jest.fn(async () => [
       { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
     ]);
 
@@ -31,7 +31,7 @@ describe('Oid4vcStatusController', () => {
       providers: [
         {
           provide: Oid4vcStatusService,
-          useValue: { getStatusListJwt, revokeBySessionId, reactivateBySessionId },
+          useValue: { getStatusListJwt, revoke, reactivate },
         },
       ],
     }).compile();
@@ -78,27 +78,73 @@ describe('Oid4vcStatusController', () => {
   });
 
   describe('revoke / reactivate', () => {
-    it('passes the session id and reason through', async () => {
+    const HOLDER_DID_KEY = 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH';
+    const URI = 'https://host/v1/credential/status/list/f538cd53-79e5-4877-b6c2-51c09c51f8ab';
+
+    it('revokes by holderDidKey, with an optional reason and configuration filter', async () => {
       await request(app.getHttpServer())
         .post('/credential/status/revoke')
-        .send({ sessionId: 'session-a', reason: 'device reported stolen' })
+        .send({
+          holderDidKey: HOLDER_DID_KEY,
+          credentialConfigurationId: 'device-attestation-credential',
+          reason: 'device reported stolen',
+        })
         .expect(201);
 
-      expect(revokeBySessionId).toHaveBeenCalledWith('session-a', 'device reported stolen');
+      expect(revoke).toHaveBeenCalledWith({
+        holderDidKey: HOLDER_DID_KEY,
+        credentialConfigurationId: 'device-attestation-credential',
+        reason: 'device reported stolen',
+      });
     });
 
-    it('reactivates without a reason', async () => {
+    it('revokes by uri + idx', async () => {
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ uri: URI, idx: 7 }).expect(201);
+
+      expect(revoke).toHaveBeenCalledWith({ uri: URI, idx: 7 });
+    });
+
+    it('reactivates by holderDidKey', async () => {
       await request(app.getHttpServer())
         .post('/credential/status/reactivate')
-        .send({ sessionId: 'session-a' })
+        .send({ holderDidKey: HOLDER_DID_KEY })
         .expect(201);
 
-      expect(reactivateBySessionId).toHaveBeenCalledWith('session-a');
+      expect(reactivate).toHaveBeenCalledWith({ holderDidKey: HOLDER_DID_KEY });
     });
 
-    it('rejects a body with no session id', async () => {
+    it('reactivates by uri + idx', async () => {
+      await request(app.getHttpServer()).post('/credential/status/reactivate').send({ uri: URI, idx: 7 }).expect(201);
+
+      expect(reactivate).toHaveBeenCalledWith({ uri: URI, idx: 7 });
+    });
+
+    it('rejects a body with neither addressing form', async () => {
       await request(app.getHttpServer()).post('/credential/status/revoke').send({}).expect(400);
-      expect(revokeBySessionId).not.toHaveBeenCalled();
+      expect(revoke).not.toHaveBeenCalled();
+    });
+
+    it('rejects a leftover sessionId (no longer a valid form)', async () => {
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ sessionId: 'session-a' }).expect(400);
+      expect(revoke).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed holderDidKey', async () => {
+      await request(app.getHttpServer())
+        .post('/credential/status/revoke')
+        .send({ holderDidKey: 'not-a-did-key' })
+        .expect(400);
+      expect(revoke).not.toHaveBeenCalled();
+    });
+
+    it('rejects uri without idx', async () => {
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ uri: URI }).expect(400);
+      expect(revoke).not.toHaveBeenCalled();
+    });
+
+    it('rejects a negative idx', async () => {
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ uri: URI, idx: -1 }).expect(400);
+      expect(revoke).not.toHaveBeenCalled();
     });
 
     it('stays behind the global auth guard', () => {

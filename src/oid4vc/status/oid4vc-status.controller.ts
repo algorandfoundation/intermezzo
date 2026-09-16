@@ -55,24 +55,26 @@ export class Oid4vcStatusController {
   }
 
   /**
-   * Returns every entry the session holds, not one: a session that redeemed
-   * more than one credential carries an entry per credential, and all of them
-   * are revoked together.
+   * Revokes every credential matched by the request body's addressing form:
+   * `holderDidKey` (every credential issued to that holder, optionally
+   * narrowed by `credentialConfigurationId`), or `uri`+`idx` (the single
+   * credential that entry was allocated to).
    */
   @ApiBearerAuth()
   @Post('revoke')
   @ApiOperation({
     summary:
-      "Revoke every credential issued under an issuance session. Takes effect on the verifier's next status fetch.",
+      'Revoke the credential(s) matched by `holderDidKey` or `uri`+`idx`. Takes effect on the ' +
+      "verifier's next status fetch.",
   })
   async revoke(@Body() dto: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.status.revokeBySessionId(dto.sessionId, dto.reason);
+    return this.status.revoke(dto);
   }
 
   @ApiBearerAuth()
   @Post('reactivate')
   @ApiOperation({ summary: 'Reverse a revocation made in error.' })
   async reactivate(@Body() dto: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.status.reactivateBySessionId(dto.sessionId);
+    return this.status.reactivate(dto);
   }
 }

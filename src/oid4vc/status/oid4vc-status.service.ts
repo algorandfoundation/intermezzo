@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -38,6 +39,15 @@ const CAS_ATTEMPTS = 5;
 export interface AllocatedStatusEntry extends StatusListEntry {
   /** Absolute URI of the list, as embedded in the credential. */
   uri: string;
+}
+
+/** How the manager addresses the credential(s) to revoke or reactivate. Exactly one form is set. */
+export interface StatusTarget {
+  holderDidKey?: string;
+  credentialConfigurationId?: string;
+  uri?: string;
+  idx?: number;
+  reason?: string;
 }
 
 /**
@@ -165,6 +175,9 @@ export class Oid4vcStatusService implements OnModuleInit {
     const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
     if (!session) throw new NotFoundException(`No local issuance session for ${credoIssuanceSessionId}`);
     const entry = await this.allocate();
+    // Written before the session append so a `uri`+`idx` resolves back to this session even if the process
+    // crashes between the two writes; the entry is simply not yet revocable in that narrow window.
+    await this.repo.saveEntryOwner(entry.listId, entry.idx, session.id);
     await this.sessions.mutate(session.id, (current) => {
       if (current.statusChange?.pending || current.statusChange?.value === STATUS_REVOKED) {
         throw new ConflictException(`Issuance session ${session.id} is revoked or changing status`);
@@ -174,6 +187,63 @@ export class Oid4vcStatusService implements OnModuleInit {
     // Failed issuance may consume a slot. Never recycle it: a failed response
     // does not prove that nobody received the credential.
     return entry;
+  }
+
+  /**
+   * Revokes every credential matched by `target`'s addressing form (holder
+   * `did:key`, or a single credential's `uri`+`idx`). Verification fails for
+   * everyone from the next status fetch onwards.
+   */
+  async revoke(target: StatusTarget): Promise<AllocatedStatusEntry[]> {
+    return this.setStatusForTarget(target, STATUS_REVOKED, target.reason);
+  }
+
+  /** Reverses {@link revoke}, for a revocation made in error. */
+  async reactivate(target: StatusTarget): Promise<AllocatedStatusEntry[]> {
+    return this.setStatusForTarget(target, STATUS_VALID);
+  }
+
+  private async setStatusForTarget(
+    target: StatusTarget,
+    value: 0 | 1,
+    reason?: string,
+  ): Promise<AllocatedStatusEntry[]> {
+    const sessionIds = await this.resolveSessionIds(target);
+    const results: AllocatedStatusEntry[] = [];
+    for (const sessionId of sessionIds) {
+      results.push(...(await this.setSessionStatus(sessionId, value, reason)));
+    }
+    return results;
+  }
+
+  /** Resolves a `holderDidKey` or `uri`+`idx` target to the issuance session(s) it addresses. */
+  private async resolveSessionIds(target: StatusTarget): Promise<string[]> {
+    if (target.uri !== undefined && target.holderDidKey !== undefined) {
+      throw new BadRequestException('Provide either `holderDidKey` or `uri`/`idx`, not both');
+    }
+
+    if (target.uri !== undefined) {
+      if (target.idx === undefined) throw new BadRequestException('`idx` is required with `uri`');
+      const listId = this.localStatusListId(target.uri);
+      if (!listId) throw new NotFoundException(`Status list URI ${target.uri} is not served by this issuer`);
+      const owner = await this.repo.loadEntryOwner(listId, target.idx);
+      if (!owner) throw new NotFoundException(`Status list ${listId} has no allocated entry ${target.idx}`);
+      return [owner.sessionId];
+    }
+
+    if (target.holderDidKey !== undefined) {
+      const sessions = await this.sessions.findByHolder(target.holderDidKey);
+      const matching = sessions.filter(
+        (session) =>
+          (session.statusEntries?.length ?? 0) > 0 &&
+          (!target.credentialConfigurationId ||
+            session.offeredCredentialConfigurationIds?.includes(target.credentialConfigurationId)),
+      );
+      if (!matching.length) throw new NotFoundException(`No credentials issued to ${target.holderDidKey}`);
+      return matching.map((session) => session.id);
+    }
+
+    throw new BadRequestException('Provide either `holderDidKey` or `uri`/`idx`');
   }
 
   /**

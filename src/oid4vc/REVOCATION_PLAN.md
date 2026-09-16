@@ -1,8 +1,9 @@
 # Credential status and revocation — implementation plan
 
 **Branch:** `feat/credentials-status-and-revoke`
-**Scope:** fresh installations; per-session revocation of issued SD-JWT VCs,
-with automatic rollover beyond one million allocated status entries.
+**Scope:** fresh installations; revocation of issued SD-JWT VCs addressed by
+holder `did:key` or by a credential's own status entry (`uri`+`idx`), with
+automatic rollover beyond one million allocated status entries.
 No migration, legacy `default` alias, or status-free wallet compatibility.
 
 The original phases 0–6 implemented issuance, Vault storage, revocation,
@@ -20,6 +21,9 @@ or merging that PR is separate from this implementation.
 - [x] Conditional session appends and durable, resumable status operations.
 - [x] Conditional Credo state mirroring so it cannot overwrite revocation.
 - [x] Wallet authentication requires an issuer UUID status reference.
+- [x] Revoke/reactivate addressed by holder `did:key` (optionally narrowed
+  to one credential configuration) or by `uri`+`idx`. The issuance session
+  id is no longer accepted, so losing it cannot strand a credential.
 - [x] Unit and HTTP tests for races, failures, rollover, and enforcement.
 - [x] Separate opt-in million-allocation check and real-Vault validation.
 
@@ -33,6 +37,14 @@ Vault paths:
 
 - `intermezzo/oid4vc/status-lists/records/<uuid>`: public list data.
 - `intermezzo/oid4vc/status-lists/active`: private pointer `{ listId }`.
+- `intermezzo/oid4vc/status-lists/entries/<uuid>/<idx>`: `{ sessionId }`,
+  written at allocation so a credential's own `uri`+`idx` resolves back to
+  its session without the caller knowing any session id.
+- `intermezzo/oid4vc/sessions/issuance/by-holder/<multibase>/<sessionId>`:
+  one key per session, so concurrent offers to the same holder append
+  without contending. The `did:key:` prefix is stripped to keep colons out
+  of the path, and the multibase segment is revalidated before use because
+  it reaches the repository from an unvalidated query parameter.
 - Issuance sessions retain `statusEntries: [{ listId, idx }, ...]`, audit
   fields, and `statusChange: { id, value, pending, requestedAt, reason? }`.
 
@@ -49,6 +61,13 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
 
 ## Session concurrency and recovery
 
+0. A request first resolves its addressing form to session ids: `uri`+`idx`
+   reads the entry-owner key; `holderDidKey` lists the holder index and
+   keeps sessions that actually hold entries. Resolution is a read-only
+   step, so an unknown holder or entry fails with 404 before any bit moves.
+   A holder matching several sessions runs the steps below once per session
+   rather than as one atomic operation: a failure part-way leaves earlier
+   sessions revoked, and re-sending the same request finishes the rest.
 1. Issuance finds the local session, reserves an entry, and conditionally
    appends it. A pending status operation or revoked session rejects the
    append, aborting issuance. A competing successful append is included
@@ -65,7 +84,7 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
    a CAS commit to preserve that fence.
 4. Completion and audit fields are written conditionally. Failure is
    returned to the caller, leaving retryable intent. No bit changes are
-   rolled back. Retrying the same endpoint/session finishes partial work,
+   rolled back. Retrying the same request finishes partial work,
    including after a process restart. There is no background retry worker.
 5. Credo state mirroring uses the same session CAS path. Ordinary session
    `save` is used for initial offer creation, not concurrent mutation.
@@ -168,13 +187,26 @@ p50 6.28 ms, p95 36.41 ms, and no caller-level 503 retries. The 200 warm
 SD-JWT checks measured p50 5.44 ms and p95 7.01 ms. These are one local
 synthetic run, not production sizing numbers or full OID4VC issuance latency.
 
+### Recorded validation (2026-09-16, `did:key` / `uri`+`idx` addressing)
+
+All 28 unit suites passed (294 tests, with the opt-in capacity test skipped),
+along with lint, build, and the six in-memory status-list HTTP integration tests.
+The real-Vault check was not re-run for this change; the holder and
+entry-owner indexes are new KV paths under `intermezzo/`, which the manager
+policy already globs, but that remains unverified against a live Vault.
+Existing sessions are not backfilled: both indexes populate only for offers
+created and credentials issued after this change.
+
 ## Deferred, with explicit boundaries
 
-- Session listing still scans all Vault records sequentially. Indexed
-  pagination is required before claiming million-session administration.
+- Unfiltered session listing still scans all Vault records sequentially.
+  `?holderDidKey=` is index-backed, but indexed pagination is still
+  required before claiming million-session administration.
 - No Redis, invalidation bus, new database, or per-list queues. Add only
   when representative production measurements justify them.
-- No suspension or device-wide sweep across sessions.
+- No suspension. A device-wide sweep now exists for a single holder
+  `did:key`, but it is not atomic across that holder's sessions and there
+  is no bulk multi-holder form.
 - No credential expiry/list retirement policy. Old list URLs remain served.
 - Real deployment sizing still needs its own issuance/verification rates,
   Vault topology, retention settings, and latency targets.

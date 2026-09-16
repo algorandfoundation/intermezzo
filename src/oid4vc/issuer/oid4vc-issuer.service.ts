@@ -228,7 +228,9 @@ export class Oid4vcIssuerService implements OnModuleInit {
       state: issuanceSession.state,
       issuanceMetadata: input.issuanceMetadata,
     });
-    return this.sessionRepo.save(record);
+    const saved = await this.sessionRepo.save(record);
+    await this.sessionRepo.indexHolder(input.holderDidKey, saved.id);
+    return saved;
   }
 
   /** Returns the local app-level session record. */
@@ -242,7 +244,9 @@ export class Oid4vcIssuerService implements OnModuleInit {
     return session;
   }
 
-  async listSessions(): Promise<Oid4vcIssuanceSession[]> {
+  /** All sessions, or only those pinned to `holderDidKey` when supplied. */
+  async listSessions(holderDidKey?: string): Promise<Oid4vcIssuanceSession[]> {
+    if (holderDidKey) return this.sessionRepo.findByHolder(holderDidKey);
     return this.sessionRepo.find({ order: { createdAt: 'DESC' } });
   }
 

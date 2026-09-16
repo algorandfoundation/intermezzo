@@ -7,7 +7,7 @@ import { Oid4vcConfig } from '../oid4vc.config';
 import { VaultService } from '../../vault/vault.service';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 import { Oid4vcStatusService } from '../status/oid4vc-status.service';
-import { Oid4vcIssuerService } from './oid4vc-issuer.service';
+import { Oid4vcIssuerService, DEFAULT_CREDENTIAL_CONFIGURATIONS } from './oid4vc-issuer.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
 const HOLDER_DID_KEY = 'did:key:z6MkExampleHolderKey';
@@ -160,5 +160,74 @@ describe('Oid4vcIssuerService credential mapper', () => {
       expect(allocate).not.toHaveBeenCalled();
       expect(save).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('Oid4vcIssuerService createOffer / listSessions', () => {
+  let sessionRepo: {
+    create: jest.Mock;
+    save: jest.Mock;
+    indexHolder: jest.Mock;
+    find: jest.Mock;
+    findByHolder: jest.Mock;
+  };
+  let service: Oid4vcIssuerService;
+
+  beforeEach(() => {
+    sessionRepo = {
+      create: jest.fn((data: Record<string, unknown>) => data),
+      save: jest.fn(async (data: Record<string, unknown>) => ({ ...data, id: 'local-session-1' })),
+      indexHolder: jest.fn(async () => undefined),
+      find: jest.fn(async () => []),
+      findByHolder: jest.fn(async () => []),
+    };
+
+    service = new Oid4vcIssuerService(
+      {
+        getAgent: async () => ({
+          modules: {
+            openId4VcIssuer: {
+              getIssuerByIssuerId: jest.fn(async () => ({
+                credentialConfigurationsSupported: DEFAULT_CREDENTIAL_CONFIGURATIONS,
+              })),
+              updateIssuerMetadata: jest.fn(async () => undefined),
+              createCredentialOffer: jest.fn(async () => ({
+                issuanceSession: { id: 'credo-session-1', preAuthorizedCode: 'code', state: 'OfferCreated' },
+                credentialOffer: 'openid-credential-offer://example',
+              })),
+            },
+          },
+        }),
+        setCredentialMapper: () => undefined,
+      } as unknown as Oid4vcAgentProvider,
+      new Oid4vcConfig({ get: <T>(_key: string, d?: T) => d } as unknown as ConfigService),
+      sessionRepo as unknown as Oid4vcIssuanceSessionRepository,
+      { kvList: jest.fn(async () => []) } as unknown as VaultService,
+      { isConfigured: () => false, getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
+      {} as unknown as Oid4vcStatusService,
+    );
+  });
+
+  it('indexes the holder did:key after saving the session', async () => {
+    await service.createOffer({
+      credentialConfigurationIds: ['device-attestation-credential'],
+      holderDidKey: HOLDER_DID_KEY,
+    });
+
+    expect(sessionRepo.indexHolder).toHaveBeenCalledWith(HOLDER_DID_KEY, 'local-session-1');
+  });
+
+  it('lists all sessions when no holder is given', async () => {
+    await service.listSessions();
+
+    expect(sessionRepo.find).toHaveBeenCalledWith({ order: { createdAt: 'DESC' } });
+    expect(sessionRepo.findByHolder).not.toHaveBeenCalled();
+  });
+
+  it("lists only a holder's sessions when holderDidKey is given", async () => {
+    await service.listSessions(HOLDER_DID_KEY);
+
+    expect(sessionRepo.findByHolder).toHaveBeenCalledWith(HOLDER_DID_KEY);
+    expect(sessionRepo.find).not.toHaveBeenCalled();
   });
 });
