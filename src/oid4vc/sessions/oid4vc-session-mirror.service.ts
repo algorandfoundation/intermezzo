@@ -8,6 +8,7 @@ import {
 } from '@credo-ts/openid4vc';
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
+import { verificationOutcome } from '../entities/oid4vc-verification-session.entity';
 
 @Injectable()
 export class Oid4vcSessionMirrorService implements OnModuleInit {
@@ -61,7 +62,10 @@ export class Oid4vcSessionMirrorService implements OnModuleInit {
     try {
       const result = await this.verificationRepo.update(
         { credoVerificationSessionId: verificationSession.id },
-        { state: verificationSession.state },
+        {
+          state: verificationSession.state,
+          outcome: verificationOutcome(verificationSession.state, verificationSession.errorMessage),
+        },
       );
       if (result.affected) {
         this.logger.debug(
