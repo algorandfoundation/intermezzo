@@ -13,6 +13,8 @@ import {
   TransactionType,
 } from '@algorandfoundation/algokit-utils/transact';
 import { Address } from '@algorandfoundation/algokit-utils';
+import * as algosdk from 'algosdk';
+import { createHash } from 'crypto';
 
 describe('ChainService', () => {
   let chainService: ChainService;
@@ -70,6 +72,54 @@ describe('ChainService', () => {
       expect(result).toBeInstanceOf(Uint8Array);
       // It's harder to validate the exact output without mocking, but you can add basic checks
       expect(result.length).toBeGreaterThan(txn.length); // Signature should increase the length
+    });
+  });
+
+  describe('PQ transactions', () => {
+    const publicKey = new Uint8Array(1793).fill(7);
+    const signature = new Uint8Array(1226).fill(9);
+    const scheme = Buffer.from('f1');
+    const account = algosdk.addressFromPQKey(scheme, publicKey);
+
+    const payment = () =>
+      chainService.craftPaymentTx(account.address.toString(), account.address.toString(), 5, {
+        minFee: 1000,
+        lastRound: 1n,
+      });
+
+    it('encodes a canonical PQ envelope and preserves the signing bytes', async () => {
+      const unsigned = await payment();
+      const signed = chainService.addPqSignatureToTxn(unsigned, {
+        scheme: 'f1',
+        salt: account.salt,
+        publicKey,
+        signature,
+      });
+      const decoded = algosdk.decodeSignedTransaction(signed);
+      expect(algosdk.addressFromPQSig(decoded.pqsig!).toString()).toBe(account.address.toString());
+      expect(Buffer.from(decoded.txn.bytesToSign())).toEqual(Buffer.from(unsigned));
+      expect(decoded.pqsig!.sig).toEqual(signature);
+      expect(algosdk.encodeMsgpack(decoded)).toEqual(signed);
+      expect(createHash('sha256').update(signed).digest('hex')).toBe(
+        '89930dba1655fdba669c9f112168acb3c1d2b74dffb1921b52c5dd2841eda886',
+      );
+    });
+
+    it.each([1000n, 5000n])('adds the surcharge to a fee of %s', async (fee) => {
+      const txn = decodeTransaction(await payment());
+      txn.fee = fee;
+      const unsigned = encodeTransaction(txn);
+      const result = chainService.addPqFeeSurcharge(unsigned, 1000);
+      expect(decodeTransaction(result).fee).toBe(fee + 2000n);
+      expect(decodeTransaction(unsigned).fee).toBe(fee);
+      const restored = decodeTransaction(result);
+      restored.fee = fee;
+      expect(encodeTransaction(restored)).toEqual(unsigned);
+    });
+
+    it('rejects fee changes after grouping', async () => {
+      const grouped = chainService.setGroupID([await payment()]);
+      expect(() => chainService.addPqFeeSurcharge(grouped[0], 1000)).toThrow('before grouping');
     });
   });
 

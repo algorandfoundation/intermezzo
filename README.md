@@ -106,6 +106,60 @@ This command's output will provide you 4 important pieces of information:
 
 You can re-run `vault:development:init` whenever you want.
 
+## Post-quantum user accounts
+
+Intermezzo supports opt-in Algorand Falcon-1024 user accounts. They require
+algod 5 or newer and the custom Vault plugin:
+
+```bash
+./scripts/build_vault_plugin.sh
+docker compose up -d vault pawn
+docker compose exec -T pawn yarn vault:development:init
+```
+
+Set `VAULT_PQ_USERS_PATH` to the plugin mount path; development defaults to
+`pawn/pq-users`. The initialization command registers the plugin, mounts it,
+and installs the development policies.
+
+The plugin creates and stores Falcon keys and returns the base64 public key.
+Intermezzo derives the canonical salt and Algorand address from that key, and
+includes the salt in the transaction's PQ signature envelope. The salt is public
+and recomputed when needed; secret entropy and private keys stay in Vault.
+
+Create a PQ account through the existing endpoint:
+
+```http
+POST /v1/wallet/user/
+Authorization: Bearer {access-token}
+Content-Type: application/json
+
+{
+  "user_id": "alice-pq",
+  "account_type": "falcon1024"
+}
+```
+
+Omitting `account_type` continues to create an Ed25519 account. User responses
+now include `account_type`, so clients that reject unknown response fields must
+update their schema.
+
+A user ID is permanently assigned one account type. Ed25519 and Falcon keys
+produce different addresses, and an existing Ed25519 account cannot be migrated
+to PQ. Retrying the same user ID and account type is idempotent; requesting the
+other type returns `409 Conflict`. New user IDs may contain letters, digits,
+and underscores; dots and hyphens are allowed only internally.
+
+Key creation and signing retain the caller's Vault authorization. The service
+AppRole coordinates account-type claims and PQ discovery; it does not grant the
+caller signing access. PQ transaction fees and envelopes are applied
+automatically.
+
+Deploy this claim-aware version to every application instance before enabling
+PQ account creation. No audit or backfill is required because PQ creation has
+not previously been deployed. Create accounts through the application endpoint;
+direct writes to the Vault mounts bypass the account-type claim. Manager
+accounts remain Ed25519.
+
 ## HTTP API mode
 
 ### Authentication (During Development)

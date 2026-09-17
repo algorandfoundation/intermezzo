@@ -166,7 +166,9 @@ export class Wallet {
     summary: 'Create User',
     description:
       'Create a new **User** in the wallet. The `user_id` is the unique identifier for the user.' +
-      'The response includes the **Algorand** `public_address` of the user.',
+      'The response includes the **Algorand** `public_address` of the user. ' +
+      'Pass `account_type: "falcon1024"` for a post-quantum account; omitting it creates a ' +
+      'standard ed25519 account exactly as before.',
   })
   @ApiCreatedResponse({
     description: 'A new user has been created.',
@@ -175,8 +177,11 @@ export class Wallet {
   @ApiBadRequestResponse({
     description: 'Bad Request',
   })
+  @ApiConflictResponse({
+    description: 'The `user_id` already exists with a different `account_type`.',
+  })
   async userCreate(@Request() request: any, @Body() newUserParams: CreateUserDto): Promise<UserInfoResponseDto> {
-    return this.walletService.userCreate(newUserParams.user_id, request.vault_token);
+    return this.walletService.userCreate(newUserParams.user_id, request.vault_token, newUserParams.account_type);
   }
 
   // Endpont to get all users keys

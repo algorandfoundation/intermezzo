@@ -5,7 +5,6 @@ import { Axios, AxiosResponse } from 'axios';
 import { randomBytes } from 'crypto';
 import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
 import createMockInstance from 'jest-create-mock-instance';
-import { UserInfoDto } from './user-info.dto';
 
 describe('VaultService', () => {
   let vaultService: VaultService;
@@ -108,31 +107,31 @@ describe('VaultService', () => {
   });
 
   describe('getKeys()', () => {
-    it('(\OK) should return an array of keys', async () => {
-      const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
+    const baseUrl = 'http://vault';
+    const keysPath = 'transit/users';
+    const configForTransit = () => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        if (key === 'VAULT_TRANSIT_USERS_PATH') return keysPath;
+        return undefined;
+      });
+    };
 
-      const keysPath = 'transit/users';
-      (configService.get as jest.Mock).mockReturnValueOnce(keysPath);
-
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
-      (configService.get as jest.Mock).mockReturnValueOnce(baseUrl);
-
-      const key1: Buffer = randomBytes(32);
-
-      const axiosResponse: AxiosResponse = {
-        data: {
-          data: {
-            keys: ['user-key1', 'user-key2'],
-          },
-        },
+    const listResponse = (keys: string[]): AxiosResponse =>
+      ({
+        data: { data: { keys } },
         status: 200,
         statusText: 'OK',
         headers: {},
         config: { headers: {} as any },
-      };
+      }) as AxiosResponse;
 
-      (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(axiosResponse);
+    it('(\OK) should return an array of keys', async () => {
+      configForTransit();
+
+      const key1: Buffer = randomBytes(32);
+
+      (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(listResponse(['user-key1', 'user-key2']));
 
       // mock two calls for get keys
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue({
@@ -145,7 +144,7 @@ describe('VaultService', () => {
         },
       });
 
-      const result: UserInfoDto[] = await vaultService.getKeys('token');
+      const result = await vaultService.getKeys('token');
 
       expect(httpService.axiosRef.request).toHaveBeenCalledWith({
         method: 'LIST',
@@ -163,6 +162,14 @@ describe('VaultService', () => {
           public_address: key1.toString('base64'),
         },
       ]);
+      expect(httpService.axiosRef.request).toHaveBeenCalledTimes(1);
+    });
+
+    it('(FAIL) should still throw when the transit LIST fails for a non-404 reason', async () => {
+      configForTransit();
+      (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+      await expect(vaultService.getKeys('token')).rejects.toThrow(HttpErrorByCode[403]);
     });
   });
 
@@ -349,6 +356,41 @@ describe('VaultService', () => {
     });
   });
 
+  describe('canCreateUserKey', () => {
+    const baseUrl = 'http://vault';
+    const path = 'pawn/pq-users/keys/pq-user';
+
+    beforeEach(() => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        return undefined;
+      });
+    });
+
+    it('checks the exact target path', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: { [path]: ['create', 'update'] } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBe(true);
+      expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+        `${baseUrl}/v1/sys/capabilities-self`,
+        { paths: [path] },
+        { headers: { 'X-Vault-Token': 'token' } },
+      );
+    });
+
+    it('returns false when Vault denies the target path', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: { [path]: ['deny'] } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBe(false);
+    });
+
+    it('skips the preflight when capabilities-self is unavailable', async () => {
+      (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+      await expect(vaultService.canCreateUserKey('pq-user', 'falcon1024', 'token')).resolves.toBeUndefined();
+    });
+  });
+
   describe('kv helpers', () => {
     const baseUrl = 'http://vault';
     const defaultMount = 'secret';
@@ -463,6 +505,44 @@ describe('VaultService', () => {
       });
     });
 
+    describe('kvCreate', () => {
+      it('uses CAS zero and reports whether the claim was created', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce({ data: {} });
+        const claim = { schemaVersion: 1, userId: 'alice', accountType: 'ed25519' };
+
+        await expect(vaultService.kvCreate('intermezzo/account-types/hash', claim, 'token')).resolves.toBe(true);
+        expect(httpService.axiosRef.post).toHaveBeenCalledWith(
+          `${baseUrl}/v1/${defaultMount}/data/intermezzo/account-types/hash`,
+          { data: claim, options: { cas: 0 } },
+          {
+            headers: {
+              'X-Vault-Token': 'token',
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+      });
+
+      it('returns false only for a CAS conflict', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['check-and-set parameter did not match the current version'] } },
+        });
+
+        await expect(vaultService.kvCreate('claim', { x: 1 }, 'token')).resolves.toBe(false);
+      });
+
+      it('preserves unrelated Vault errors', async () => {
+        configWith();
+        (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({
+          response: { status: 400, data: { errors: ['expected a map'] } },
+        });
+
+        await expect(vaultService.kvCreate('claim', { x: 1 }, 'token')).rejects.toThrow(HttpErrorByCode[400]);
+      });
+    });
+
     describe('kvDelete', () => {
       it('(OK) should DELETE the metadata endpoint', async () => {
         configWith();
@@ -531,6 +611,182 @@ describe('VaultService', () => {
         (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
 
         await expect(vaultService.kvList('foo', 'token')).rejects.toThrow(HttpErrorByCode[500]);
+      });
+    });
+  });
+
+  describe('pq (Falcon-1024) engine', () => {
+    const baseUrl = 'http://vault';
+    const defaultMount = 'pawn/pq-users';
+
+    const publicKey = Buffer.alloc(1793, 9);
+    const keyPayload = {
+      public_key: publicKey.toString('base64'),
+    };
+
+    const configWith = (overrides: Record<string, string | undefined> = {}) => {
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === 'VAULT_BASE_URL') return baseUrl;
+        if (key in overrides) return overrides[key];
+        return undefined;
+      });
+    };
+
+    const ok = (data: any) =>
+      ({
+        data,
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: { headers: {} as any },
+      }) as AxiosResponse;
+
+    it.each(['pqCreateKey', 'pqGetKey'] as const)('%s rejects malformed public keys from Vault', async (method) => {
+      configWith();
+      for (const public_key of [
+        undefined,
+        42,
+        '',
+        'not-base64!!',
+        Buffer.alloc(32).toString('base64'),
+        publicKey.subarray(1).toString('base64'),
+        keyPayload.public_key + '!',
+      ]) {
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { public_key } }));
+        await expect(vaultService[method]('user-1', 'token')).rejects.toThrow(HttpErrorByCode[502]);
+      }
+    });
+
+    describe('pqCreateKey', () => {
+      it('(OK) should POST to the key path and parse the plugin response', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+
+        const result = await vaultService.pqCreateKey('user-1', 'token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${defaultMount}/keys/user-1`,
+          method: 'POST',
+          data: {},
+          headers: { 'X-Vault-Token': 'token' },
+        });
+        expect(result).toEqual(publicKey);
+        expect(Buffer.isBuffer(result)).toBe(true);
+      });
+
+      it('(OK) should honour VAULT_PQ_USERS_PATH and the namespace header', async () => {
+        configWith({ VAULT_PQ_USERS_PATH: 'other/pq', VAULT_NAMESPACE: 'tenant-a' });
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+
+        await vaultService.pqCreateKey('user-1', 'token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/other/pq/keys/user-1`,
+          method: 'POST',
+          data: {},
+          headers: { 'X-Vault-Token': 'token', 'X-Vault-Namespace': 'tenant-a' },
+        });
+      });
+
+      it('(FAIL) should throw HttpErrorByCode when the engine rejects', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 403 } });
+
+        await expect(vaultService.pqCreateKey('user-1', 'token')).rejects.toThrow(HttpErrorByCode[403]);
+      });
+    });
+
+    describe('pqGetKey', () => {
+      it('(OK) should GET the key path and parse the plugin response', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+
+        const result = await vaultService.pqGetKey('user-1', 'token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${defaultMount}/keys/user-1`,
+          method: 'GET',
+          headers: { 'X-Vault-Token': 'token' },
+        });
+        expect(result).toEqual(publicKey);
+      });
+
+      it('(OK) should return undefined on 404 rather than throwing', async () => {
+        // Load-bearing: the account-type probe reads a miss here as
+        // "this user_id is not a PQ account", not as a failure.
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        await expect(vaultService.pqGetKey('missing', 'token')).resolves.toBeUndefined();
+      });
+
+      it('(FAIL) should throw HttpErrorByCode on non-404 errors', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
+
+        await expect(vaultService.pqGetKey('user-1', 'token')).rejects.toThrow(HttpErrorByCode[500]);
+      });
+    });
+
+    describe('pqSign', () => {
+      it('(OK) should base64 the signing input unmodified and return raw signature bytes', async () => {
+        configWith();
+        const input = new Uint8Array([0x54, 0x58, 0x01, 0x02, 0x03]); // "TX" || payload
+        const signature = Buffer.from('a-very-long-falcon-signature');
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(
+          ok({ data: { signature: signature.toString('base64') } }),
+        );
+
+        const result = await vaultService.pqSign('user-1', input, 'token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${defaultMount}/sign/user-1`,
+          method: 'POST',
+          data: { input: Buffer.from(input).toString('base64') },
+          headers: { 'X-Vault-Token': 'token' },
+        });
+        // No `vault:v1:` envelope to split — the plugin returns the bare
+        // signature, so anything that strips a transit prefix would corrupt it.
+        expect(result).toEqual(signature);
+      });
+
+      it('(FAIL) should throw 404 for an unknown key instead of returning undefined', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        await expect(vaultService.pqSign('missing', new Uint8Array([1]), 'token')).rejects.toThrow(
+          HttpErrorByCode[404],
+        );
+      });
+    });
+
+    describe('pqListKeys', () => {
+      it('(OK) should LIST the keys path', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { keys: ['a', 'b'] } }));
+
+        const result = await vaultService.pqListKeys('token');
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${defaultMount}/keys`,
+          method: 'LIST',
+          headers: { 'X-Vault-Token': 'token' },
+        });
+        expect(result).toEqual(['a', 'b']);
+      });
+
+      it('(OK) should return [] on 404 so it can be merged unconditionally', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 404 } });
+
+        await expect(vaultService.pqListKeys('token')).resolves.toEqual([]);
+      });
+
+      it('(FAIL) should throw HttpErrorByCode on non-404 errors', async () => {
+        configWith();
+        (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
+
+        await expect(vaultService.pqListKeys('token')).rejects.toThrow(HttpErrorByCode[500]);
       });
     });
   });
