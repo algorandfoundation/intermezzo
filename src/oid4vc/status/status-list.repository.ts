@@ -34,4 +34,15 @@ export class StatusListRepository extends VaultRepository<StatusListRecord> {
       throw error;
     }
   }
+
+  /** Records which session an allocated entry belongs to, so a `uri`+`idx` can be resolved back to it. */
+  async saveEntryOwner(listId: string, idx: number, sessionId: string): Promise<void> {
+    const token = await this.tokenProvider.getToken();
+    await this.vault.kvWrite(`${this.folder}/entries/${listId}/${idx}`, { sessionId }, token);
+  }
+
+  async loadEntryOwner(listId: string, idx: number): Promise<{ sessionId: string } | null> {
+    const token = await this.tokenProvider.getToken();
+    return this.vault.kvRead<{ sessionId: string }>(`${this.folder}/entries/${listId}/${idx}`, token);
+  }
 }

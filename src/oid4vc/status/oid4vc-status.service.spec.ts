@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getListFromStatusListJWT } from '@sd-jwt/jwt-status-list';
 import { AgentContext } from '@credo-ts/core';
@@ -76,6 +76,15 @@ describe('Oid4vcStatusService', () => {
         if (cas !== undefined && cas !== version) throw new VaultCasConflictError(path);
         kv.set(path, { data: copy(data), version: version + 1 });
       },
+      // Mirrors Vault's KV-v2 LIST: immediate child names under `path/`, no recursion.
+      kvList: async (path: string) => {
+        const prefix = `${path}/`;
+        const children = new Set<string>();
+        for (const key of kv.keys()) {
+          if (key.startsWith(prefix)) children.add(key.slice(prefix.length).split('/')[0]);
+        }
+        return [...children];
+      },
       sign,
     } as unknown as VaultService;
     lists = new StatusListRepository(vault, tokenProvider);
@@ -83,9 +92,9 @@ describe('Oid4vcStatusService', () => {
     service = makeService();
   });
 
-  async function issue(id = 'session-a', svc = service) {
+  async function issue(id = 'session-a', svc = service, credentialConfigurationId?: string) {
     if (!(await sessions.findOneById(id))) await sessions.save({ id, credoIssuanceSessionId: id });
-    return svc.allocateForSession(id);
+    return svc.allocateForSession(id, credentialConfigurationId);
   }
 
   function storedList(id: string): StatusListRecord {
@@ -483,6 +492,176 @@ describe('Oid4vcStatusService', () => {
       expect(host.getStatusListFetcher).toBe(original);
       await expect(makeService({ agentError: new Error('agent unavailable') }).onModuleInit()).resolves.toBeUndefined();
     });
+  });
+
+  describe('revoke / reactivate by uri+idx and holderDidKey', () => {
+    it('records which session owns an allocated entry', async () => {
+      const entry = await issue();
+      expect(await lists.loadEntryOwner(entry.listId, entry.idx)).toEqual({ sessionId: 'session-a' });
+    });
+
+    it('revokes and reactivates a single credential by uri + idx, leaving another session untouched', async () => {
+      const a = await issue('session-a');
+      const b = await issue('session-b');
+
+      await service.revoke({ uri: a.uri, idx: a.idx });
+      expect(await service.getStatus(a.listId, a.idx)).toBe(1);
+      expect(await service.getStatus(b.listId, b.idx)).toBe(0);
+
+      await service.reactivate({ uri: a.uri, idx: a.idx });
+      expect(await service.getStatus(a.listId, a.idx)).toBe(0);
+    });
+
+    it('404s for a uri this issuer does not serve', async () => {
+      await expect(service.revoke({ uri: 'https://foreign.example/list/1', idx: 0 })).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('404s for an unallocated idx on one of our own lists', async () => {
+      const entry = await issue();
+      await expect(service.revoke({ uri: entry.uri, idx: entry.idx + 1 })).rejects.toThrow(NotFoundException);
+    });
+
+    it('revokes every credential issued to a holder, across lists, leaving another holder untouched', async () => {
+      await sessions.save({ id: 'session-a', credoIssuanceSessionId: 'session-a', holderDidKey: 'did:key:zA' });
+      await sessions.save({ id: 'session-b', credoIssuanceSessionId: 'session-b', holderDidKey: 'did:key:zA' });
+      await sessions.save({ id: 'session-c', credoIssuanceSessionId: 'session-c', holderDidKey: 'did:key:zB' });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      await sessions.indexHolder('did:key:zA', 'session-b');
+      await sessions.indexHolder('did:key:zB', 'session-c');
+
+      const a = await issue('session-a');
+      storedList(a.listId).nextIndex = STATUS_LIST_SIZE; // force session-b's entry onto a second list
+      const b = await issue('session-b');
+      const c = await issue('session-c');
+
+      await service.revoke({ holderDidKey: 'did:key:zA', reason: 'lost device' });
+
+      expect(await service.getStatus(a.listId, a.idx)).toBe(1);
+      expect(await service.getStatus(b.listId, b.idx)).toBe(1);
+      expect(await service.getStatus(c.listId, c.idx)).toBe(0);
+    });
+
+    it('narrows a holder revocation to a credential configuration', async () => {
+      await sessions.save({
+        id: 'session-a',
+        credoIssuanceSessionId: 'session-a',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['device-attestation-credential'],
+      });
+      await sessions.save({
+        id: 'session-b',
+        credoIssuanceSessionId: 'session-b',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['other-credential'],
+      });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      await sessions.indexHolder('did:key:zA', 'session-b');
+      const a = await issue('session-a');
+      const b = await issue('session-b');
+
+      await service.revoke({ holderDidKey: 'did:key:zA', credentialConfigurationId: 'device-attestation-credential' });
+
+      expect(await service.getStatus(a.listId, a.idx)).toBe(1);
+      expect(await service.getStatus(b.listId, b.idx)).toBe(0);
+    });
+
+    it('narrows to one configuration within a single multi-configuration session', async () => {
+      await sessions.save({
+        id: 'session-a',
+        credoIssuanceSessionId: 'session-a',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['device-attestation-credential', 'other-credential'],
+      });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      const attestation = await issue('session-a', service, 'device-attestation-credential');
+      const other = await issue('session-a', service, 'other-credential');
+
+      await service.revoke({ holderDidKey: 'did:key:zA', credentialConfigurationId: 'device-attestation-credential' });
+
+      expect(await service.getStatus(attestation.listId, attestation.idx)).toBe(1);
+      expect(await service.getStatus(other.listId, other.idx)).toBe(0);
+      // Not the whole session, so the session-level audit stamp stays clear.
+      expect((await sessions.findOneById('session-a'))!.revokedAt).toBeUndefined();
+    });
+
+    it('refuses to narrow a session issued before configuration ids were recorded', async () => {
+      await sessions.save({
+        id: 'session-a',
+        credoIssuanceSessionId: 'session-a',
+        holderDidKey: 'did:key:zA',
+        offeredCredentialConfigurationIds: ['device-attestation-credential', 'other-credential'],
+      });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      await issue('session-a'); // no configuration id, as legacy entries have
+
+      await expect(
+        service.revoke({ holderDidKey: 'did:key:zA', credentialConfigurationId: 'device-attestation-credential' }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('revokes one credential by uri + idx without touching its siblings on the same session', async () => {
+      const first = await issue('session-a');
+      const second = await issue('session-a');
+
+      await service.revoke({ uri: first.uri, idx: first.idx });
+
+      expect(await service.getStatus(first.listId, first.idx)).toBe(1);
+      expect(await service.getStatus(second.listId, second.idx)).toBe(0);
+      expect((await sessions.findOneById('session-a'))!.revokedAt).toBeUndefined();
+    });
+
+    it('404s for an unknown holder', async () => {
+      await expect(service.revoke({ holderDidKey: 'did:key:zUnknown' })).rejects.toThrow(NotFoundException);
+    });
+    it('404s when the holder only has unredeemed offers', async () => {
+      await sessions.save({ id: 'session-a', credoIssuanceSessionId: 'session-a', holderDidKey: 'did:key:zA' });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      await expect(service.revoke({ holderDidKey: 'did:key:zA' })).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects a target with both addressing forms', async () => {
+      const entry = await issue();
+      await expect(service.revoke({ holderDidKey: 'did:key:zA', uri: entry.uri, idx: entry.idx })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    // A stray `idx` used to fall through to the holder form and revoke everything that holder had.
+    it('rejects a holder target carrying a stray idx rather than widening it', async () => {
+      await sessions.save({ id: 'session-a', credoIssuanceSessionId: 'session-a', holderDidKey: 'did:key:zA' });
+      await sessions.indexHolder('did:key:zA', 'session-a');
+      const entry = await issue('session-a');
+
+      await expect(service.revoke({ holderDidKey: 'did:key:zA', idx: entry.idx })).rejects.toThrow(BadRequestException);
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+    });
+
+    it('rejects an idx without a uri', async () => {
+      const entry = await issue();
+      await expect(service.revoke({ idx: entry.idx })).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects a uri without an idx', async () => {
+      const entry = await issue();
+      await expect(service.revoke({ uri: entry.uri })).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects a target with neither addressing form', async () => {
+      await expect(service.revoke({})).rejects.toThrow(BadRequestException);
+    });
+
+    // `?holderDidKey=` reaches the repository unvalidated, and the value becomes a Vault KV path segment.
+    it.each(['../../records', 'did:key:z../../records', 'did:key:', ''])(
+      'refuses to build a holder index path from %p',
+      async (holderDidKey) => {
+        const list = jest.spyOn(vault, 'kvList');
+        await expect(sessions.findByHolder(holderDidKey)).rejects.toThrow(BadRequestException);
+        await expect(sessions.indexHolder(holderDidKey, 'session-a')).rejects.toThrow(BadRequestException);
+        expect(list).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // Explicit opt-in: capacity coverage, not a throughput claim or routine CI workload.

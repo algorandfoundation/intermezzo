@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -16,6 +17,7 @@ import { VaultService } from '../../vault/vault.service';
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
+import { Oid4vcIssuanceSession } from '../entities/oid4vc-issuance-session.entity';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 import {
   STATUS_LIST_SIZE,
@@ -38,6 +40,19 @@ const CAS_ATTEMPTS = 5;
 export interface AllocatedStatusEntry extends StatusListEntry {
   /** Absolute URI of the list, as embedded in the credential. */
   uri: string;
+}
+
+/**
+ * How the manager addresses the credential(s) to revoke or reactivate. Exactly
+ * one form is set: `holderDidKey` (optionally narrowed by
+ * `credentialConfigurationId`), or `uri` *and* `idx` together.
+ */
+export interface StatusTarget {
+  holderDidKey?: string;
+  credentialConfigurationId?: string;
+  uri?: string;
+  idx?: number;
+  reason?: string;
 }
 
 /**
@@ -161,19 +176,94 @@ export class Oid4vcStatusService implements OnModuleInit {
   }
 
   /** Persist the allocation before issuance; session CAS fences concurrent revocation. */
-  async allocateForSession(credoIssuanceSessionId: string): Promise<AllocatedStatusEntry> {
+  async allocateForSession(
+    credoIssuanceSessionId: string,
+    credentialConfigurationId?: string,
+  ): Promise<AllocatedStatusEntry> {
     const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
     if (!session) throw new NotFoundException(`No local issuance session for ${credoIssuanceSessionId}`);
     const entry = await this.allocate();
+    // Written before the session append so a `uri`+`idx` resolves back to this session even if the process
+    // crashes between the two writes; the entry is simply not yet revocable in that narrow window.
+    await this.repo.saveEntryOwner(entry.listId, entry.idx, session.id);
     await this.sessions.mutate(session.id, (current) => {
       if (current.statusChange?.pending || current.statusChange?.value === STATUS_REVOKED) {
         throw new ConflictException(`Issuance session ${session.id} is revoked or changing status`);
       }
-      current.statusEntries = [...(current.statusEntries ?? []), { listId: entry.listId, idx: entry.idx }];
+      current.statusEntries = [
+        ...(current.statusEntries ?? []),
+        { listId: entry.listId, idx: entry.idx, credentialConfigurationId },
+      ];
     });
     // Failed issuance may consume a slot. Never recycle it: a failed response
     // does not prove that nobody received the credential.
     return entry;
+  }
+
+  /**
+   * Revokes exactly the credentials `target`'s addressing form matches: every
+   * credential issued to a holder `did:key` (optionally narrowed to one
+   * configuration), or the single credential a `uri`+`idx` was allocated to.
+   * Verification fails for everyone from the next status fetch onwards.
+   */
+  async revoke(target: StatusTarget): Promise<AllocatedStatusEntry[]> {
+    return this.setStatusForTarget(target, STATUS_REVOKED, target.reason);
+  }
+
+  /** Reverses {@link revoke}, for a revocation made in error. */
+  async reactivate(target: StatusTarget): Promise<AllocatedStatusEntry[]> {
+    return this.setStatusForTarget(target, STATUS_VALID);
+  }
+
+  private async setStatusForTarget(
+    target: StatusTarget,
+    value: 0 | 1,
+    reason?: string,
+  ): Promise<AllocatedStatusEntry[]> {
+    const selections = await this.resolveTargets(target);
+    const results: AllocatedStatusEntry[] = [];
+    for (const { sessionId, entries } of selections) {
+      results.push(...(await this.setSessionStatus(sessionId, value, reason, entries)));
+    }
+    return results;
+  }
+
+  /**
+   * Resolves an addressing form to the exact entries it names, grouped by the
+   * session that owns them.
+   *
+   * The entries are pinned here rather than re-read inside
+   * {@link setSessionStatus}, so a credential issued between resolution and
+   * the bit flip is not swept into an operation that never addressed it.
+   */
+  private async resolveTargets(target: StatusTarget): Promise<{ sessionId: string; entries: StatusListEntry[] }[]> {
+    const addressesEntry = target.uri !== undefined || target.idx !== undefined;
+    if (addressesEntry && target.holderDidKey !== undefined) {
+      throw new BadRequestException('Provide either `holderDidKey` or `uri`+`idx`, not both');
+    }
+
+    if (addressesEntry) {
+      // Both halves are required: an `idx` alone used to fall through to the
+      // holder form, silently widening a single-credential request.
+      if (target.uri === undefined) throw new BadRequestException('`uri` is required with `idx`');
+      if (target.idx === undefined) throw new BadRequestException('`idx` is required with `uri`');
+      const listId = this.localStatusListId(target.uri);
+      if (!listId) throw new NotFoundException(`Status list URI ${target.uri} is not served by this issuer`);
+      const owner = await this.repo.loadEntryOwner(listId, target.idx);
+      if (!owner) throw new NotFoundException(`Status list ${listId} has no allocated entry ${target.idx}`);
+      return [{ sessionId: owner.sessionId, entries: [{ listId, idx: target.idx }] }];
+    }
+
+    if (target.holderDidKey !== undefined) {
+      const sessions = await this.sessions.findByHolder(target.holderDidKey);
+      const selections = sessions
+        .map((session) => ({ sessionId: session.id, entries: selectEntries(session, target) }))
+        .filter((selection) => selection.entries.length > 0);
+      if (!selections.length) throw new NotFoundException(`No credentials issued to ${target.holderDidKey}`);
+      return selections;
+    }
+
+    throw new BadRequestException('Provide either `holderDidKey` or `uri`+`idx`');
   }
 
   /**
@@ -228,23 +318,55 @@ export class Oid4vcStatusService implements OnModuleInit {
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
   }
 
-  private async setSessionStatus(sessionId: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {
+  /**
+   * Flips `selected` (default: every entry on the session) to `value`.
+   *
+   * The selection is part of the durable intent, so an operation resumed after
+   * a crash replays the entries it originally addressed instead of widening to
+   * whatever the session holds by then.
+   */
+  private async setSessionStatus(
+    sessionId: string,
+    value: 0 | 1,
+    reason?: string,
+    selected?: StatusListEntry[],
+  ): Promise<AllocatedStatusEntry[]> {
     const session = await this.sessions.mutate(sessionId, (current) => {
       if (!current.statusEntries?.length) {
         throw new NotFoundException(`Issuance session ${sessionId} has no status list entry`);
       }
+      // Resolution and this mutate are separate reads, and `uri`+`idx` resolves
+      // through the entry-owner index — which is written before the session
+      // append. Confirm the session really carries what we are about to flip.
+      const entries = (selected ?? current.statusEntries).map((entry) => {
+        const owned = current.statusEntries!.find((e) => e.listId === entry.listId && e.idx === entry.idx);
+        if (!owned) {
+          throw new NotFoundException(
+            `Issuance session ${sessionId} has no entry ${entry.idx} on list ${entry.listId}`,
+          );
+        }
+        return owned;
+      });
       if (current.statusChange?.pending) {
-        if (current.statusChange.value !== value) {
+        const pending = current.statusChange.entries ?? current.statusEntries;
+        if (current.statusChange.value !== value || !coversSameEntries(pending, entries)) {
           throw new ConflictException(
             `Issuance session ${sessionId} has an unfinished status change; retry that operation first`,
           );
         }
         return; // Resume the durable intent, preserving its original reason and operation id.
       }
-      current.statusChange = { id: randomUUID(), value, pending: true, requestedAt: new Date().toISOString(), reason };
+      current.statusChange = {
+        id: randomUUID(),
+        value,
+        pending: true,
+        requestedAt: new Date().toISOString(),
+        reason,
+        entries,
+      };
     });
     const operation = session.statusChange!;
-    const entries = session.statusEntries!;
+    const entries = operation.entries ?? session.statusEntries!;
     const byList = new Map<string, number[]>();
     for (const entry of entries) {
       if (!byList.has(entry.listId)) byList.set(entry.listId, []);
@@ -277,8 +399,19 @@ export class Oid4vcStatusService implements OnModuleInit {
         throw new ConflictException(`Status change for session ${sessionId} was superseded`);
       }
       current.statusChange.pending = false;
-      current.revokedAt = value === STATUS_REVOKED ? new Date(operation.requestedAt) : undefined;
-      current.revokedReason = value === STATUS_REVOKED ? operation.reason : undefined;
+      // Session-level only when the operation covered the whole session. A
+      // narrowed revocation leaves the session's other credentials valid, and
+      // stamping it revoked would misreport them.
+      const whole = entries.length === (current.statusEntries?.length ?? 0);
+      if (whole) {
+        current.revokedAt = value === STATUS_REVOKED ? new Date(operation.requestedAt) : undefined;
+        current.revokedReason = value === STATUS_REVOKED ? operation.reason : undefined;
+      } else if (value === STATUS_VALID) {
+        // A partial reactivation still clears a whole-session revocation stamp:
+        // the session no longer has every credential revoked.
+        current.revokedAt = undefined;
+        current.revokedReason = undefined;
+      }
     });
     return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
   }
@@ -360,4 +493,42 @@ export class Oid4vcStatusService implements OnModuleInit {
 
 function encodeSegment(segment: object): string {
   return Buffer.from(JSON.stringify(segment)).toString('base64url');
+}
+
+/**
+ * The entries of `session` a holder-form target addresses.
+ *
+ * Without `credentialConfigurationId` that is every entry. With one, the filter
+ * has to hold per *entry*, not per session: one session can issue several
+ * configurations, and matching at session level would flip the bits of the
+ * configurations the caller did not name.
+ */
+function selectEntries(session: Oid4vcIssuanceSession, target: StatusTarget): StatusListEntry[] {
+  const entries = session.statusEntries ?? [];
+  const wanted = target.credentialConfigurationId;
+  if (wanted === undefined) return entries;
+  const offered = session.offeredCredentialConfigurationIds ?? [];
+  return entries.filter((entry) => {
+    if (entry.credentialConfigurationId !== undefined) return entry.credentialConfigurationId === wanted;
+    // Allocated before the configuration id was recorded. A single-configuration
+    // offer still pins it; anything else cannot be narrowed without guessing
+    // which sibling would be revoked along with it.
+    if (offered.length === 1) return offered[0] === wanted;
+    if (!offered.includes(wanted)) return false;
+    throw new ConflictException(
+      `Issuance session ${session.id} predates per-credential configuration ids and offered ` +
+        `${offered.length} configurations; revoke it by \`uri\`+\`idx\`, or without ` +
+        '`credentialConfigurationId` to cover all of them.',
+    );
+  });
+}
+
+/** Whether a pending operation addresses exactly the entries a retry asks for. */
+function coversSameEntries(a: StatusListEntry[], b: StatusListEntry[]): boolean {
+  const key = (entries: StatusListEntry[]) =>
+    entries
+      .map((entry) => `${entry.listId}:${entry.idx}`)
+      .sort()
+      .join(',');
+  return key(a) === key(b);
 }

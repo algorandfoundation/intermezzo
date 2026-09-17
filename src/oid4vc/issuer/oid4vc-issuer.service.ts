@@ -228,7 +228,9 @@ export class Oid4vcIssuerService implements OnModuleInit {
       state: issuanceSession.state,
       issuanceMetadata: input.issuanceMetadata,
     });
-    return this.sessionRepo.save(record);
+    const saved = await this.sessionRepo.save(record);
+    await this.sessionRepo.indexHolder(input.holderDidKey, saved.id);
+    return saved;
   }
 
   /** Returns the local app-level session record. */
@@ -242,7 +244,12 @@ export class Oid4vcIssuerService implements OnModuleInit {
     return session;
   }
 
-  async listSessions(): Promise<Oid4vcIssuanceSession[]> {
+  /** All sessions, or only those pinned to `holderDidKey` when supplied. */
+  async listSessions(holderDidKey?: string): Promise<Oid4vcIssuanceSession[]> {
+    // `!== undefined`, not truthiness: an explicit `?holderDidKey=` is a
+    // malformed filter and must reach `holderKey`'s did:key check, not quietly
+    // widen the answer to every session.
+    if (holderDidKey !== undefined) return this.sessionRepo.findByHolder(holderDidKey);
     return this.sessionRepo.find({ order: { createdAt: 'DESC' } });
   }
 
@@ -327,7 +334,7 @@ export class Oid4vcIssuerService implements OnModuleInit {
           // lives *before* handing back something signed. A credential whose
           // entry we failed to persist could never be revoked, so a failure
           // on either step has to abort issuance rather than leak one.
-          const status = await this.statusList.allocateForSession(issuanceSession.id);
+          const status = await this.statusList.allocateForSession(issuanceSession.id, configurationId);
 
           const signed: OpenId4VciSignCredential = {
             credentialSupportedId: configurationId,
