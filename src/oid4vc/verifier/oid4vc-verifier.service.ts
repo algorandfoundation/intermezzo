@@ -5,7 +5,7 @@ import type { DifPresentationExchangeDefinitionV2 } from '@credo-ts/core';
 
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
-import { Oid4vcVerificationSession } from '../entities/oid4vc-verification-session.entity';
+import { Oid4vcVerificationSession, verificationOutcome } from '../entities/oid4vc-verification-session.entity';
 
 /**
  * Encapsulates the OID4VP / SIOPv2 verifier side of the agent.
@@ -81,6 +81,7 @@ export class Oid4vcVerifierService implements OnModuleInit {
       authorizationRequest,
       presentationDefinition: input.presentationDefinition,
       state: verificationSession.state,
+      outcome: verificationOutcome(verificationSession.state),
     });
     return this.sessionRepo.save(record);
   }
@@ -101,6 +102,7 @@ export class Oid4vcVerifierService implements OnModuleInit {
         session.credoVerificationSessionId,
       );
       session.state = credoSession.state;
+      session.outcome = verificationOutcome(credoSession.state, credoSession.errorMessage);
 
       // Once the response has been verified we can pull the extracted
       // payloads. `getVerifiedAuthorizationResponse` throws if the session

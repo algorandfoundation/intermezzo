@@ -58,6 +58,19 @@ as controller).
   key.
 - The host owns **no** per-user record — `did:key` is the caller's
   identity for the lifetime of an offer.
+- Individual credentials are revocable through an IETF Token Status List
+  served at `/v1/credential/status/list/:listId` and signed by the same
+  manager key as the credentials themselves. A revoked credential fails
+  verification when the verifier reads current status. Internal checks
+  read Vault on each fetch, including when a signed token is cached.
+  Third-party token caching can delay enforcement. Fresh installations
+  require an issuer UUID status reference for device-attestation wallet
+  authentication; status-free credentials are rejected.
+- A session's revocation intent blocks further issuance before its bits
+  change. Partial failures remain pending and are resumed by repeating the
+  same request. A successful response means all recorded entries were
+  updated and completion was persisted. In-flight verification that read
+  status before a revocation committed may still complete successfully.
 - The governance layer ("is this issuer in the registry?") is
   intentionally **pluggable** and currently **not wired in**. A future
   integration — e.g. the [CREDEBL](https://credebl.id/) ecosystem
@@ -68,7 +81,10 @@ as controller).
 
 - Cryptographic, on-chain, third-party-auditable anchor for the manager
   key. Independent of any registry's database.
-- Revocation surface: the document is mutable on chain.
+- Key-rotation surface: the document is mutable on chain. Note this is a
+  blunt instrument — rotating the manager key invalidates every credential
+  ever issued, for every holder. Per-credential revocation is a separate
+  mechanism; see below.
 - Discoverable in a future trust registry (e.g. CREDEBL) alongside
   `did:polygon` / `did:indy` — Algorand becomes a peer ledger in the
   registry's resolver matrix.

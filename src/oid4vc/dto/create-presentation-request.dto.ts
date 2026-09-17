@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsObject } from 'class-validator';
+import type { Oid4vcVerificationOutcome } from '../entities/oid4vc-verification-session.entity';
 
 export class CreatePresentationRequestDto {
   @ApiProperty({
@@ -35,4 +36,7 @@ export class PresentationRequestResponseDto {
 
   @ApiProperty({ description: 'Current state of the Credo verification session.' })
   state!: string;
+
+  @ApiProperty({ enum: ['pending', 'verified', 'revoked', 'failed'] })
+  outcome!: Oid4vcVerificationOutcome;
 }

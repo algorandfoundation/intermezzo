@@ -83,6 +83,46 @@ export class Oid4vcConfig {
   }
 
   /**
+   * Absolute base URL under which signed credential status lists are served.
+   *
+   * Unlike {@link issuerBaseUrl} / {@link verifierBaseUrl}, this does not
+   * hang off a Credo Express router — the status list is served by a plain
+   * Nest controller at `credential/status/list/:listId`, behind the global
+   * `v1` prefix that `main.ts` installs. `baseUrl` already carries that
+   * prefix, so the path is derived from it directly.
+   *
+   * This URL is baked into every SD-JWT VC we issue (as
+   * `status.status_list.uri`) and is dereferenced by verifiers at
+   * verification time, so it must remain reachable for the lifetime of
+   * every credential issued under it.
+   */
+  get statusListBaseUrl(): string {
+    const base = this.baseUrl;
+    // A `baseUrl` with no path at all cannot be right: `main.ts` always
+    // installs a global prefix, so credentials issued under it would embed a
+    // status URI that 404s — and because a failed status fetch fails the whole
+    // verification, those credentials would be permanently unverifiable.
+    // Deliberately a heuristic: the config layer does not know the prefix
+    // literal, only that there must be one.
+    try {
+      if (new URL(base).pathname.replace(/\/+$/, '') === '') {
+        this.logger.warn(
+          `OID4VC_BASE_URL "${base}" has no path segment, but the API is served behind a global prefix. ` +
+            'Credentials issued with this base URL will embed a status list URI that does not resolve.',
+        );
+      }
+    } catch {
+      // `baseUrl` already guarantees a parseable absolute URL.
+    }
+    return `${base}/credential/status/list`;
+  }
+
+  /** Absolute URI of one status list, as embedded in issued credentials. */
+  statusListUri(listId: string): string {
+    return `${this.statusListBaseUrl}/${listId}`;
+  }
+
+  /**
    * Express mount path (URL pathname portion of {@link issuerBaseUrl}) at
    * which the Credo OID4VCI router must be mounted in {@link main.ts}.
    *

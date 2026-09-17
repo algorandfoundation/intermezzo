@@ -11,6 +11,15 @@
  * flow tying a verification to a basket id) should pass it on the
  * presentation definition or look the session up by id.
  */
+export type Oid4vcVerificationOutcome = 'pending' | 'verified' | 'revoked' | 'failed';
+
+/** Translate Credo's session state into the stable outcome exposed by this service. */
+export function verificationOutcome(state: string, errorMessage?: string): Oid4vcVerificationOutcome {
+  if (state === 'ResponseVerified') return 'verified';
+  if (state !== 'Error') return 'pending';
+  return errorMessage?.includes('Status is not valid') ? 'revoked' : 'failed';
+}
+
 export class Oid4vcVerificationSession {
   [key: string]: unknown;
   id: string;
@@ -37,6 +46,9 @@ export class Oid4vcVerificationSession {
   presentationDefinition?: Record<string, unknown>;
 
   state: string;
+
+  /** Stable application result; unlike Credo's error text, safe for callers to relay. */
+  outcome: Oid4vcVerificationOutcome;
 
   /**
    * Once the wallet responds with a presentation and Credo verifies it, the
