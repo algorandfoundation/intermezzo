@@ -8,7 +8,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
-import { AccountType } from '../vault/user-info.dto';
+import { AccountType, UserInfoDto } from '../vault/user-info.dto';
 import { ChainService } from '../chain/chain.service';
 import { DidService } from '../did/did.service';
 import { CreateAssetDto } from './create-asset.dto';
@@ -25,6 +25,7 @@ import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { createHash } from 'crypto';
+import { addressFromPQKey } from 'algosdk';
 
 /**
  * A user's account as resolved from Vault: which scheme backs it, its
@@ -37,6 +38,14 @@ import { createHash } from 'crypto';
 export type UserAccount =
   | { type: 'ed25519'; userId: string; address: string; publicKey: Buffer }
   | { type: 'falcon1024'; userId: string; address: string; publicKey: Buffer; salt: number; scheme: string };
+
+const PQ_SCHEME_FALCON1024 = 'f1';
+
+function pqAccount(userId: string, publicKey: Buffer): UserAccount {
+  // Accounts created here always use the canonical salt, reproducible from the public key.
+  const { address, salt } = addressFromPQKey(Buffer.from(PQ_SCHEME_FALCON1024), publicKey);
+  return { type: 'falcon1024', userId, address: address.toString(), publicKey, salt, scheme: PQ_SCHEME_FALCON1024 };
+}
 
 type AccountTypeClaim = { schemaVersion: 1; userId: string; accountType: AccountType };
 
@@ -184,17 +193,10 @@ export class WalletService {
     const ed25519 = await this.getTransitAccount(user_id, vault_token);
     if (ed25519) return ed25519;
 
-    const pq = await this.vaultService.pqGetKey(user_id, await this.managerTokenProvider.getToken());
-    if (!pq) throw new NotFoundException(`No account found for user ${user_id}`);
+    const publicKey = await this.vaultService.pqGetKey(user_id, await this.managerTokenProvider.getToken());
+    if (!publicKey) throw new NotFoundException(`No account found for user ${user_id}`);
 
-    return {
-      type: 'falcon1024',
-      userId: user_id,
-      address: pq.address,
-      publicKey: pq.publicKey,
-      salt: pq.salt,
-      scheme: pq.scheme,
-    };
+    return pqAccount(user_id, publicKey);
   }
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
@@ -261,11 +263,8 @@ export class WalletService {
     await this.claimAccountType(user_id, account_type, serviceToken);
 
     if (account_type === 'falcon1024') {
-      // The plugin is the authority on the address: it owns the salt
-      // scan the digest depends on, so re-deriving it here would only
-      // create a second implementation to keep in step.
-      const key = await this.vaultService.pqCreateKey(user_id, vault_token);
-      return { user_id, public_address: key.address, algoBalance: '0', account_type };
+      const publicKey = await this.vaultService.pqCreateKey(user_id, vault_token);
+      return { user_id, public_address: pqAccount(user_id, publicKey).address, algoBalance: '0', account_type };
     }
 
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
@@ -286,7 +285,13 @@ export class WalletService {
       public_address: new Address(Buffer.from(user.public_address, 'base64')).toString(),
       account_type: 'ed25519',
     }));
-    const pqUsers = await this.vaultService.getPqUsers(await this.managerTokenProvider.getToken());
+    const serviceToken = await this.managerTokenProvider.getToken();
+    const pqUsers: UserInfoDto[] = [];
+    for (const user_id of await this.vaultService.pqListKeys(serviceToken)) {
+      const publicKey = await this.vaultService.pqGetKey(user_id, serviceToken);
+      if (!publicKey) continue; // deleted between LIST and read
+      pqUsers.push({ user_id, public_address: pqAccount(user_id, publicKey).address, account_type: 'falcon1024' });
+    }
 
     return [...ed25519Users, ...pqUsers] as UserInfoResponseDto[];
   }

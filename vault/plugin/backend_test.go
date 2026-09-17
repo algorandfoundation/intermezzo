@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"os"
 	"sync"
 	"testing"
 
@@ -10,36 +13,27 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
-// Official vector from go-algorand cmd/algokey/pq_test.go: entropy bytes
-// {1,2,...,32} must derive this Falcon-1024 canonical address. Pins the PQK/PQA
-// domain separation, scheme bytes, keygen, salt scan, and address encoding.
-const vectorAddress = "ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU"
-
-func TestDeterministicVector(t *testing.T) {
-	entropy := make([]byte, entropySize)
-	for i := range entropy {
-		entropy[i] = byte(i + 1)
+// Shared with the TypeScript address tests; entropy 1..32 matches algokey's
+// TestPQGenerateUsesMnemonicSizedEntropy (source recorded in the fixture).
+func TestDeterministicKeyVector(t *testing.T) {
+	raw, err := os.ReadFile("testdata/falcon1024.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-
+	var vector struct{ Entropy, PublicKey string }
+	if err := json.Unmarshal(raw, &vector); err != nil {
+		t.Fatal(err)
+	}
+	entropy, err := hex.DecodeString(vector.Entropy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pk, _, err := deriveKey(entropy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	salt, err := canonicalSalt(pk[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := encodeAddress(pqAddressDigest(salt, pk[:]))
-	if addr != vectorAddress {
-		t.Fatalf("address = %s, want %s (salt %d)", addr, vectorAddress, salt)
-	}
-
-	// Canonical = lowest off-curve salt: everything below must be on-curve.
-	for s := 0; s < int(salt); s++ {
-		digest := pqAddressDigest(byte(s), pk[:])
-		if !isEdwards25519Point(digest[:]) {
-			t.Fatalf("salt %d is off-curve but %d was chosen", s, salt)
-		}
+	if base64.StdEncoding.EncodeToString(pk[:]) != vector.PublicKey {
+		t.Fatal("derived public key differs from the fixed vector")
 	}
 }
 
@@ -80,9 +74,7 @@ func TestKeySurvivesNewBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := request(t, reopened, s, logical.ReadOperation, "keys/alice", nil)
-	if read.Data["address"] != created.Data["address"] ||
-		read.Data["salt"] != created.Data["salt"] ||
-		read.Data["public_key"] != created.Data["public_key"] {
+	if read.Data["public_key"] != created.Data["public_key"] {
 		t.Fatalf("reopened backend returned %v, want %v", read.Data, created.Data)
 	}
 
@@ -99,16 +91,16 @@ func TestKeySurvivesNewBackend(t *testing.T) {
 	}
 }
 
-// Concurrent creates of one name must all report the address that was actually
-// stored — otherwise a caller walks away with an address Vault cannot sign for.
+// Concurrent creates of one name must all report the public key that was
+// actually stored.
 // Run under -race to also catch unsynchronised access.
 func TestConcurrentCreateIsConsistent(t *testing.T) {
 	b, s := testBackend(t)
 
 	const goroutines = 8
-	addresses := make([]string, goroutines)
+	publicKeys := make([]string, goroutines)
 	var wg sync.WaitGroup
-	for i := range addresses {
+	for i := range publicKeys {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -119,15 +111,15 @@ func TestConcurrentCreateIsConsistent(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			addresses[i] = resp.Data["address"].(string)
+			publicKeys[i] = resp.Data["public_key"].(string)
 		}(i)
 	}
 	wg.Wait()
 
-	stored := request(t, b, s, logical.ReadOperation, "keys/racy", nil).Data["address"]
-	for i, addr := range addresses {
-		if addr != stored {
-			t.Fatalf("goroutine %d got address %s, but %s was stored", i, addr, stored)
+	stored := request(t, b, s, logical.ReadOperation, "keys/racy", nil).Data["public_key"]
+	for i, publicKey := range publicKeys {
+		if publicKey != stored {
+			t.Fatalf("goroutine %d got public key %s, but %s was stored", i, publicKey, stored)
 		}
 	}
 }
@@ -136,25 +128,20 @@ func TestCreateReadSignFlow(t *testing.T) {
 	b, s := testBackend(t)
 
 	created := request(t, b, s, logical.UpdateOperation, "keys/alice", nil)
-	if created.Data["scheme"] != schemeFalcon1024 {
-		t.Fatalf("scheme = %v", created.Data["scheme"])
+	if len(created.Data) != 1 {
+		t.Fatalf("create returned %v, want only public_key", created.Data)
 	}
 	pkBytes, err := base64.StdEncoding.DecodeString(created.Data["public_key"].(string))
 	if err != nil || len(pkBytes) != falcon.PublicKeySize {
 		t.Fatalf("public_key decode err=%v len=%d want %d", err, len(pkBytes), falcon.PublicKeySize)
 	}
-	addr := created.Data["address"].(string)
-	if len(addr) != 58 {
-		t.Fatalf("address %q length %d, want 58", addr, len(addr))
-	}
-
-	// Idempotent create and read both return the identical account.
+	// Idempotent create and read both return the identical public key.
 	again := request(t, b, s, logical.UpdateOperation, "keys/alice", nil)
-	if again.Data["address"] != addr {
-		t.Fatalf("second create changed address: %v != %s", again.Data["address"], addr)
+	if again.Data["public_key"] != created.Data["public_key"] {
+		t.Fatalf("second create changed public key: %v", again.Data)
 	}
 	read := request(t, b, s, logical.ReadOperation, "keys/alice", nil)
-	if read.Data["address"] != addr || read.Data["salt"] != created.Data["salt"] {
+	if read.Data["public_key"] != created.Data["public_key"] {
 		t.Fatalf("read mismatch: %v vs %v", read.Data, created.Data)
 	}
 

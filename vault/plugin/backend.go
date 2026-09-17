@@ -13,17 +13,15 @@ import (
 )
 
 const backendHelp = `
-The algorand-pq secrets engine manages Algorand post-quantum (Falcon-1024)
-accounts. Keys never leave Vault; the API mirrors transit.
+The algorand-pq secrets engine manages Falcon-1024 keys. Private keys never
+leave Vault; key endpoints return the public key and the API mirrors transit.
 `
 
 type keyEntry struct {
-	// Entropy is the 32-byte root secret (the 25-word mnemonic). Salt and
-	// PublicKey are spec-mandated persistent material; PrivateKey is
-	// derivable from Entropy but cached because deriving it costs ~17ms
-	// against ~4ms to sign.
+	// Entropy is the 32-byte root secret (the 25-word mnemonic). PrivateKey is
+	// derivable from it but cached because deriving costs ~17ms against ~4ms
+	// to sign.
 	Entropy    []byte `json:"entropy"`
-	Salt       byte   `json:"salt"`
 	PublicKey  []byte `json:"public_key"`
 	PrivateKey []byte `json:"private_key"`
 }
@@ -94,10 +92,7 @@ func (b *pqBackend) getKey(ctx context.Context, s logical.Storage, name string) 
 func keyResponse(entry *keyEntry) *logical.Response {
 	return &logical.Response{
 		Data: map[string]interface{}{
-			"scheme":     schemeFalcon1024,
-			"salt":       int(entry.Salt),
 			"public_key": base64.StdEncoding.EncodeToString(entry.PublicKey),
-			"address":    encodeAddress(pqAddressDigest(entry.Salt, entry.PublicKey)),
 		},
 	}
 }
@@ -124,14 +119,9 @@ func (b *pqBackend) pathKeyCreate(ctx context.Context, req *logical.Request, dat
 	if err != nil {
 		return nil, err
 	}
-	salt, err := canonicalSalt(pk[:])
-	if err != nil {
-		return nil, err
-	}
 
 	entry := &keyEntry{
 		Entropy:    entropy,
-		Salt:       salt,
 		PublicKey:  pk[:],
 		PrivateKey: sk[:],
 	}

@@ -619,13 +619,9 @@ describe('VaultService', () => {
     const baseUrl = 'http://vault';
     const defaultMount = 'pawn/pq-users';
 
-    const address = 'ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU';
-    const publicKey = Buffer.from('falcon-public-key-bytes');
+    const publicKey = Buffer.alloc(1793, 9);
     const keyPayload = {
-      scheme: 'f1',
-      salt: 7,
       public_key: publicKey.toString('base64'),
-      address,
     };
 
     const configWith = (overrides: Record<string, string | undefined> = {}) => {
@@ -645,6 +641,22 @@ describe('VaultService', () => {
         config: { headers: {} as any },
       }) as AxiosResponse;
 
+    it.each(['pqCreateKey', 'pqGetKey'] as const)('%s rejects malformed public keys from Vault', async (method) => {
+      configWith();
+      for (const public_key of [
+        undefined,
+        42,
+        '',
+        'not-base64!!',
+        Buffer.alloc(32).toString('base64'),
+        publicKey.subarray(1).toString('base64'),
+        keyPayload.public_key + '!',
+      ]) {
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { public_key } }));
+        await expect(vaultService[method]('user-1', 'token')).rejects.toThrow(HttpErrorByCode[502]);
+      }
+    });
+
     describe('pqCreateKey', () => {
       it('(OK) should POST to the key path and parse the plugin response', async () => {
         configWith();
@@ -658,10 +670,8 @@ describe('VaultService', () => {
           data: {},
           headers: { 'X-Vault-Token': 'token' },
         });
-        expect(result).toEqual({ scheme: 'f1', salt: 7, publicKey, address });
-        // The public key must arrive as decoded bytes, not the base64 string —
-        // the address derivation hashes the raw key.
-        expect(Buffer.isBuffer(result.publicKey)).toBe(true);
+        expect(result).toEqual(publicKey);
+        expect(Buffer.isBuffer(result)).toBe(true);
       });
 
       it('(OK) should honour VAULT_PQ_USERS_PATH and the namespace header', async () => {
@@ -698,7 +708,7 @@ describe('VaultService', () => {
           method: 'GET',
           headers: { 'X-Vault-Token': 'token' },
         });
-        expect(result).toEqual({ scheme: 'f1', salt: 7, publicKey, address });
+        expect(result).toEqual(publicKey);
       });
 
       it('(OK) should return undefined on 404 rather than throwing', async () => {
@@ -777,29 +787,6 @@ describe('VaultService', () => {
         (httpService.axiosRef.request as jest.Mock).mockRejectedValueOnce({ response: { status: 500 } });
 
         await expect(vaultService.pqListKeys('token')).rejects.toThrow(HttpErrorByCode[500]);
-      });
-    });
-
-    describe('getPqUsers', () => {
-      it('returns normalized PQ accounts without changing the legacy getKeys contract', async () => {
-        configWith();
-        (httpService.axiosRef.request as jest.Mock)
-          .mockResolvedValueOnce(ok({ data: { keys: ['pq-user'] } }))
-          .mockResolvedValueOnce(ok({ data: keyPayload }));
-
-        await expect(vaultService.getPqUsers('service-token')).resolves.toEqual([
-          { user_id: 'pq-user', public_address: address, account_type: 'falcon1024' },
-        ]);
-        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
-          url: `${baseUrl}/v1/${defaultMount}/keys`,
-          method: 'LIST',
-          headers: { 'X-Vault-Token': 'service-token' },
-        });
-        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
-          url: `${baseUrl}/v1/${defaultMount}/keys/pq-user`,
-          method: 'GET',
-          headers: { 'X-Vault-Token': 'service-token' },
-        });
       });
     });
   });

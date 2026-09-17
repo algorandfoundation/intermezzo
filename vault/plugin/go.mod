@@ -3,7 +3,6 @@ module intermezzo/vault-plugin-algorand-pq
 go 1.23
 
 require (
-	filippo.io/edwards25519 v1.1.0
 	github.com/algorand/falcon v0.1.0
 	github.com/hashicorp/vault/sdk v0.11.0
 )

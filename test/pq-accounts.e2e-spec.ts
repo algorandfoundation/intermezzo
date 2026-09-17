@@ -1,10 +1,8 @@
 import * as fs from 'fs';
 import axios from 'axios';
-import * as crypto from 'crypto';
 import { randomBytes } from 'crypto';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
-import { Address } from '@algorandfoundation/algokit-utils';
 import { HttpService } from '@nestjs/axios';
 import * as algosdk from 'algosdk';
 
@@ -50,7 +48,7 @@ describe('PQ accounts E2E', () => {
         headers: { 'X-Vault-Token': token },
       });
 
-    it('(OK) Creates an account whose address matches an independent derivation', async () => {
+    it('(OK) Creates a key and returns only its public key', async () => {
       const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       const name = randomBytes(16).toString('hex');
 
@@ -61,24 +59,9 @@ describe('PQ accounts E2E', () => {
       );
       expect(created.status).toBe(200);
 
-      const { scheme, salt, public_key, address } = created.data.data;
-      expect(scheme).toBe('f1');
-      expect(salt).toBeGreaterThanOrEqual(0);
-      expect(salt).toBeLessThanOrEqual(255);
-      // Falcon-1024 public key.
+      const { public_key } = created.data.data;
+      expect(Object.keys(created.data.data)).toEqual(['public_key']);
       expect(Buffer.from(public_key, 'base64')).toHaveLength(1793);
-
-      // Re-derive the address here rather than trusting the plugin's copy:
-      // SHA512-256("PQA" || scheme || salt || pk), rendered with Algorand's
-      // usual base32+checksum encoding.
-      const preimage = Buffer.concat([
-        Buffer.from('PQA'),
-        Buffer.from(scheme),
-        Buffer.from([salt]),
-        Buffer.from(public_key, 'base64'),
-      ]);
-      const digest = crypto.createHash('sha512-256').update(preimage).digest();
-      expect(new Address(new Uint8Array(digest)).toString()).toBe(address);
 
       // Reading returns exactly what creating reported, and creating again is
       // idempotent rather than silently re-keying the account.
@@ -89,7 +72,7 @@ describe('PQ accounts E2E', () => {
         {},
         { headers: { 'X-Vault-Token': vaultToken } },
       );
-      expect(recreated.data.data.address).toBe(address);
+      expect(recreated.data.data.public_key).toBe(public_key);
     });
 
     it('(OK) Signs with the manager role', async () => {
@@ -172,7 +155,7 @@ describe('PQ accounts E2E', () => {
       return { vaultToken, accessToken: await signInToPawn(vaultToken) };
     };
 
-    it('(OK) Creates a falcon1024 user whose address matches the PQ mount', async () => {
+    it('(OK) Creates a falcon1024 user whose address Intermezzo derives from the Vault public key', async () => {
       const { vaultToken, accessToken } = await managerTokens();
       const userId = randomBytes(16).toString('hex');
 
@@ -181,12 +164,14 @@ describe('PQ accounts E2E', () => {
       expect(created.data.account_type).toBe('falcon1024');
       expect(created.data.algoBalance).toBe('0');
 
-      // The service must report exactly the address the plugin derived —
-      // not a second, client-side derivation that could drift from it.
       const fromVault = await axios.get(`${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${userId}`, {
         headers: { 'X-Vault-Token': vaultToken },
       });
-      expect(created.data.public_address).toBe(fromVault.data.data.address);
+      const derived = algosdk.addressFromPQKey(
+        Buffer.from('f1'),
+        Buffer.from(fromVault.data.data.public_key, 'base64'),
+      );
+      expect(created.data.public_address).toBe(derived.address.toString());
 
       // ...and reading the user back resolves to the same account with no
       // hint from the caller about which mount to look in.
@@ -425,7 +410,7 @@ describe('PQ accounts E2E', () => {
         throw new Error('Simulation must not sign');
       });
       const signer = algosdk.addressWithSignersFromRawPQSigner({
-        pqScheme: Buffer.from(key.scheme),
+        pqScheme: Buffer.from('f1'),
         pqPublicKey: Buffer.from(key.public_key, 'base64'),
         pqSigner,
       });

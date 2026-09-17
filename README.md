@@ -121,6 +121,11 @@ Set `VAULT_PQ_USERS_PATH` to the plugin mount path; development defaults to
 `pawn/pq-users`. The initialization command registers the plugin, mounts it,
 and installs the development policies.
 
+The plugin creates and stores Falcon keys and returns the base64 public key.
+Intermezzo derives the canonical salt and Algorand address from that key, and
+includes the salt in the transaction's PQ signature envelope. The salt is public
+and recomputed when needed; secret entropy and private keys stay in Vault.
+
 Create a PQ account through the existing endpoint:
 
 ```http

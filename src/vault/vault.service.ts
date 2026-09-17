@@ -8,21 +8,6 @@ import { AccountType, UserInfoDto } from './user-info.dto';
 export type KeyType = 'ed25519' | 'ecdsa-p256';
 export type HashAlgorithm = 'sha2-256' | 'sha2-512';
 
-/**
- * A Falcon-1024 key as held by the `algorand-pq` secrets engine.
- *
- * `salt` is not decoration: the Algorand PQ address digest is
- * `SHA512-256("PQA" || scheme || salt || pk)`, and one public key can
- * control up to 256 addresses, so the salt has to travel with the key
- * for the address to be reproducible.
- */
-export type PqKey = {
-  scheme: string;
-  salt: number;
-  publicKey: Buffer;
-  address: string;
-};
-
 /** The legacy shape returned by `getKeys`: public keys are base64 encoded. */
 export type TransitUserKey = Pick<UserInfoDto, 'user_id' | 'public_address'>;
 
@@ -293,13 +278,13 @@ export class VaultService {
     }
   }
 
-  private static toPqKey(data: any): PqKey {
-    return {
-      scheme: data.scheme,
-      salt: data.salt,
-      publicKey: Buffer.from(data.public_key, 'base64'),
-      address: data.address,
-    };
+  private static toPqPublicKey(data: any): Buffer {
+    const encoded = data?.public_key;
+    const publicKey = typeof encoded === 'string' ? Buffer.from(encoded, 'base64') : Buffer.alloc(0);
+    if (publicKey.length !== 1793 || publicKey.toString('base64') !== encoded) {
+      throw new HttpErrorByCode[502]('Invalid Falcon-1024 public key from Vault');
+    }
+    return publicKey;
   }
 
   /**
@@ -307,11 +292,11 @@ export class VaultService {
    * key returns the key that is already stored rather than rotating
    * it, matching the transit engine's `allow_deletion: false` usage.
    */
-  async pqCreateKey(keyName: string, token: string): Promise<PqKey> {
+  async pqCreateKey(keyName: string, token: string): Promise<Buffer> {
     const data = await this.pqRequest('POST', `keys/${keyName}`, token, {});
     if (!data) throw new HttpErrorByCode[404]('VaultException');
 
-    return VaultService.toPqKey(data);
+    return VaultService.toPqPublicKey(data);
   }
 
   /**
@@ -319,10 +304,10 @@ export class VaultService {
    * exist. The miss is load-bearing: it is how a caller learns that a
    * `user_id` is not a PQ account.
    */
-  async pqGetKey(keyName: string, token: string): Promise<PqKey | undefined> {
+  async pqGetKey(keyName: string, token: string): Promise<Buffer | undefined> {
     const data = await this.pqRequest('GET', `keys/${keyName}`, token);
 
-    return data ? VaultService.toPqKey(data) : undefined;
+    return data ? VaultService.toPqPublicKey(data) : undefined;
   }
 
   /**
@@ -550,21 +535,5 @@ export class VaultService {
     }
 
     return usersObjs;
-  }
-
-  /**
-   * Return normalized PQ users separately from the legacy transit listing.
-   * WalletService combines the two only after the caller has passed the
-   * original transit LIST authorization check.
-   */
-  async getPqUsers(token: string): Promise<UserInfoDto[]> {
-    const users: UserInfoDto[] = [];
-    for (const name of await this.pqListKeys(token)) {
-      const key = await this.pqGetKey(name, token);
-      if (!key) continue; // deleted between LIST and read
-      users.push({ user_id: name, public_address: key.address, account_type: 'falcon1024' });
-    }
-
-    return users;
   }
 }

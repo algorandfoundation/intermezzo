@@ -11,6 +11,8 @@ import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Address } from '@algorandfoundation/algokit-utils';
 import { decodeTransaction, encodeSignedTransaction } from '@algorandfoundation/algokit-utils/transact';
 import * as algosdk from 'algosdk';
@@ -24,6 +26,7 @@ import {
 } from 'src/chain/algo-node-responses';
 
 describe('WalletService', () => {
+  const pqVector = JSON.parse(readFileSync(join(__dirname, '../../vault/plugin/testdata/falcon1024.json'), 'utf8'));
   let walletService: WalletService;
   let vaultServiceMock: jest.Mocked<VaultService>;
   let chainServiceMock: jest.Mocked<ChainService>;
@@ -108,6 +111,8 @@ describe('WalletService', () => {
 
   it('\(OK) getKeys()', async () => {
     const pubKey = randomBytes(32);
+    const pqPublicKey = Buffer.from(pqVector.publicKey, 'base64');
+    const pqAddress = pqVector.address;
     const userId = '123581253191824129481240513501928401928';
 
     vaultServiceMock.getKeys.mockResolvedValueOnce([
@@ -116,7 +121,8 @@ describe('WalletService', () => {
         public_address: pubKey.toString('base64'),
       },
     ]);
-    vaultServiceMock.getPqUsers.mockResolvedValueOnce([]);
+    vaultServiceMock.pqListKeys.mockResolvedValueOnce(['pq-user']);
+    vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqPublicKey);
 
     const result = await walletService.getKeys('vault_token');
     expect(result).toStrictEqual([
@@ -125,9 +131,15 @@ describe('WalletService', () => {
         user_id: userId,
         account_type: 'ed25519',
       },
+      {
+        public_address: pqAddress,
+        user_id: 'pq-user',
+        account_type: 'falcon1024',
+      },
     ]);
     expect(vaultServiceMock.getKeys).toHaveBeenCalledWith('vault_token');
-    expect(vaultServiceMock.getPqUsers).toHaveBeenCalledWith('service_vault_token');
+    expect(vaultServiceMock.pqListKeys).toHaveBeenCalledWith('service_vault_token');
+    expect(vaultServiceMock.pqGetKey).toHaveBeenCalledWith('pq-user', 'service_vault_token');
   });
 
   it('keeps the original transit LIST as the authorization gate', async () => {
@@ -136,7 +148,7 @@ describe('WalletService', () => {
     await expect(walletService.getKeys('transit_only_token')).rejects.toThrow(ForbiddenException);
 
     expect(managerTokenProviderMock.getToken).not.toHaveBeenCalled();
-    expect(vaultServiceMock.getPqUsers).not.toHaveBeenCalled();
+    expect(vaultServiceMock.pqListKeys).not.toHaveBeenCalled();
   });
 
   it('getUserInfo() test', async () => {
@@ -162,19 +174,14 @@ describe('WalletService', () => {
 
   describe('PQ accounts', () => {
     const userId = 'pq-user';
-    const pqAddress = 'ZEJ4BLG3XWAUUZQGCEDJLYIC6D2NCWHRSX5DJMDPE54PXXR7G3PCQTARXU';
-    const pqKey = {
-      scheme: 'f1',
-      salt: 3,
-      publicKey: Buffer.from('falcon-public-key'),
-      address: pqAddress,
-    };
+    const pqKey = Buffer.from(pqVector.publicKey, 'base64');
+    const pqAddress = { address: algosdk.Address.fromString(pqVector.address), salt: pqVector.salt };
 
     /** How `VaultService.getUserPublicKey` reports a missing transit key. */
     const transitMiss = () => vaultServiceMock.getUserPublicKey.mockRejectedValueOnce(new NotFoundException());
 
     describe('userCreate', () => {
-      it('(OK) should create a PQ key and return the address the plugin derived', async () => {
+      it('(OK) should create a PQ key and derive its address in Intermezzo', async () => {
         vaultServiceMock.pqGetKey.mockResolvedValueOnce(undefined); // no conflict check needed...
         transitMiss(); // ...for falcon1024 the guard probes transit
         vaultServiceMock.pqCreateKey.mockResolvedValueOnce(pqKey);
@@ -185,7 +192,7 @@ describe('WalletService', () => {
         expect(vaultServiceMock.transitCreateKey).not.toHaveBeenCalled();
         expect(result).toStrictEqual({
           user_id: userId,
-          public_address: pqAddress,
+          public_address: pqAddress.address.toString(),
           algoBalance: '0',
           account_type: 'falcon1024',
         });
@@ -321,9 +328,9 @@ describe('WalletService', () => {
         expect(account).toStrictEqual({
           type: 'falcon1024',
           userId,
-          address: pqAddress,
-          publicKey: pqKey.publicKey,
-          salt: 3,
+          address: pqAddress.address.toString(),
+          publicKey: pqKey,
+          salt: pqAddress.salt,
           scheme: 'f1',
         });
       });
@@ -366,17 +373,17 @@ describe('WalletService', () => {
     });
 
     describe('getUserInfo', () => {
-      it('(OK) should report a PQ account with its plugin-derived address', async () => {
+      it('(OK) should report a PQ account with its Intermezzo-derived address', async () => {
         transitMiss();
         vaultServiceMock.pqGetKey.mockResolvedValueOnce(pqKey);
         chainServiceMock.getAccountBalance.mockResolvedValueOnce(42n);
 
         const result = await walletService.getUserInfo(userId, 'vault_token');
 
-        expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(pqAddress);
+        expect(chainServiceMock.getAccountBalance).toHaveBeenCalledWith(pqAddress.address.toString());
         expect(result).toStrictEqual({
           user_id: userId,
-          public_address: pqAddress,
+          public_address: pqAddress.address.toString(),
           algoBalance: '42',
           account_type: 'falcon1024',
         });
@@ -995,8 +1002,8 @@ describe('WalletService', () => {
       address: new Address(edKey).toString(),
       publicKey: edKey,
     };
-    const pqPublicKey = Buffer.alloc(1793, 7);
-    const pqAddress = algosdk.addressFromPQKey(Buffer.from('f1'), pqPublicKey);
+    const pqPublicKey = Buffer.from(pqVector.publicKey, 'base64');
+    const pqAddress = { address: algosdk.Address.fromString(pqVector.address), salt: pqVector.salt };
     const pqAccount: UserAccount = {
       type: 'falcon1024',
       userId: 'pq-user',
@@ -1015,7 +1022,7 @@ describe('WalletService', () => {
         if (userId === edAccount.userId) return edKey;
         throw new NotFoundException();
       });
-      vaultServiceMock.pqGetKey.mockResolvedValue(pqAccount);
+      vaultServiceMock.pqGetKey.mockResolvedValue(pqPublicKey);
       vaultServiceMock.signAsUser.mockResolvedValue(Buffer.from(`vault:v1:${edSignature.toString('base64')}`));
       vaultServiceMock.signAsManager.mockResolvedValue(Buffer.from(`vault:v1:${edSignature.toString('base64')}`));
       vaultServiceMock.pqSign.mockResolvedValue(pqSignature);
@@ -1037,6 +1044,8 @@ describe('WalletService', () => {
       const signed = algosdk.decodeSignedTransaction(submitted() as Uint8Array);
       expect(signed.txn.fee).toBe(3000n);
       expect(signed.txn.group).toBeUndefined();
+      expect(signed.pqsig!.slt).toBe(pqVector.salt);
+      expect(Buffer.from(signed.pqsig!.pk)).toEqual(pqPublicKey);
       expect(algosdk.addressFromPQSig(signed.pqsig!).toString()).toBe(pqAccount.address);
       expect(vaultServiceMock.pqSign).toHaveBeenCalledWith(pqAccount.userId, signed.txn.bytesToSign(), token);
       expect(vaultServiceMock.pqSign).toHaveBeenCalledTimes(1);
