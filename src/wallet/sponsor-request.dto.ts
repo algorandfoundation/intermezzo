@@ -1,10 +1,12 @@
-import { IsArray, ArrayMaxSize, ArrayMinSize } from 'class-validator';
+import { IsArray, ArrayMaxSize, ArrayMinSize, IsBase64, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class SponsorRequestDto {
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(16)
+  @IsString({ each: true })
+  @IsBase64({}, { each: true })
   @ApiProperty({
     required: true,
     description:

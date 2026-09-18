@@ -729,6 +729,12 @@ export class WalletService {
     if (sponsorAmt !== 0n) {
       throw new BadRequestException('Sponsor fee transaction amount must be 0');
     }
+    if (sponsorTxn.rekeyTo) {
+      throw new BadRequestException('Sponsor fee transaction must not set rekeyTo');
+    }
+    if (sponsorTxn.payment?.closeRemainderTo) {
+      throw new BadRequestException('Sponsor fee transaction must not set payment.closeRemainderTo');
+    }
 
     for (let i = 1; i < envelopes.length; i += 1) {
       if ((envelopes[i].txn.fee ?? 0n) !== 0n) {

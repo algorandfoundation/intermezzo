@@ -922,6 +922,51 @@ describe('WalletService', () => {
       ).rejects.toThrow('Sponsor fee transaction amount must be 0');
     });
 
+    it('throws when sponsor txn sets rekeyTo', async () => {
+      const sponsorTx = new Transaction({
+        type: TransactionType.Payment,
+        sender: Address.fromString(sponsorAddress),
+        fee: 2000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: testGenesisHash,
+        payment: { receiver: Address.fromString(sponsorAddress), amount: 0n },
+        rekeyTo: Address.fromString(userAddress),
+      });
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([encodeTransaction(sponsorTx), userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction must not set rekeyTo');
+    });
+
+    it('throws when sponsor txn sets payment.closeRemainderTo', async () => {
+      const sponsorTx = new Transaction({
+        type: TransactionType.Payment,
+        sender: Address.fromString(sponsorAddress),
+        fee: 2000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: testGenesisHash,
+        payment: {
+          receiver: Address.fromString(sponsorAddress),
+          amount: 0n,
+          closeRemainderTo: Address.fromString(userAddress),
+        },
+      });
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([encodeTransaction(sponsorTx), userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction must not set payment.closeRemainderTo');
+    });
+
     it('accepts any companion transaction and returns it unchanged', async () => {
       jest
         .spyOn(chainService, 'getSuggestedParams')
