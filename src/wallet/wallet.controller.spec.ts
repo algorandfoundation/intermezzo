@@ -228,7 +228,7 @@ describe('Wallet Controller', () => {
     it('uses the authenticated manager vault token', async () => {
       const managerToken = 'manager-vault-token';
       const sponsorRequest = { transactions: ['dHhuLTA=', 'dHhuLTE='] };
-      const expectedResponse = { transactions: ['c2lnbmVkLTA=', 'dHhuLTE='], group_id: 'Z3JvdXA=' };
+      const expectedResponse = { transactions: ['c2lnbmVkLTA=', 'dHhuLTE='] };
 
       mockWalletService.sponsorTransactionGroup.mockResolvedValueOnce(expectedResponse);
 

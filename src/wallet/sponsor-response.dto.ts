@@ -1,4 +1,4 @@
-import { IsArray, IsString } from 'class-validator';
+import { IsArray } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class SponsorResponseDto {
@@ -11,11 +11,4 @@ export class SponsorResponseDto {
     example: ['gaR0eXBlo2ZlZV9wZXJfdHhuAaN0eG4Bo2Z2ZXIAAaNsdgE=', 'gaR0eXBlo2ZlZV9wZXJfdHhuAaN0eG4Bo2Z2ZXIAAaNsdgE='],
   })
   transactions: string[];
-
-  @IsString()
-  @ApiProperty({
-    description: 'Group ID of the signed transaction group, base64-encoded.',
-    example: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==',
-  })
-  group_id: string;
 }

@@ -795,7 +795,6 @@ describe('WalletService', () => {
       const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
 
       expect(result.transactions).toHaveLength(2);
-      expect(result.group_id).toBeDefined();
       expect(vaultServiceMock.signAsManager).toHaveBeenCalledTimes(1);
       // user txn returned as-is
       expect(result.transactions[1]).toBe(base64[1]);

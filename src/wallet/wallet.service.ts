@@ -752,7 +752,6 @@ export class WalletService {
 
     return {
       transactions: [Buffer.from(signedSponsor).toString('base64'), ...base64Transactions.slice(1)],
-      group_id: firstGroupId,
     };
   }
 }

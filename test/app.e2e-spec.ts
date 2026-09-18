@@ -1319,6 +1319,7 @@ describe('App E2E', () => {
         );
 
         expect(response.status).toBe(201);
+        expect(response.data.group_id).toBeUndefined();
         expect(response.data.transactions[0]).not.toBe(transactions[0]);
         expect(response.data.transactions[1]).toBe(transactions[1]);
         expect(response.data.transactions[2]).toBe(transactions[2]);
