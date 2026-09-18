@@ -17,11 +17,7 @@ import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
-import {
-  decodeSignedTransaction,
-  decodeTransaction,
-  encodeTransaction,
-} from '@algorandfoundation/algokit-utils/transact';
+import { decodeTransaction, groupTransactions, Transaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
@@ -648,7 +644,7 @@ export class WalletService {
    * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
    *
    * Index 0 is an unsigned zero-value payment from the manager to itself whose fee covers the group.
-   * Every other transaction is returned unchanged.
+   * Every transaction must be unsigned. Non-sponsor transactions must have fee 0 and are returned unchanged.
    */
   async sponsorTransactionGroup(
     vault_token: string,
@@ -663,17 +659,16 @@ export class WalletService {
       throw new BadRequestException('Sponsored group must contain at least the sponsor fee txn and one user txn');
     }
 
-    const envelopes = base64Transactions.map((transaction) => {
+    const envelopes = base64Transactions.map((transaction, index) => {
       const raw = new Uint8Array(Buffer.from(transaction, 'base64'));
-      if (raw[0] === 0x54 && raw[1] === 0x58) {
-        return { txn: decodeTransaction(raw), unsignedEncoded: raw, sig: undefined };
+      if (raw[0] !== 0x54 || raw[1] !== 0x58) {
+        throw new BadRequestException(`Transaction at index ${index} must be unsigned`);
       }
       try {
-        const decoded = decodeSignedTransaction(raw);
-        return { ...decoded, unsignedEncoded: encodeTransaction(decoded.txn) };
+        return { txn: decodeTransaction(raw), unsignedEncoded: raw };
       } catch (error) {
         throw new BadRequestException(
-          `Failed to decode transaction: ${error instanceof Error ? error.message : error}`,
+          `Failed to decode transaction at index ${index}: ${error instanceof Error ? error.message : error}`,
         );
       }
     });
@@ -693,14 +688,23 @@ export class WalletService {
         throw new BadRequestException('All transactions must belong to the same group');
       }
     }
+    try {
+      const canonicalGroup = groupTransactions(
+        envelopes.map(({ txn }) => new Transaction({ ...txn, group: undefined })),
+      );
+      const canonicalGroupId = Buffer.from(canonicalGroup[0].group!).toString('base64');
+      if (canonicalGroupId !== firstGroupId) {
+        throw new BadRequestException('Transaction group id does not match the submitted transactions');
+      }
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException(`Failed to validate transaction group: ${(error as Error).message}`);
+    }
 
     // ---- Sponsor fee txn (index 0) validation ----
     const sponsorEnv = envelopes[0];
     const sponsorTxn = sponsorEnv.txn;
 
-    if (sponsorEnv.sig) {
-      throw new BadRequestException('Sponsor fee transaction (index 0) must be unsigned');
-    }
     if (sponsorTxn.type !== 'pay') {
       throw new BadRequestException('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
     }
@@ -714,6 +718,12 @@ export class WalletService {
     const sponsorAmt: bigint = sponsorTxn.payment?.amount ?? 0n;
     if (sponsorAmt !== 0n) {
       throw new BadRequestException('Sponsor fee transaction amount must be 0');
+    }
+
+    for (let i = 1; i < envelopes.length; i += 1) {
+      if ((envelopes[i].txn.fee ?? 0n) !== 0n) {
+        throw new BadRequestException(`Non-sponsor transaction at index ${i} must have fee = 0`);
+      }
     }
 
     // ---- Fee coverage validation ----

@@ -1281,7 +1281,7 @@ describe('App E2E', () => {
           new Transaction({
             type: TransactionType.Payment,
             sender: Address.fromString(senderAddress),
-            fee: 500n,
+            fee: 0n,
             firstValid: 1n,
             lastValid: 1001n,
             genesisId: 'e2e',

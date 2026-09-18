@@ -781,7 +781,7 @@ describe('WalletService', () => {
       const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, sponsorFee);
       const userTx = buildPay(userAddress, sponsorAddress, 1000, userFee);
       const grouped = chainService.setGroupID([sponsorTx, userTx]);
-      return { sponsor: grouped[0], user: signUserTxn(grouped[1]) };
+      return { sponsor: grouped[0], user: grouped[1] };
     };
 
     it('(OK) sponsorTransactionGroup() -- signs sponsor txn, returns user txn unchanged', async () => {
@@ -834,7 +834,7 @@ describe('WalletService', () => {
       // never passed through setGroupID, so `grp` is absent
       const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
       const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
-      const base64 = [toB64(sponsorTx), toB64(signUserTxn(userTx))];
+      const base64 = [toB64(sponsorTx), toB64(userTx)];
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -847,7 +847,7 @@ describe('WalletService', () => {
       // group them separately so each has a distinct grp
       const g1 = chainService.setGroupID([sponsorTx]);
       const g2 = chainService.setGroupID([userTx]);
-      const base64 = [toB64(g1[0]), toB64(signUserTxn(g2[0]))];
+      const base64 = [toB64(g1[0]), toB64(g2[0])];
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -871,7 +871,7 @@ describe('WalletService', () => {
       );
       const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
       const grouped = chainService.setGroupID([sponsorAxfer, userTx]);
-      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1]))];
+      const base64 = [toB64(grouped[0]), toB64(grouped[1])];
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -887,14 +887,14 @@ describe('WalletService', () => {
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
-      ).rejects.toThrow('Sponsor fee transaction (index 0) must be unsigned');
+      ).rejects.toThrow('Transaction at index 0 must be unsigned');
     });
 
     it('throws when sponsor txn sender is not the sponsor', async () => {
       const sponsorTx = buildPay(userAddress, sponsorAddress, 0, 2000);
       const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
       const grouped = chainService.setGroupID([sponsorTx, userTx]);
-      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1]))];
+      const base64 = grouped.map(toB64);
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -905,7 +905,7 @@ describe('WalletService', () => {
       const sponsorTx = buildPay(sponsorAddress, userAddress, 0, 2000);
       const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
       const grouped = chainService.setGroupID([sponsorTx, userTx]);
-      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1]))];
+      const base64 = grouped.map(toB64);
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -916,7 +916,7 @@ describe('WalletService', () => {
       const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 100, 2000);
       const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
       const grouped = chainService.setGroupID([sponsorTx, userTx]);
-      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1]))];
+      const base64 = grouped.map(toB64);
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
@@ -928,13 +928,56 @@ describe('WalletService', () => {
         .spyOn(chainService, 'getSuggestedParams')
         .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
       const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
-      const userTx = buildPay(userAddress, sponsorAddress, 1000, 500);
-      const grouped = chainService.setGroupID([sponsorTx, userTx]);
+      const assetTransferTx = encodeTransaction(
+        new Transaction({
+          type: TransactionType.AssetTransfer,
+          sender: Address.fromString(userAddress),
+          fee: 0n,
+          firstValid: 1n,
+          lastValid: 1001n,
+          genesisId: 'test-genesis-id',
+          genesisHash: testGenesisHash,
+          assetTransfer: { assetId: 1n, amount: 1n, receiver: Address.fromString(sponsorAddress) },
+        }),
+      );
+      const grouped = chainService.setGroupID([sponsorTx, assetTransferTx]);
       const base64 = grouped.map(toB64);
 
       const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
 
       expect(result.transactions[1]).toBe(base64[1]);
+    });
+
+    it('throws when a companion transaction is signed', async () => {
+      const { sponsor, user } = buildValidGroup();
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+          transactions: [toB64(sponsor), toB64(signUserTxn(user))],
+        }),
+      ).rejects.toThrow('Transaction at index 1 must be unsigned');
+    });
+
+    it('throws when a companion transaction has a non-zero fee', async () => {
+      const { sponsor, user } = buildValidGroup(2000, 1);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+          transactions: [toB64(sponsor), toB64(user)],
+        }),
+      ).rejects.toThrow('Non-sponsor transaction at index 1 must have fee = 0');
+    });
+
+    it('throws when the shared group id is not canonical for the submitted transactions', async () => {
+      const { sponsor, user } = buildValidGroup();
+      const alteredUser = decodeTransaction(user);
+      alteredUser.payment!.amount += 1n;
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+          transactions: [toB64(sponsor), toB64(encodeTransaction(alteredUser))],
+        }),
+      ).rejects.toThrow('Transaction group id does not match the submitted transactions');
     });
 
     it('throws when sponsor fee does not cover the group', async () => {
