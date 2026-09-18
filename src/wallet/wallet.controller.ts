@@ -357,9 +357,9 @@ export class Wallet {
     description:
       'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
       'This manager-authenticated endpoint accepts a complete group where index 0 is an **unsigned** 0 ALGO `pay` from the manager to itself whose `fee` covers the entire group. ' +
-      'Every other transaction must also be unsigned with `fee = 0`; those transactions are returned unchanged for their senders to sign. ' +
+      'Every other transaction must have `fee = 0`, may be signed or unsigned, and is returned unchanged. ' +
       'The manager address is available from `GET /wallet/manager/`. ' +
-      'This endpoint validates the canonical group id, signs only the sponsor transaction, and returns the group. The caller is responsible for signing the remaining transactions and submitting it to the network.',
+      'This endpoint validates the canonical group id, signs only the sponsor transaction, and returns the group. The caller is responsible for any remaining signatures and network submission.',
   })
   @ApiCreatedResponse({
     description: 'The sponsor fee transaction has been successfully signed.',
@@ -371,8 +371,8 @@ export class Wallet {
   @ApiBadRequestResponse({
     description:
       'The submitted group is invalid. The `message` names the exact rule that failed — transactions not sharing ' +
-      'one canonical group id, a signed transaction, a non-sponsor fee above zero, a sponsor transaction that is ' +
-      'not a 0 ALGO manager-to-manager payment, or a sponsor fee that does not cover the whole group.',
+      'one canonical group id, a signed sponsor transaction, a non-sponsor fee above zero, a sponsor transaction ' +
+      'that is not a 0 ALGO manager-to-manager payment, or a sponsor fee that does not cover the whole group.',
   })
   async sponsorTxGroup(
     @Request() request: any,

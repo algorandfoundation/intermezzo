@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
 import { Address, getApplicationAddress } from '@algorandfoundation/algokit-utils';
 import {
+  encodeSignedTransaction,
   encodeTransaction,
   groupTransactions,
   Transaction,
@@ -1271,7 +1272,7 @@ describe('App E2E', () => {
           new Transaction({
             type: TransactionType.Payment,
             sender: Address.fromString(sponsorAddress),
-            fee: 2000n,
+            fee: 3000n,
             firstValid: 1n,
             lastValid: 1001n,
             genesisId: 'e2e',
@@ -1288,8 +1289,22 @@ describe('App E2E', () => {
             genesisHash: new Uint8Array(32),
             payment: { receiver: Address.fromString(sponsorAddress), amount: 1n },
           }),
+          new Transaction({
+            type: TransactionType.Payment,
+            sender: Address.fromString(senderAddress),
+            fee: 0n,
+            firstValid: 1n,
+            lastValid: 1001n,
+            genesisId: 'e2e',
+            genesisHash: new Uint8Array(32),
+            payment: { receiver: Address.fromString(sponsorAddress), amount: 2n },
+          }),
         ]);
-        return grouped.map((transaction) => Buffer.from(encodeTransaction(transaction)).toString('base64'));
+        return [
+          Buffer.from(encodeTransaction(grouped[0])).toString('base64'),
+          Buffer.from(encodeSignedTransaction({ txn: grouped[1], sig: new Uint8Array(64).fill(1) })).toString('base64'),
+          Buffer.from(encodeTransaction(grouped[2])).toString('base64'),
+        ];
       };
 
       it('(OK) lets the authenticated manager sponsor any transaction group', async () => {
@@ -1306,6 +1321,7 @@ describe('App E2E', () => {
         expect(response.status).toBe(201);
         expect(response.data.transactions[0]).not.toBe(transactions[0]);
         expect(response.data.transactions[1]).toBe(transactions[1]);
+        expect(response.data.transactions[2]).toBe(transactions[2]);
       }, 120000);
 
       it('(FAIL) rejects an unauthenticated sponsorship request', async () => {

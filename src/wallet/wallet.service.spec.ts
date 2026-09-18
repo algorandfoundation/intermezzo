@@ -887,7 +887,7 @@ describe('WalletService', () => {
 
       await expect(
         walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
-      ).rejects.toThrow('Transaction at index 0 must be unsigned');
+      ).rejects.toThrow('Sponsor fee transaction (index 0) must be unsigned');
     });
 
     it('throws when sponsor txn sender is not the sponsor', async () => {
@@ -948,14 +948,19 @@ describe('WalletService', () => {
       expect(result.transactions[1]).toBe(base64[1]);
     });
 
-    it('throws when a companion transaction is signed', async () => {
-      const { sponsor, user } = buildValidGroup();
+    it('accepts mixed signed and unsigned companion transactions unchanged', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 3000);
+      const signedCompanion = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const unsignedCompanion = buildPay(userAddress, sponsorAddress, 2000, 0);
+      const grouped = chainService.setGroupID([sponsorTx, signedCompanion, unsignedCompanion]);
+      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1])), toB64(grouped[2])];
 
-      await expect(
-        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
-          transactions: [toB64(sponsor), toB64(signUserTxn(user))],
-        }),
-      ).rejects.toThrow('Transaction at index 1 must be unsigned');
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
+
+      expect(result.transactions.slice(1)).toEqual(base64.slice(1));
     });
 
     it('throws when a companion transaction has a non-zero fee', async () => {

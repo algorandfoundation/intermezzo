@@ -17,7 +17,13 @@ import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
-import { decodeTransaction, groupTransactions, Transaction } from '@algorandfoundation/algokit-utils/transact';
+import {
+  decodeSignedTransaction,
+  decodeTransaction,
+  encodeTransaction,
+  groupTransactions,
+  Transaction,
+} from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
@@ -644,7 +650,7 @@ export class WalletService {
    * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
    *
    * Index 0 is an unsigned zero-value payment from the manager to itself whose fee covers the group.
-   * Every transaction must be unsigned. Non-sponsor transactions must have fee 0 and are returned unchanged.
+   * Non-sponsor transactions may be signed or unsigned, must have fee 0, and are returned unchanged.
    */
   async sponsorTransactionGroup(
     vault_token: string,
@@ -661,11 +667,12 @@ export class WalletService {
 
     const envelopes = base64Transactions.map((transaction, index) => {
       const raw = new Uint8Array(Buffer.from(transaction, 'base64'));
-      if (raw[0] !== 0x54 || raw[1] !== 0x58) {
-        throw new BadRequestException(`Transaction at index ${index} must be unsigned`);
-      }
       try {
-        return { txn: decodeTransaction(raw), unsignedEncoded: raw };
+        if (raw[0] === 0x54 && raw[1] === 0x58) {
+          return { txn: decodeTransaction(raw), unsignedEncoded: raw, signed: false };
+        }
+        const decoded = decodeSignedTransaction(raw);
+        return { txn: decoded.txn, unsignedEncoded: encodeTransaction(decoded.txn), signed: true };
       } catch (error) {
         throw new BadRequestException(
           `Failed to decode transaction at index ${index}: ${error instanceof Error ? error.message : error}`,
@@ -705,6 +712,9 @@ export class WalletService {
     const sponsorEnv = envelopes[0];
     const sponsorTxn = sponsorEnv.txn;
 
+    if (sponsorEnv.signed) {
+      throw new BadRequestException('Sponsor fee transaction (index 0) must be unsigned');
+    }
     if (sponsorTxn.type !== 'pay') {
       throw new BadRequestException('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
     }
