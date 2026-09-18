@@ -6,7 +6,7 @@ export class SponsorResponseDto {
   @ApiProperty({
     description:
       'The full transaction group, base64-encoded msgpack, ready to be submitted by the caller. ' +
-      'Index 0 is the sponsor fee transaction now signed by the **Sponsor**; indices 1..N are the user transactions returned exactly as supplied (already signed by the user).',
+      'Index 0 is the sponsor fee transaction now signed by the **Sponsor**; indices 1..N are returned exactly as supplied.',
     type: [String],
     example: ['gaR0eXBlo2ZlZV9wZXJfdHhuAaN0eG4Bo2Z2ZXIAAaNsdgE=', 'gaR0eXBlo2ZlZV9wZXJfdHhuAaN0eG4Bo2Z2ZXIAAaNsdgE='],
   })

@@ -12,13 +12,16 @@ import { CreateAssetDto } from './create-asset.dto';
 import { UserInfoResponseDto } from './user-info-response.dto';
 import { ConfigService } from '@nestjs/config';
 import { ManagerDetailDto } from './manager-detail.dto';
-import { ManagerAddressDto } from './manager-address.dto';
 import { ManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
-import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
+import {
+  decodeSignedTransaction,
+  decodeTransaction,
+  encodeTransaction,
+} from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
@@ -132,15 +135,6 @@ export class WalletService {
       public_address: encodedAddress,
       algoBalance: algoBalance.toString(),
     };
-  }
-
-  // No chain calls — just the Vault-derived address, so credential-holding
-  // wallets can learn the Sponsor address ahead of building a sponsored group.
-  async getManagerAddress(vault_token: string): Promise<ManagerAddressDto> {
-    const public_address = await this.vaultService.getManagerPublicKey(vault_token);
-    return plainToClass(ManagerAddressDto, {
-      public_address: new Address(public_address).toString(),
-    });
   }
 
   async getManagerInfo(vault_token: string): Promise<ManagerDetailDto> {
@@ -653,24 +647,14 @@ export class WalletService {
   /**
    * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
    *
-   * Implements the protocol described in `sponsored-txns.txt`:
-   *   - Index 0 must be an unsigned `pay` transaction with sender = receiver = sponsor and amount = 0.
-   *   - Indices 1..N must already be signed by the user and have `fee = 0`.
-   *   - Indices 1..N must all be sent from `callerAddress` — the Algorand address bound to the
-   *     device-attestation credential the caller presented. Fees are only sponsored for the
-   *     credential holder's own transactions.
-   *   - All transactions must share the same group id.
-   *   - The sponsor fee at index 0 must cover the whole group: `fee >= minFee * N * feeMultiplier`.
-   *
-   * The backend signs only the sponsor fee transaction and returns the full group; the caller
-   * is responsible for submitting it to the network.
+   * Index 0 is an unsigned zero-value payment from the manager to itself whose fee covers the group.
+   * Every other transaction is returned unchanged.
    */
   async sponsorTransactionGroup(
     vault_token: string,
     sponsorRequestDto: SponsorRequestDto,
-    callerAddress: string,
   ): Promise<SponsorResponseDto> {
-    const { transactions: base64Transactions, feeMultiplier } = sponsorRequestDto;
+    const { transactions: base64Transactions } = sponsorRequestDto;
 
     if (!base64Transactions || base64Transactions.length === 0) {
       throw new BadRequestException('Transactions array is required and must not be empty');
@@ -679,8 +663,20 @@ export class WalletService {
       throw new BadRequestException('Sponsored group must contain at least the sponsor fee txn and one user txn');
     }
 
-    const rawTxs: Uint8Array[] = this.chainService.decodeBase64Transactions(base64Transactions);
-    const envelopes = rawTxs.map((tx) => this.chainService.decodeTransaction(tx));
+    const envelopes = base64Transactions.map((transaction) => {
+      const raw = new Uint8Array(Buffer.from(transaction, 'base64'));
+      if (raw[0] === 0x54 && raw[1] === 0x58) {
+        return { txn: decodeTransaction(raw), unsignedEncoded: raw, sig: undefined };
+      }
+      try {
+        const decoded = decodeSignedTransaction(raw);
+        return { ...decoded, unsignedEncoded: encodeTransaction(decoded.txn) };
+      } catch (error) {
+        throw new BadRequestException(
+          `Failed to decode transaction: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    });
 
     const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
     const sponsorAddress: string = encodeAddress(sponsorPublicKey);
@@ -720,33 +716,10 @@ export class WalletService {
       throw new BadRequestException('Sponsor fee transaction amount must be 0');
     }
 
-    // ---- User txns (indices 1..N) validation ----
-    for (let i = 1; i < envelopes.length; i++) {
-      const env = envelopes[i];
-      if (!env.sig) {
-        throw new BadRequestException(`User transaction at index ${i} must be signed by the user`);
-      }
-      const userFee: bigint = env.txn.fee ?? 0n;
-      if (userFee !== 0n) {
-        throw new BadRequestException(`User transaction at index ${i} must have fee = 0`);
-      }
-      const userSender = env.txn.sender.toString();
-      if (userSender === sponsorAddress) {
-        throw new BadRequestException(`User transaction at index ${i} must not be sent from the sponsor address`);
-      }
-      if (userSender !== callerAddress) {
-        throw new BadRequestException(
-          `User transaction at index ${i} must be sent from the credential holder's address (${callerAddress})`,
-        );
-      }
-    }
-
     // ---- Fee coverage validation ----
     const suggestedParams = await this.chainService.getSuggestedParams();
     const minFee: bigint = BigInt(suggestedParams.minFee);
-    const multiplier: number = feeMultiplier ?? 1.0;
-    // Round up to the nearest microAlgo to be safe.
-    const requiredFee: bigint = BigInt(Math.ceil(Number(minFee) * envelopes.length * multiplier));
+    const requiredFee: bigint = minFee * BigInt(envelopes.length);
     const sponsorFee: bigint = sponsorTxn.fee ?? 0n;
     if (sponsorFee < requiredFee) {
       throw new BadRequestException(
@@ -757,15 +730,8 @@ export class WalletService {
     // ---- Sign sponsor txn, return full group as base64 ----
     const signedSponsor: Uint8Array = await this.signTxAsManager(sponsorEnv.unsignedEncoded, vault_token);
 
-    const responseTxs: string[] = new Array(base64Transactions.length);
-    responseTxs[0] = Buffer.from(signedSponsor).toString('base64');
-    for (let i = 1; i < base64Transactions.length; i++) {
-      // user txns are returned as-is (already signed by the caller)
-      responseTxs[i] = base64Transactions[i];
-    }
-
     return {
-      transactions: responseTxs,
+      transactions: [Buffer.from(signedSponsor).toString('base64'), ...base64Transactions.slice(1)],
       group_id: firstGroupId,
     };
   }

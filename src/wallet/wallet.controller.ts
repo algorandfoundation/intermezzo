@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { CreateAssetResponseDto } from './create-asset-response.dto';
@@ -7,7 +7,6 @@ import { CreateUserDto } from './create-user.dto';
 import { AssetTransferRequestDto } from './asset-transfer-request.dto';
 import { AssetTransferResponseDto } from './asset-transfer-response.dto';
 import { ManagerDetailDto } from './manager-detail.dto';
-import { ManagerAddressDto } from './manager-address.dto';
 import { ManagerIdentityDto, DeployManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
 import {
   ApiBearerAuth,
@@ -19,13 +18,8 @@ import {
   ApiOperation,
   ApiBadRequestResponse,
   ApiNotFoundResponse,
-  ApiSecurity,
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
-import { Public } from '../auth/constants';
-import { CredentialAuthGuard } from '../auth/credential-auth.guard';
-import type { CredentialAuthRequest } from '../auth/credential-auth.guard';
-import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { AccountAssetsDto } from './account-assets.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
@@ -37,8 +31,6 @@ import { GroupRequestDto } from './group-request.dto';
 import { GroupResponseDto } from './group-response.dto';
 import { SponsorRequestDto } from './sponsor-request.dto';
 import { SponsorResponseDto } from './sponsor-response.dto';
-import { decodeDidKeyEd25519 } from '../did/did-key';
-import { Address } from '@algorandfoundation/algokit-utils';
 
 @ApiBearerAuth()
 @Controller()
@@ -46,10 +38,7 @@ import { Address } from '@algorandfoundation/algokit-utils';
   description: 'Unauthorized',
 })
 export class Wallet {
-  constructor(
-    private readonly walletService: WalletService,
-    private readonly managerToken: ManagerVaultTokenProvider,
-  ) {}
+  constructor(private readonly walletService: WalletService) {}
 
   // Endpoint to get user details
   @Get('wallet/users/:user_id/')
@@ -64,37 +53,6 @@ export class Wallet {
   async userDetail(@Request() request: any, @Param('user_id') user_id: string): Promise<UserInfoResponseDto> {
     // return or 404 if not found
     return await this.walletService.getUserInfo(user_id, request.vault_token);
-  }
-
-  // Endpoint to get the manager's Sponsor address ahead of time, gated by
-  // the same wallet credential as `POST /wallet/transactions/sponsor/`.
-  // Callers building a sponsored group need this to know the Sponsor
-  // address before they can construct the unsigned fee transaction at
-  // index 0, and they already hold the credential by then — it is minted
-  // during `/v1/link/response` onboarding, well before any sponsoring.
-  // The address itself is not a secret (it appears on-chain the moment any
-  // transaction is submitted); gating it just keeps the sponsorship surface
-  // reachable only by wallets the manager has attested.
-  @Get('wallet/manager/address')
-  @Public()
-  @UseGuards(CredentialAuthGuard)
-  @ApiSecurity('x-credential-presentation')
-  @ApiOperation({
-    summary: 'Get Manager Sponsor Address',
-    description:
-      "Get the manager's Algorand `public_address`. This is the **Sponsor** address used by " +
-      '`POST /wallet/transactions/sponsor/` — callers can fetch it ahead of time to build the ' +
-      'unsigned Sponsor `pay` transaction at index 0 of a sponsored group. Requires a valid ' +
-      'manager-issued `device-attestation-credential` in the `x-credential-presentation` header, ' +
-      'the same credential the sponsor route itself requires.',
-  })
-  @ApiOkResponse({
-    description: "The manager's Sponsor address",
-    type: ManagerAddressDto,
-  })
-  async managerAddress(): Promise<ManagerAddressDto> {
-    const vaultToken = await this.managerToken.getToken();
-    return await this.walletService.getManagerAddress(vaultToken);
   }
 
   // Endpont to get manager details
@@ -394,18 +352,12 @@ export class Wallet {
 
   // Sponsor Transaction Group
   @Post('wallet/transactions/sponsor/')
-  @Public()
-  @UseGuards(CredentialAuthGuard)
-  @ApiSecurity('x-credential-presentation')
   @ApiOperation({
     summary: 'Sponsor Transaction Group',
     description:
       'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
-      'The caller must present a valid manager-issued `device-attestation-credential` via the `x-credential-presentation` header. ' +
-      'The **Sponsor** address is the manager `public_address` returned by `GET /wallet/manager/address`, ' +
-      'which accepts the same credential as this route. ' +
-      'The caller submits a complete group where index 0 is an **unsigned** 0 ALGO `pay` from Sponsor to Sponsor whose `fee` covers the entire group, and indices 1..N are user transactions already signed by the user with `fee = 0`. ' +
-      'Every user transaction must be sent from the Algorand address bound to the presented credential — fees are only sponsored for the credential holder’s own transactions. ' +
+      'This manager-authenticated endpoint accepts a complete group where index 0 is an **unsigned** 0 ALGO `pay` from the manager to itself whose `fee` covers the entire group. ' +
+      'The manager address is available from `GET /wallet/manager/`. ' +
       'This endpoint validates the group, signs only the sponsor transaction, and returns the full signed group. The caller is responsible for submitting it to the network.',
   })
   @ApiCreatedResponse({
@@ -419,18 +371,12 @@ export class Wallet {
     description:
       'The submitted group is invalid. The `message` names the exact rule that failed — transactions not sharing ' +
       'one group id, a sponsor fee transaction at index 0 that is signed / not a `pay` / not a 0 ALGO ' +
-      'Sponsor-to-Sponsor payment, a user transaction that is unsigned, carries a non-zero `fee`, or is not sent ' +
-      "from the credential holder's own address, or a sponsor fee that does not cover the whole group.",
+      'manager-to-manager payment, or a sponsor fee that does not cover the whole group.',
   })
   async sponsorTxGroup(
-    @Req() request: CredentialAuthRequest,
+    @Request() request: any,
     @Body() sponsorRequestDto: SponsorRequestDto,
   ): Promise<SponsorResponseDto> {
-    const vaultToken = await this.managerToken.getToken();
-    // The credential's bound did:key wraps the caller's ed25519 public
-    // key, which is also their Algorand address — the service uses it
-    // to reject groups containing transactions the caller doesn't own.
-    const callerAddress = new Address(decodeDidKeyEd25519(request.didKey!)).toString();
-    return await this.walletService.sponsorTransactionGroup(vaultToken, sponsorRequestDto, callerAddress);
+    return await this.walletService.sponsorTransactionGroup(request.vault_token, sponsorRequestDto);
   }
 }

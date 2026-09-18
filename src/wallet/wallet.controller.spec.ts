@@ -10,31 +10,23 @@ import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 import { plainToClass } from 'class-transformer';
 import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AssetHolding } from 'src/chain/algo-node-responses';
-import { CredentialAuthGuard } from '../auth/credential-auth.guard';
-import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
-import { encodeAddress } from '@algorandfoundation/algokit-utils';
-import { base58 } from '@scure/base';
-import { randomBytes } from 'crypto';
 
 describe('Wallet Controller', () => {
   let walletController: Wallet;
   let mockWalletService: jest.Mocked<WalletService>;
-  let mockManagerToken: { getToken: jest.Mock };
 
   beforeAll(async () => {
     mockWalletService = createMockInstance(WalletService);
-    mockManagerToken = { getToken: jest.fn() };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [Wallet],
       providers: [
-        { provide: WalletService, useValue: mockWalletService },
-        { provide: ManagerVaultTokenProvider, useValue: mockManagerToken },
+        {
+          provide: WalletService,
+          useValue: mockWalletService,
+        },
       ],
-    })
-      .overrideGuard(CredentialAuthGuard)
-      .useValue({ canActivate: jest.fn().mockReturnValue(true) })
-      .compile();
+    }).compile();
 
     walletController = moduleRef.get<Wallet>(Wallet);
   });
@@ -232,47 +224,17 @@ describe('Wallet Controller', () => {
     });
   });
 
-  describe('managerAddress', () => {
-    it('fetches the manager vault token server-side rather than taking one from the credential-bearing request', async () => {
-      const managerToken = 'manager-vault-token';
-      const expectedResponse = { public_address: 'MANAGERADDRESS' };
-
-      mockManagerToken.getToken.mockResolvedValueOnce(managerToken);
-      mockWalletService.getManagerAddress.mockResolvedValueOnce(expectedResponse);
-
-      const result = await walletController.managerAddress();
-
-      expect(mockManagerToken.getToken).toHaveBeenCalled();
-      expect(mockWalletService.getManagerAddress).toHaveBeenCalledWith(managerToken);
-      expect(result).toEqual(expectedResponse);
-    });
-
-    it('is gated by CredentialAuthGuard', () => {
-      // The testing module overrides the guard, so nothing above would fail
-      // if the decorator were dropped — assert the route metadata directly.
-      const guards = Reflect.getMetadata('__guards__', Wallet.prototype.managerAddress) ?? [];
-      expect(guards).toContain(CredentialAuthGuard);
-    });
-  });
-
   describe('sponsorTxGroup', () => {
-    it('derives the caller address from the credential did:key and passes it to the service', async () => {
-      const pubKey = randomBytes(32);
-      const didKey = 'did:key:z' + base58.encode(Uint8Array.from([0xed, 0x01, ...pubKey]));
+    it('uses the authenticated manager vault token', async () => {
       const managerToken = 'manager-vault-token';
       const sponsorRequest = { transactions: ['dHhuLTA=', 'dHhuLTE='] };
       const expectedResponse = { transactions: ['c2lnbmVkLTA=', 'dHhuLTE='], group_id: 'Z3JvdXA=' };
 
-      mockManagerToken.getToken.mockResolvedValueOnce(managerToken);
       mockWalletService.sponsorTransactionGroup.mockResolvedValueOnce(expectedResponse);
 
-      const result = await walletController.sponsorTxGroup({ didKey, headers: {} }, sponsorRequest);
+      const result = await walletController.sponsorTxGroup({ vault_token: managerToken }, sponsorRequest);
 
-      expect(mockWalletService.sponsorTransactionGroup).toHaveBeenCalledWith(
-        managerToken,
-        sponsorRequest,
-        encodeAddress(pubKey),
-      );
+      expect(mockWalletService.sponsorTransactionGroup).toHaveBeenCalledWith(managerToken, sponsorRequest);
       expect(result).toEqual(expectedResponse);
     });
   });

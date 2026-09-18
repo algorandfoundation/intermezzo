@@ -7,10 +7,8 @@ import { ChainModule } from '../chain/chain.module';
 import { ConfigModule } from '@nestjs/config';
 import { DidModule } from '../did/did.module';
 import { Oid4vcModule } from '../oid4vc/oid4vc.module';
-import { AuthModule } from '../auth/auth.module';
-
 @Module({
-  imports: [HttpModule, VaultModule, ChainModule, ConfigModule, DidModule, Oid4vcModule, AuthModule],
+  imports: [HttpModule, VaultModule, ChainModule, ConfigModule, DidModule, Oid4vcModule],
   controllers: [Wallet],
   providers: [WalletService],
   exports: [WalletService],
