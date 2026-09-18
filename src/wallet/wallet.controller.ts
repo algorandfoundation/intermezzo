@@ -29,6 +29,8 @@ import { AppCallRequestDto } from './app-call-request.dto';
 import { AppCallResponseDto } from './app-call-response.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { GroupResponseDto } from './group-response.dto';
+import { SponsorRequestDto } from './sponsor-request.dto';
+import { SponsorResponseDto } from './sponsor-response.dto';
 
 @ApiBearerAuth()
 @Controller()
@@ -346,5 +348,36 @@ export class Wallet {
     return {
       group_id: await this.walletService.groupTransaction(request.vault_token, groupRequestDto),
     };
+  }
+
+  // Sponsor Transaction Group
+  @Post('wallet/transactions/sponsor/')
+  @ApiOperation({
+    summary: 'Sponsor Transaction Group',
+    description:
+      'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
+      'This manager-authenticated endpoint accepts a complete group where index 0 is an **unsigned** 0 ALGO `pay` from the manager to itself whose `fee` covers the entire group. ' +
+      'Every other transaction must have `fee = 0`, may be signed or unsigned, and is returned unchanged. ' +
+      'The manager address is available from `GET /v1/wallet/manager/`. ' +
+      'This endpoint validates the canonical group id, signs only the sponsor transaction, and returns the group. The caller is responsible for any remaining signatures and network submission.',
+  })
+  @ApiCreatedResponse({
+    description: 'The sponsor fee transaction has been successfully signed.',
+    type: SponsorResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'The submitted group is invalid. The `message` names the exact rule that failed — transactions not sharing ' +
+      'one canonical group id, a signed sponsor transaction, a non-sponsor fee above zero, a sponsor transaction ' +
+      'that is not a 0 ALGO manager-to-manager payment, or a sponsor fee that does not cover the whole group.',
+  })
+  async sponsorTxGroup(
+    @Request() request: any,
+    @Body() sponsorRequestDto: SponsorRequestDto,
+  ): Promise<SponsorResponseDto> {
+    return await this.walletService.sponsorTransactionGroup(request.vault_token, sponsorRequestDto);
   }
 }

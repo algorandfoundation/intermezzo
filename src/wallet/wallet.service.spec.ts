@@ -8,9 +8,17 @@ import { CreateAssetDto } from './create-asset.dto';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
+import { BadRequestException } from '@nestjs/common';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
-import { Address } from '@algorandfoundation/algokit-utils';
+import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
+import {
+  decodeTransaction,
+  encodeSignedTransaction,
+  encodeTransaction,
+  Transaction,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
 import {
   TruncatedAccountAssetResponse,
   TruncatedAccountResponse,
@@ -716,6 +724,322 @@ describe('WalletService', () => {
       await expect(walletService.groupTransaction(vaultToken, { transactions: [] } as any)).rejects.toThrow(
         'transactions is required and must be a non-empty array',
       );
+    });
+  });
+
+  describe('sponsorTransactionGroup()', () => {
+    const sponsorPublicKey = randomBytes(32);
+    const userPublicKey = randomBytes(32);
+    const sponsorAddress = encodeAddress(sponsorPublicKey);
+    const userAddress = encodeAddress(userPublicKey);
+    const vaultToken = 'sponsor_vault_token';
+    const testGenesisHash = new Uint8Array(32); // 32 zero bytes, valid for tests
+
+    let walletServiceWithRealChain: WalletService;
+
+    const buildPay = (from: string, to: string, amount: number, fee: number): Uint8Array => {
+      const txn = new Transaction({
+        type: TransactionType.Payment,
+        sender: Address.fromString(from),
+        fee: BigInt(fee),
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: testGenesisHash,
+        payment: { receiver: Address.fromString(to), amount: BigInt(amount) },
+      });
+      return encodeTransaction(txn);
+    };
+
+    const toB64 = (tx: Uint8Array): string => Buffer.from(tx).toString('base64');
+
+    const signUserTxn = (tx: Uint8Array): Uint8Array => {
+      // Produce a signed-transaction msgpack envelope `{ txn, sig }` with a dummy non-zero signature.
+      const decoded = decodeTransaction(tx);
+      return encodeSignedTransaction({ txn: decoded, sig: new Uint8Array(64).fill(1) });
+    };
+
+    beforeEach(() => {
+      vaultServiceMock.getManagerPublicKey.mockResolvedValue(sponsorPublicKey);
+      vaultServiceMock.signAsManager.mockResolvedValue(
+        Buffer.from(`vault:v1:${Buffer.from(new Uint8Array(64)).toString('base64')}`),
+      );
+      walletServiceWithRealChain = new WalletService(
+        vaultServiceMock,
+        chainService,
+        configServiceMock,
+        didServiceMock,
+        oid4vcAgentProviderMock,
+      );
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    const buildValidGroup = (sponsorFee = 2000, userFee = 0): { sponsor: Uint8Array; user: Uint8Array } => {
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, sponsorFee);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, userFee);
+      const grouped = chainService.setGroupID([sponsorTx, userTx]);
+      return { sponsor: grouped[0], user: grouped[1] };
+    };
+
+    it('(OK) sponsorTransactionGroup() -- signs sponsor txn, returns user txn unchanged', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+
+      const { sponsor, user } = buildValidGroup();
+      const base64 = [toB64(sponsor), toB64(user)];
+
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
+
+      expect(result.transactions).toHaveLength(2);
+      expect(vaultServiceMock.signAsManager).toHaveBeenCalledTimes(1);
+      // user txn returned as-is
+      expect(result.transactions[1]).toBe(base64[1]);
+      // sponsor txn replaced with signed bytes
+      expect(result.transactions[0]).not.toBe(base64[0]);
+    });
+
+    it('throws on empty transactions array', async () => {
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: [] }),
+      ).rejects.toThrow('Transactions array is required and must not be empty');
+    });
+
+    it('reports caller mistakes as BadRequestException, not raw Errors', async () => {
+      // The global ExceptionsFilter only forwards a message to the caller
+      // when the thrown value is an HttpException — a raw Error would
+      // reach the wallet as an opaque 500 "Internal server error".
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const { sponsor, user } = buildValidGroup(500, 0);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: [toB64(sponsor), toB64(user)] }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws when group is too small', async () => {
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 1000);
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: [toB64(sponsorTx)] }),
+      ).rejects.toThrow('Sponsored group must contain at least the sponsor fee txn and one user txn');
+    });
+
+    it('throws when transactions carry no group id at all', async () => {
+      // never passed through setGroupID, so `grp` is absent
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const base64 = [toB64(sponsorTx), toB64(userTx)];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Transactions must be grouped (missing group id)');
+    });
+
+    it('throws when transactions have different group ids', async () => {
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      // group them separately so each has a distinct grp
+      const g1 = chainService.setGroupID([sponsorTx]);
+      const g2 = chainService.setGroupID([userTx]);
+      const base64 = [toB64(g1[0]), toB64(g2[0])];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('All transactions must belong to the same group');
+    });
+
+    it('throws when the sponsor txn (index 0) is not a payment', async () => {
+      // an axfer at index 0 must not be accepted as the fee txn — otherwise
+      // the sponsor could be made to sign an asset movement of its own.
+      const sponsorAxfer = encodeTransaction(
+        new Transaction({
+          type: TransactionType.AssetTransfer,
+          sender: Address.fromString(sponsorAddress),
+          fee: 2000n,
+          firstValid: 1n,
+          lastValid: 1001n,
+          genesisId: 'test-genesis-id',
+          genesisHash: testGenesisHash,
+          assetTransfer: { assetId: 1n, amount: 1n, receiver: Address.fromString(userAddress) },
+        }),
+      );
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([sponsorAxfer, userTx]);
+      const base64 = [toB64(grouped[0]), toB64(grouped[1])];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
+    });
+
+    it('throws when sponsor txn (index 0) is signed', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const { sponsor, user } = buildValidGroup();
+      const base64 = [toB64(signUserTxn(sponsor)), toB64(user)];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction (index 0) must be unsigned');
+    });
+
+    it('throws when sponsor txn sender is not the sponsor', async () => {
+      const sponsorTx = buildPay(userAddress, sponsorAddress, 0, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([sponsorTx, userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction sender must be the sponsor address');
+    });
+
+    it('throws when sponsor txn receiver is not the sponsor', async () => {
+      const sponsorTx = buildPay(sponsorAddress, userAddress, 0, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([sponsorTx, userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction receiver must be the sponsor address');
+    });
+
+    it('throws when sponsor txn amount is non-zero', async () => {
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 100, 2000);
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([sponsorTx, userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction amount must be 0');
+    });
+
+    it('throws when sponsor txn sets rekeyTo', async () => {
+      const sponsorTx = new Transaction({
+        type: TransactionType.Payment,
+        sender: Address.fromString(sponsorAddress),
+        fee: 2000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: testGenesisHash,
+        payment: { receiver: Address.fromString(sponsorAddress), amount: 0n },
+        rekeyTo: Address.fromString(userAddress),
+      });
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([encodeTransaction(sponsorTx), userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction must not set rekeyTo');
+    });
+
+    it('throws when sponsor txn sets payment.closeRemainderTo', async () => {
+      const sponsorTx = new Transaction({
+        type: TransactionType.Payment,
+        sender: Address.fromString(sponsorAddress),
+        fee: 2000n,
+        firstValid: 1n,
+        lastValid: 1001n,
+        genesisId: 'test-genesis-id',
+        genesisHash: testGenesisHash,
+        payment: {
+          receiver: Address.fromString(sponsorAddress),
+          amount: 0n,
+          closeRemainderTo: Address.fromString(userAddress),
+        },
+      });
+      const userTx = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const grouped = chainService.setGroupID([encodeTransaction(sponsorTx), userTx]);
+      const base64 = grouped.map(toB64);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow('Sponsor fee transaction must not set payment.closeRemainderTo');
+    });
+
+    it('accepts any companion transaction and returns it unchanged', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 2000);
+      const assetTransferTx = encodeTransaction(
+        new Transaction({
+          type: TransactionType.AssetTransfer,
+          sender: Address.fromString(userAddress),
+          fee: 0n,
+          firstValid: 1n,
+          lastValid: 1001n,
+          genesisId: 'test-genesis-id',
+          genesisHash: testGenesisHash,
+          assetTransfer: { assetId: 1n, amount: 1n, receiver: Address.fromString(sponsorAddress) },
+        }),
+      );
+      const grouped = chainService.setGroupID([sponsorTx, assetTransferTx]);
+      const base64 = grouped.map(toB64);
+
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
+
+      expect(result.transactions[1]).toBe(base64[1]);
+    });
+
+    it('accepts mixed signed and unsigned companion transactions unchanged', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      const sponsorTx = buildPay(sponsorAddress, sponsorAddress, 0, 3000);
+      const signedCompanion = buildPay(userAddress, sponsorAddress, 1000, 0);
+      const unsignedCompanion = buildPay(userAddress, sponsorAddress, 2000, 0);
+      const grouped = chainService.setGroupID([sponsorTx, signedCompanion, unsignedCompanion]);
+      const base64 = [toB64(grouped[0]), toB64(signUserTxn(grouped[1])), toB64(grouped[2])];
+
+      const result = await walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 });
+
+      expect(result.transactions.slice(1)).toEqual(base64.slice(1));
+    });
+
+    it('throws when a companion transaction has a non-zero fee', async () => {
+      const { sponsor, user } = buildValidGroup(2000, 1);
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+          transactions: [toB64(sponsor), toB64(user)],
+        }),
+      ).rejects.toThrow('Non-sponsor transaction at index 1 must have fee = 0');
+    });
+
+    it('throws when the shared group id is not canonical for the submitted transactions', async () => {
+      const { sponsor, user } = buildValidGroup();
+      const alteredUser = decodeTransaction(user);
+      alteredUser.payment!.amount += 1n;
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, {
+          transactions: [toB64(sponsor), toB64(encodeTransaction(alteredUser))],
+        }),
+      ).rejects.toThrow('Transaction group id does not match the submitted transactions');
+    });
+
+    it('throws when sponsor fee does not cover the group', async () => {
+      jest
+        .spyOn(chainService, 'getSuggestedParams')
+        .mockResolvedValue({ minFee: 1000, lastRound: 1n } as TruncatedSuggestedParamsResponse);
+      // requiredFee = 1000 * 2 = 2000; supply only 500
+      const { sponsor, user } = buildValidGroup(500, 0);
+      const base64 = [toB64(sponsor), toB64(user)];
+
+      await expect(
+        walletServiceWithRealChain.sponsorTransactionGroup(vaultToken, { transactions: base64 }),
+      ).rejects.toThrow(/Sponsor fee transaction fee \(500\) is below required fee \(2000\)/);
     });
   });
 

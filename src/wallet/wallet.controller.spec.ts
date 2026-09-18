@@ -223,4 +223,19 @@ describe('Wallet Controller', () => {
       );
     });
   });
+
+  describe('sponsorTxGroup', () => {
+    it('uses the authenticated manager vault token', async () => {
+      const managerToken = 'manager-vault-token';
+      const sponsorRequest = { transactions: ['dHhuLTA=', 'dHhuLTE='] };
+      const expectedResponse = { transactions: ['c2lnbmVkLTA=', 'dHhuLTE='] };
+
+      mockWalletService.sponsorTransactionGroup.mockResolvedValueOnce(expectedResponse);
+
+      const result = await walletController.sponsorTxGroup({ vault_token: managerToken }, sponsorRequest);
+
+      expect(mockWalletService.sponsorTransactionGroup).toHaveBeenCalledWith(managerToken, sponsorRequest);
+      expect(result).toEqual(expectedResponse);
+    });
+  });
 });
