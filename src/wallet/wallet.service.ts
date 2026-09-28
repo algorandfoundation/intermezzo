@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  OnModuleInit,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
@@ -50,7 +51,7 @@ function pqAccount(userId: string, publicKey: Buffer): UserAccount {
 type AccountTypeClaim = { schemaVersion: 1; userId: string; accountType: AccountType };
 
 @Injectable()
-export class WalletService {
+export class WalletService implements OnModuleInit {
   constructor(
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
@@ -59,6 +60,78 @@ export class WalletService {
     private readonly oid4vcAgentProvider: Oid4vcAgentProvider,
     private readonly managerTokenProvider: ManagerVaultTokenProvider,
   ) {}
+
+  /** Wallet manager scheme; an unknown value throws instead of falling back to another signing identity. */
+  private managerAccountType(): AccountType {
+    const configured = this.configService.get<string>('VAULT_MANAGER_ACCOUNT_TYPE') ?? 'ed25519';
+    if (configured !== 'ed25519' && configured !== 'falcon1024') {
+      throw new InternalServerErrorException(
+        `VAULT_MANAGER_ACCOUNT_TYPE must be "ed25519" or "falcon1024", got "${configured}".`,
+      );
+    }
+    return configured;
+  }
+
+  /**
+   * The manager-only PQ mount. Aliasing it onto the user mount would
+   * make a user named after the manager key share the wallet manager's
+   * signing key, so that configuration is refused outright.
+   */
+  private managerPqMount(): string {
+    const mount = this.configService.get<string>('VAULT_PQ_MANAGERS_PATH') ?? 'pawn/pq-managers';
+    const userMount = this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users';
+    if (mount === userMount) {
+      throw new InternalServerErrorException(
+        `VAULT_PQ_MANAGERS_PATH ("${mount}") must not equal VAULT_PQ_USERS_PATH — ` +
+          'the manager key must live in its own mount.',
+      );
+    }
+    return mount;
+  }
+
+  private managerKeyName(): string {
+    return this.configService.get<string>('VAULT_MANAGER_KEY') ?? 'manager';
+  }
+
+  /**
+   * Fail startup — not the first transaction — on a manager account
+   * that cannot be used. Ed25519 deployments keep their existing
+   * startup path: no PQ mount, no Vault login added here.
+   */
+  async onModuleInit(): Promise<void> {
+    if (this.managerAccountType() === 'ed25519') return;
+    const mount = this.managerPqMount();
+    let account: UserAccount;
+    try {
+      account = await this.resolveManagerAccount(await this.managerTokenProvider.getToken());
+    } catch (error) {
+      throw new Error(
+        `Wallet manager account type is falcon1024 but its key "${this.managerKeyName()}" in mount ` +
+          `"${mount}" is unusable: ${error?.message ?? error}. Provision it with ` +
+          '`yarn vault:development:init` (VAULT_MANAGER_ACCOUNT_TYPE=falcon1024) and restart.',
+      );
+    }
+    Logger.log(`Wallet manager account: falcon1024 ${account.address} (mount ${mount})`);
+  }
+
+  /**
+   * The wallet manager account for the configured scheme: the transit key (shared
+   * with the DID/OID4VC identity) or the key in the manager-only PQ mount.
+   */
+  async resolveManagerAccount(vault_token: string): Promise<UserAccount> {
+    const userId = this.managerKeyName();
+    if (this.managerAccountType() === 'ed25519') {
+      const publicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+      return { type: 'ed25519', userId, address: new Address(publicKey).toString(), publicKey };
+    }
+    const publicKey = await this.vaultService.pqGetKey(userId, vault_token, this.managerPqMount());
+    if (!publicKey) {
+      throw new InternalServerErrorException(
+        `No falcon1024 manager key "${userId}" in mount "${this.managerPqMount()}".`,
+      );
+    }
+    return pqAccount(userId, publicKey);
+  }
 
   private async claimAccountType(userId: string, accountType: AccountType, token: string): Promise<void> {
     const path = `intermezzo/account-types/${createHash('sha256').update(userId.toLowerCase()).digest('hex')}`;
@@ -130,7 +203,7 @@ export class WalletService {
         Logger.warn(`deployManagerIdentity: manager account is underfunded — ${message}`);
         throw new UnprocessableEntityException(
           'Manager account is underfunded and cannot pay for the DIDAlgoStorage contract deployment. ' +
-            'Fund the manager Algorand account and retry `POST /v1/wallet/manager/identity`.',
+            'Fund the manager identity (Ed25519 transit) account and retry `POST /v1/wallet/manager/identity`.',
         );
       }
       throw error;
@@ -215,23 +288,24 @@ export class WalletService {
   }
 
   async getManagerInfo(vault_token: string): Promise<ManagerDetailDto> {
-    const public_address = await this.vaultService.getManagerPublicKey(vault_token);
+    const manager = await this.resolveManagerAccount(vault_token);
     // asset holdings
-    const account: AssetHolding[] = await this.chainService.getAccountAssetHoldings(
-      new Address(public_address).toString(),
-    );
+    const account: AssetHolding[] = await this.chainService.getAccountAssetHoldings(manager.address);
 
     // Log debug with stringify
     Logger.debug(`Manager account details: ${JSON.stringify(account)}`);
 
     // Get Algo Balance
-    const algoBalance: bigint = await this.chainService.getAccountBalance(new Address(public_address).toString());
+    const algoBalance: bigint = await this.chainService.getAccountBalance(manager.address);
     Logger.debug(`Manager Algo Balance: ${algoBalance}`);
 
     return plainToClass(ManagerDetailDto, {
-      public_address: new Address(public_address).toString(),
+      public_address: manager.address,
       assets: account,
       algoBalance: algoBalance.toString(),
+      // The ed25519 response shape is unchanged; only a Falcon manager
+      // adds the discriminator.
+      ...(manager.type === 'falcon1024' ? { account_type: manager.type } : {}),
     });
   }
 
@@ -343,28 +417,44 @@ export class WalletService {
     return signedTx;
   }
 
+  /**
+   * Apply PQ fee surcharges, group, sign, and submit.
+   *
+   * `manager` is the account the calling operation already resolved; it
+   * is required whenever `senders` maps an address to `'manager'`. One
+   * account prices and signs every manager entry, so a group cannot end
+   * up priced for one scheme and signed with another.
+   */
   private async signAndSubmit(
     unsignedTxs: Uint8Array[],
     senders: Map<string, UserAccount | 'manager'>,
     vault_token: string,
     minFee: number | bigint,
     grouped = false,
+    manager?: UserAccount,
   ): Promise<string> {
-    const adjustedTxs = unsignedTxs.map((tx) => {
+    const accountFor = (tx: Uint8Array): UserAccount | 'manager' => {
       const account = senders.get(decodeTransaction(tx).sender.toString());
-      if (!account) throw new Error('Invalid sender');
-      return account !== 'manager' && account.type === 'falcon1024'
+      if (!account || (account === 'manager' && !manager)) throw new Error('Invalid sender');
+      return account;
+    };
+
+    // Surcharge before grouping: `addPqFeeSurcharge` refuses a grouped
+    // transaction, and a post-group fee change would invalidate the
+    // group hash.
+    const adjustedTxs = unsignedTxs.map((tx) => {
+      const account = accountFor(tx);
+      return (account === 'manager' ? manager : account).type === 'falcon1024'
         ? this.chainService.addPqFeeSurcharge(tx, minFee)
         : tx;
     });
     const txs = grouped ? this.chainService.setGroupID(adjustedTxs) : adjustedTxs;
     const signedTxs: Uint8Array[] = [];
     for (const tx of txs) {
-      const account = senders.get(decodeTransaction(tx).sender.toString());
-      if (!account) throw new Error('Invalid sender');
+      const account = accountFor(tx);
       signedTxs.push(
         account === 'manager'
-          ? await this.signTxAsManager(tx, vault_token)
+          ? await this.signTxAsManager(tx, vault_token, manager)
           : await this.signTxAsUser(account, tx, vault_token),
       );
     }
@@ -376,9 +466,20 @@ export class WalletService {
    *
    * @param tx The transaction to be signed, as a Uint8Array.
    * @param vault_token The token used to authenticate with the vault.
+   * @param manager The manager account resolved by the calling operation.
    * @returns The signed transaction, as a Uint8Array.
    */
-  async signTxAsManager(tx: Uint8Array<ArrayBufferLike>, vault_token: string): Promise<Uint8Array<ArrayBufferLike>> {
+  async signTxAsManager(
+    tx: Uint8Array<ArrayBufferLike>,
+    vault_token: string,
+    manager: UserAccount,
+  ): Promise<Uint8Array<ArrayBufferLike>> {
+    if (manager.type === 'falcon1024') {
+      // `tx` already carries the `TX` prefix and, in a group, the group
+      // ID — Falcon signs exactly those bytes.
+      const signature = await this.vaultService.pqSign(manager.userId, tx, vault_token, this.managerPqMount());
+      return this.chainService.addPqSignatureToTxn(tx, { ...manager, signature });
+    }
     const vaultRawSig: Buffer = await this.vaultService.signAsManager(tx, vault_token);
     // split vault specific prefixes vault:${version}:signature
     const signature = vaultRawSig.toString().split(':')[2];
@@ -391,13 +492,24 @@ export class WalletService {
   }
 
   async createAsset(options: CreateAssetDto, vault_token: string) {
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new Address(managerPublicKey).toString();
-    const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(managerPublicAddress, options);
-    const signedTx: Uint8Array<ArrayBufferLike> = await this.signTxAsManager(tx, vault_token);
-    const transactionId: string = (await this.chainService.submitTransaction(signedTx)).txid;
+    const manager = await this.resolveManagerAccount(vault_token);
+    const suggested_params = await this.chainService.getSuggestedParams();
+    const tx: Uint8Array<ArrayBufferLike> = await this.chainService.craftAssetCreateTx(
+      manager.address,
+      options,
+      suggested_params,
+    );
 
-    return transactionId;
+    // Standalone creation goes through the shared path so a Falcon
+    // manager gets the same fee surcharge as it does inside a group.
+    return this.signAndSubmit(
+      [tx],
+      new Map<string, UserAccount | 'manager'>([[manager.address, 'manager']]),
+      vault_token,
+      suggested_params.minFee,
+      false,
+      manager,
+    );
   }
 
   /**
@@ -417,11 +529,12 @@ export class WalletService {
   ): Promise<string> {
     let fromAddress: string;
     let account: UserAccount | 'manager' = 'manager';
+    let manager: UserAccount | undefined;
 
     try {
       if (fromUserId === 'manager') {
-        const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-        fromAddress = new Address(managerPublicKey).toString();
+        manager = await this.resolveManagerAccount(vault_token);
+        fromAddress = manager.address;
       } else {
         account = await this.resolveUserAccount(fromUserId, vault_token);
         fromAddress = account.address;
@@ -436,7 +549,14 @@ export class WalletService {
     const payTx: Uint8Array = await this.chainService.craftPaymentTx(fromAddress, toAddress, amount, suggestedParams);
 
     try {
-      return await this.signAndSubmit([payTx], new Map([[fromAddress, account]]), vault_token, suggestedParams.minFee);
+      return await this.signAndSubmit(
+        [payTx],
+        new Map([[fromAddress, account]]),
+        vault_token,
+        suggestedParams.minFee,
+        false,
+        manager,
+      );
     } catch (error) {
       throw new Error(`Failed to sign transaction as user ${fromUserId}: ${error.message}`);
     }
@@ -468,8 +588,8 @@ export class WalletService {
   ) {
     const account = await this.resolveUserAccount(userId, vault_token);
     const userPublicAddress = account.address;
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new Address(managerPublicKey).toString();
+    const manager = await this.resolveManagerAccount(vault_token);
+    const managerPublicAddress: string = manager.address;
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -544,6 +664,7 @@ export class WalletService {
       vault_token,
       suggested_params.minFee,
       true,
+      manager,
     );
   }
 
@@ -571,8 +692,8 @@ export class WalletService {
     note?: string,
   ) {
     const userPublicAddress: string = (await this.getUserInfo(userId, vault_token)).public_address;
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new Address(managerPublicKey).toString();
+    const manager = await this.resolveManagerAccount(vault_token);
+    const managerPublicAddress: string = manager.address;
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -590,7 +711,14 @@ export class WalletService {
 
     // sign tx by manager
 
-    return this.signAndSubmit([tx], new Map([[managerPublicAddress, 'manager']]), vault_token, suggested_params.minFee);
+    return this.signAndSubmit(
+      [tx],
+      new Map([[managerPublicAddress, 'manager']]),
+      vault_token,
+      suggested_params.minFee,
+      false,
+      manager,
+    );
   }
 
   /**
@@ -605,11 +733,12 @@ export class WalletService {
   async appCall(vault_token: string, appCallRequestDto: AppCallRequestDto) {
     let fromAddress: string;
     let account: UserAccount | 'manager' = 'manager';
+    let manager: UserAccount | undefined;
 
     try {
       if (appCallRequestDto.fromUserId === 'manager') {
-        const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-        fromAddress = new Address(managerPublicKey).toString();
+        manager = await this.resolveManagerAccount(vault_token);
+        fromAddress = manager.address;
       } else {
         account = await this.resolveUserAccount(appCallRequestDto.fromUserId, vault_token);
         fromAddress = account.address;
@@ -628,7 +757,14 @@ export class WalletService {
     );
 
     try {
-      return await this.signAndSubmit([appTx], new Map([[fromAddress, account]]), vault_token, suggested_params.minFee);
+      return await this.signAndSubmit(
+        [appTx],
+        new Map([[fromAddress, account]]),
+        vault_token,
+        suggested_params.minFee,
+        false,
+        manager,
+      );
     } catch (error) {
       throw new Error(`Failed to sign transaction as user ${appCallRequestDto.fromUserId}: ${error.message}`);
     }
@@ -643,8 +779,8 @@ export class WalletService {
    * @returns The group transaction ID (the txid of the first transaction in the submitted group).
    */
   async groupTransaction(vault_token: string, groupRequestDto: GroupRequestDto) {
-    const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const managerPublicAddress: string = new Address(managerPublicKey).toString();
+    const manager = await this.resolveManagerAccount(vault_token);
+    const managerPublicAddress: string = manager.address;
 
     const suggested_params = await this.chainService.getSuggestedParams();
 
@@ -689,7 +825,7 @@ export class WalletService {
           break;
         }
         case 'assetConfig': {
-          const tx = await this.chainService.craftAssetCreateTx(managerPublicAddress, value);
+          const tx = await this.chainService.craftAssetCreateTx(managerPublicAddress, value, suggested_params);
           unSignedTxs.push(tx);
           break;
         }
@@ -750,6 +886,6 @@ export class WalletService {
       throw new Error('No transactions to group');
     }
 
-    return this.signAndSubmit(unSignedTxs, senders, vault_token, suggested_params.minFee, true);
+    return this.signAndSubmit(unSignedTxs, senders, vault_token, suggested_params.minFee, true, manager);
   }
 }

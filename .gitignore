@@ -1,5 +1,6 @@
 .env
 manager-address.txt
+pq-manager-address.txt
 node_modules/*
 !node_modules/.gitkeep
 dist/*

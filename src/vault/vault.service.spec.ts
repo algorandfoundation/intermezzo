@@ -728,6 +728,52 @@ describe('VaultService', () => {
       });
     });
 
+    describe('explicit mount routing', () => {
+      // The manager's PQ key lives in its own mount. Defaulting to the
+      // user mount is what keeps every existing user call unchanged.
+      const managerMount = 'pawn/pq-managers';
+
+      // These cases assert on the exact requests made, so start from a
+      // clean call history and no leftover resolved value.
+      beforeEach(() => (httpService.axiosRef.request as jest.Mock).mockReset());
+
+      it('(OK) pqGetKey reads the given mount and leaves the default alone', async () => {
+        configWith({ VAULT_PQ_USERS_PATH: defaultMount, VAULT_NAMESPACE: 'tenant-a' });
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValue(ok({ data: keyPayload }));
+
+        await vaultService.pqGetKey('manager', 'caller-token', managerMount);
+        await vaultService.pqGetKey('user-1', 'caller-token');
+
+        expect((httpService.axiosRef.request as jest.Mock).mock.calls.map(([call]) => call.url)).toEqual([
+          `${baseUrl}/v1/${managerMount}/keys/manager`,
+          `${baseUrl}/v1/${defaultMount}/keys/user-1`,
+        ]);
+        // The caller's token and the namespace are what Vault authorizes
+        // on; neither may be swapped out for the manager mount.
+        for (const [call] of (httpService.axiosRef.request as jest.Mock).mock.calls) {
+          expect(call.headers).toEqual({ 'X-Vault-Token': 'caller-token', 'X-Vault-Namespace': 'tenant-a' });
+        }
+      });
+
+      it('(OK) pqSign posts to the given mount with the same body shape', async () => {
+        configWith({ VAULT_PQ_USERS_PATH: defaultMount });
+        const input = new Uint8Array([0x54, 0x58, 0x07]);
+        const signature = Buffer.alloc(1226, 3);
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(
+          ok({ data: { signature: signature.toString('base64') } }),
+        );
+
+        await expect(vaultService.pqSign('manager', input, 'caller-token', managerMount)).resolves.toEqual(signature);
+
+        expect(httpService.axiosRef.request).toHaveBeenCalledWith({
+          url: `${baseUrl}/v1/${managerMount}/sign/manager`,
+          method: 'POST',
+          data: { input: Buffer.from(input).toString('base64') },
+          headers: { 'X-Vault-Token': 'caller-token' },
+        });
+      });
+    });
+
     describe('pqSign', () => {
       it('(OK) should base64 the signing input unmodified and return raw signature bytes', async () => {
         configWith();

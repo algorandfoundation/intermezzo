@@ -1,6 +1,7 @@
-import { IsString } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsOptional, IsString } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AssetHolding } from 'src/chain/algo-node-responses';
+import { AccountType } from '../vault/user-info.dto';
 
 export class ManagerDetailDto {
   @IsString()
@@ -43,4 +44,15 @@ export class ManagerDetailDto {
     description: 'The balance of Algorand held by the manager in microAlgos',
   })
   algoBalance?: string;
+
+  // Absent for an ed25519 manager, which keeps the historical response
+  // shape; present only when the manager account is post-quantum.
+  @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    type: 'string',
+    example: 'falcon1024',
+    description: 'Signature scheme backing the manager account. Only present for post-quantum managers.',
+  })
+  account_type?: AccountType;
 }

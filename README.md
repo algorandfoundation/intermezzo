@@ -157,8 +157,60 @@ automatically.
 Deploy this claim-aware version to every application instance before enabling
 PQ account creation. No audit or backfill is required because PQ creation has
 not previously been deployed. Create accounts through the application endpoint;
-direct writes to the Vault mounts bypass the account-type claim. Manager
-accounts remain Ed25519.
+direct writes to the Vault mounts bypass the account-type claim.
+
+## Post-quantum wallet manager account
+
+The wallet manager account can also be Falcon-1024. It is off by default:
+
+```bash
+# in .env, before provisioning and before starting the app
+VAULT_MANAGER_ACCOUNT_TYPE=falcon1024
+```
+
+```bash
+./scripts/build_vault_plugin.sh
+docker compose exec -T pawn yarn vault:development:init
+./scripts/fund_manager.sh
+docker compose up -d --force-recreate --no-deps pawn
+```
+
+Enabling it requires a provisioning run and an application restart; there is
+no runtime toggle. In Falcon mode the plugin binary is required (in Ed25519
+mode it stays optional), the manager key is validated against Vault during
+startup, and an unusable key fails startup rather than the first transaction.
+`VAULT_PQ_MANAGERS_PATH` must differ from `VAULT_PQ_USERS_PATH`; an aliased
+configuration is refused, so a user named after `VAULT_MANAGER_KEY` can never
+reach the wallet manager's signing key.
+
+### Two manager addresses
+
+Provisioning writes both:
+
+| File | Account | Used by |
+| --- | --- | --- |
+| `manager-address.txt` | Ed25519 transit key | The DID/OID4VC issuer identity, always — `POST /v1/wallet/manager/identity`, `GET /v1/wallet/manager/identity`, credential issuance and verification |
+| `pq-manager-address.txt` | Falcon-1024 key, written only in Falcon mode | The wallet manager — `GET /v1/wallet/manager/`, asset creation, payments, transfers, clawbacks, app calls and group transactions |
+
+In Ed25519 mode both roles use the transit address and there is one account to
+fund. In Falcon mode they are **separate accounts with separate balances**:
+`./scripts/fund_manager.sh` funds the transit address always and the PQ address
+when Falcon is selected. Fund both — identity deployment pays from the transit
+address, and every wallet operation pays from the PQ address.
+
+`GET /v1/wallet/manager/` reports the wallet manager address and, for Falcon
+only, `account_type: falcon1024`. The Ed25519 response shape is unchanged.
+
+Switching schemes selects a different persistent account. It does not migrate
+balances, assets, ASA authority (manager/reserve/freeze/clawback addresses on
+already-created assets) or the DID application. An account is empty only if it
+has never been funded or used; switching back restores access to the previous
+wallet account as it was left.
+
+Each Falcon-signed transaction pays `3 x minFee` instead of `minFee`, including
+every manager entry in a group, and an explicit pooled fee has the surcharge
+added rather than replaced. Falcon signing applies to wallet operations only;
+the DID application's own signer stays Ed25519.
 
 ## HTTP API mode
 

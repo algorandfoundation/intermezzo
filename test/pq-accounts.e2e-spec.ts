@@ -30,15 +30,20 @@ describe('PQ accounts E2E', () => {
     return response.data.access_token;
   };
 
-  // Function to get manager address
-  const getManagerAddress = async () => {
+  // Function to get the manager account. The service reports which scheme
+  // backs it, so scheme-dependent assertions below stay explicit about the
+  // manager they are running against instead of accepting either envelope.
+  const getManagerAccount = async () => {
     const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
     const accessToken = await signInToPawn(vaultToken);
 
     const manager_detail_response = await axios.get(`${APP_BASE_URL}/wallet/manager/`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    return manager_detail_response.data.public_address;
+    return {
+      address: manager_detail_response.data.public_address as string,
+      accountType: (manager_detail_response.data.account_type ?? 'ed25519') as 'ed25519' | 'falcon1024',
+    };
   };
 
   // Exercise the custom Vault plugin directly before the service-level tests.
@@ -278,6 +283,7 @@ describe('PQ accounts E2E', () => {
     let vaultToken: string;
     let accessToken: string;
     let managerAddress: string;
+    let managerAccountType: 'ed25519' | 'falcon1024';
     let chain: ChainService;
     let algod: algosdk.Algodv2;
 
@@ -310,7 +316,9 @@ describe('PQ accounts E2E', () => {
     beforeEach(async () => {
       vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
       accessToken = await signInToPawn(vaultToken);
-      managerAddress = await getManagerAddress();
+      const manager = await getManagerAccount();
+      managerAddress = manager.address;
+      managerAccountType = manager.accountType;
       const config = new ConfigService();
       chain = new ChainService(config, new HttpService());
       algod = new algosdk.Algodv2(
@@ -533,7 +541,17 @@ describe('PQ accounts E2E', () => {
       expect(pending.txn.txn.assetTransfer!.assetSender!.toString()).toBe(user.public_address);
       expect(pending.txn.txn.assetTransfer!.receiver.toString()).toBe(managerAddress);
       expect(pending.txn.txn.assetTransfer!.amount).toBe(4n);
-      expect(pending.txn.pqsig).toBeUndefined();
+      // The clawback is manager-signed, so its envelope follows the
+      // configured manager scheme — asserted exactly, not loosened to
+      // accept either one.
+      if (managerAccountType === 'falcon1024') {
+        expect(algosdk.addressFromPQSig(pending.txn.pqsig!).toString()).toBe(managerAddress);
+        expect(pending.txn.txn.fee).toBe(3000n);
+      } else {
+        expect(pending.txn.pqsig).toBeUndefined();
+        expect(pending.txn.sig).toHaveLength(64);
+        expect(pending.txn.txn.fee).toBe(1000n);
+      }
 
       const holdings = await axios.get(`${APP_BASE_URL}/wallet/assets/${user.user_id}`, {
         headers: { Authorization: `Bearer ${accessToken}` },

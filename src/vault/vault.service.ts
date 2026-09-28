@@ -242,8 +242,9 @@ export class VaultService {
 
   // Algorand PQ (Falcon-1024) secrets engine
 
-  private getPqMount(): string {
-    return this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users';
+  /** Defaults to the user mount; `mount` comes from config, never from an HTTP request. */
+  private getPqMount(mount?: string): string {
+    return mount ?? this.configService.get<string>('VAULT_PQ_USERS_PATH') ?? 'pawn/pq-users';
   }
 
   /**
@@ -256,13 +257,14 @@ export class VaultService {
     path: string,
     token: string,
     body?: Record<string, unknown>,
+    mount?: string,
   ): Promise<any | undefined> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
     const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     try {
       const result: AxiosResponse = await this.httpService.axiosRef.request({
-        url: `${baseUrl}/v1/${this.getPqMount()}/${path}`,
+        url: `${baseUrl}/v1/${this.getPqMount(mount)}/${path}`,
         method,
         ...(body ? { data: body } : {}),
         headers: {
@@ -304,8 +306,8 @@ export class VaultService {
    * exist. The miss is load-bearing: it is how a caller learns that a
    * `user_id` is not a PQ account.
    */
-  async pqGetKey(keyName: string, token: string): Promise<Buffer | undefined> {
-    const data = await this.pqRequest('GET', `keys/${keyName}`, token);
+  async pqGetKey(keyName: string, token: string, mount?: string): Promise<Buffer | undefined> {
+    const data = await this.pqRequest('GET', `keys/${keyName}`, token, undefined, mount);
 
     return data ? VaultService.toPqPublicKey(data) : undefined;
   }
@@ -315,10 +317,14 @@ export class VaultService {
    * domain prefix (`"TX"` for transactions) — this signs exactly the
    * bytes it is given and returns the compressed signature.
    */
-  async pqSign(keyName: string, data: Uint8Array, token: string): Promise<Buffer> {
-    const result = await this.pqRequest('POST', `sign/${keyName}`, token, {
-      input: Buffer.from(data).toString('base64'),
-    });
+  async pqSign(keyName: string, data: Uint8Array, token: string, mount?: string): Promise<Buffer> {
+    const result = await this.pqRequest(
+      'POST',
+      `sign/${keyName}`,
+      token,
+      { input: Buffer.from(data).toString('base64') },
+      mount,
+    );
     if (!result) throw new HttpErrorByCode[404]('VaultException');
 
     return Buffer.from(result.signature, 'base64');

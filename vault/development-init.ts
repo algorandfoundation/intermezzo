@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import axios from 'axios';
 import assert from 'assert';
 import { Address } from '@algorandfoundation/algokit-utils';
+import { addressFromPQKey } from 'algosdk';
 
 // Constants
 const VAULT_BASE_URL = 'http://vault:8200';
@@ -19,14 +20,21 @@ const VAULT_PQ_PLUGIN_BINARY = 'vault-plugin-algorand-pq';
 const VAULT_PQ_PLUGIN_FILE = `volumes/vault/plugins/${VAULT_PQ_PLUGIN_BINARY}`;
 const VAULT_PQ_PLUGIN_VERSION = fs.readFileSync('vault/plugin/VERSION', 'utf8').trim();
 const VAULT_PQ_USERS_PATH = 'pawn/pq-users';
+// The wallet manager's PQ key lives in its own mount, out of users' reach.
+const VAULT_PQ_MANAGERS_PATH = 'pawn/pq-managers';
 const VAULT_MANAGER_KEY = 'manager';
 const VAULT_SEAL_KEYS_FILE = 'vault-seal-keys.json';
 
 const MANAGERS_ROLE_AND_SECRET_KEYS_FILE = 'manager-role-and-secrets.json';
 const MANAGER_ADDRESS_FILE = 'manager-address.txt';
+// The Falcon-1024 wallet manager address, a separate account.
+const PQ_MANAGER_ADDRESS_FILE = 'pq-manager-address.txt';
 const USERS_ROLE_AND_SECRET_KEYS_FILE = 'user-role-and-secrets.json';
 const ENV_FILE = '.env';
 const ENV_TEMPLATE_FILE = '.env.template';
+// Read from `.env` only: it is what the app reads after the restart that
+// applies it, while a running container's environment can be stale.
+const FALCON_MANAGER = readEnvFile().VAULT_MANAGER_ACCOUNT_TYPE === 'falcon1024';
 const USERS_POLICY_NAME = 'pawn_users_policy';
 const USERS_APP_ROLE_NAME = 'pawn_users_approle';
 const MANAGERS_POLICY_NAME = 'pawn_managers_policy';
@@ -201,11 +209,15 @@ async function initKvSecretEngine(token: string) {
   }
 }
 
-// Idempotently register the Algorand PQ plugin in Vault's plugin catalog and
-// mount it at `pawn/pq-users`. Vault verifies the binary against the registered
-// sha256, so the catalog entry is re-upserted (and the plugin reloaded) on every
-// run — a rebuilt binary is picked up without resetting the dev vault.
+// Idempotently register the Algorand PQ plugin in Vault's plugin catalog
+// and mount it — at the user mount always, plus the manager-only mount
+// when the wallet manager is Falcon. Vault verifies the binary against the
+// registered sha256, so the catalog entry is re-upserted (and the plugin
+// reloaded) on every run — a rebuilt binary is picked up without resetting
+// the dev vault.
 async function registerAndMountPqPlugin(token: string) {
+  const mountPaths = [VAULT_PQ_USERS_PATH, ...(FALCON_MANAGER ? [VAULT_PQ_MANAGERS_PATH] : [])];
+
   if (!fs.existsSync(VAULT_PQ_PLUGIN_FILE)) {
     console.warn(
       `SKIP: PQ plugin binary not found at '${VAULT_PQ_PLUGIN_FILE}'. ` +
@@ -226,30 +238,6 @@ async function registerAndMountPqPlugin(token: string) {
   );
   console.log(`Registered plugin '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} (sha256 ${sha256})`);
 
-  try {
-    await axios.post(
-      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`,
-      { type: VAULT_PQ_PLUGIN_NAME, plugin_version: VAULT_PQ_PLUGIN_VERSION },
-      { headers },
-    );
-    console.log(`Mounted '${VAULT_PQ_PLUGIN_NAME}' at ${VAULT_PQ_USERS_PATH}`);
-  } catch (error: any) {
-    const status = error?.response?.status;
-    const message: string = error?.response?.data?.errors?.[0] ?? '';
-    if (status !== 400 || !message.includes('path is already in use')) {
-      console.error(`Failed to mount PQ secrets engine (${status}):`, error?.response?.data?.errors ?? error?.message);
-      throw error;
-    }
-    console.log(`PASS: PQ secrets engine already mounted at ${VAULT_PQ_USERS_PATH}/`);
-    await axios.post(
-      `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}/tune`,
-      { plugin_version: VAULT_PQ_PLUGIN_VERSION },
-      { headers },
-    );
-    await axios.post(`${VAULT_BASE_URL}/v1/sys/plugins/reload/backend`, { plugin: VAULT_PQ_PLUGIN_NAME }, { headers });
-    console.log(`Reloaded plugin '${VAULT_PQ_PLUGIN_NAME}'`);
-  }
-
   const catalogResponse = await axios.get(`${VAULT_BASE_URL}/v1/sys/plugins/catalog/secret/${VAULT_PQ_PLUGIN_NAME}`, {
     headers,
     params: { version: VAULT_PQ_PLUGIN_VERSION },
@@ -258,14 +246,47 @@ async function registerAndMountPqPlugin(token: string) {
   assert.strictEqual(catalog.version, VAULT_PQ_PLUGIN_VERSION);
   assert(expectedSha256Values.has(catalog.sha256), 'Vault catalog SHA does not match the plugin binary');
 
-  const mountResponse = await axios.get(`${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${VAULT_PQ_USERS_PATH}`, {
-    headers,
-  });
-  const mount = mountResponse.data?.data ?? mountResponse.data;
-  assert.strictEqual(mount.plugin_version, VAULT_PQ_PLUGIN_VERSION);
-  assert.strictEqual(mount.running_plugin_version, VAULT_PQ_PLUGIN_VERSION);
-  assert(expectedSha256Values.has(mount.running_sha256), 'Running plugin SHA does not match the plugin binary');
-  console.log(`PASS: '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} is registered and running`);
+  for (const mountPath of mountPaths) {
+    try {
+      await axios.post(
+        `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${mountPath}`,
+        { type: VAULT_PQ_PLUGIN_NAME, plugin_version: VAULT_PQ_PLUGIN_VERSION },
+        { headers },
+      );
+      console.log(`Mounted '${VAULT_PQ_PLUGIN_NAME}' at ${mountPath}`);
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const message: string = error?.response?.data?.errors?.[0] ?? '';
+      if (status !== 400 || !message.includes('path is already in use')) {
+        console.error(
+          `Failed to mount PQ secrets engine at ${mountPath} (${status}):`,
+          error?.response?.data?.errors ?? error?.message,
+        );
+        throw error;
+      }
+      console.log(`PASS: PQ secrets engine already mounted at ${mountPath}/`);
+      await axios.post(
+        `${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${mountPath}/tune`,
+        { plugin_version: VAULT_PQ_PLUGIN_VERSION },
+        { headers },
+      );
+      await axios.post(
+        `${VAULT_BASE_URL}/v1/sys/plugins/reload/backend`,
+        { plugin: VAULT_PQ_PLUGIN_NAME },
+        { headers },
+      );
+      console.log(`Reloaded plugin '${VAULT_PQ_PLUGIN_NAME}'`);
+    }
+
+    const mountResponse = await axios.get(`${VAULT_BASE_URL}${VAULT_MOUNTS_ENDPOINT}/${mountPath}`, {
+      headers,
+    });
+    const mount = mountResponse.data?.data ?? mountResponse.data;
+    assert.strictEqual(mount.plugin_version, VAULT_PQ_PLUGIN_VERSION);
+    assert.strictEqual(mount.running_plugin_version, VAULT_PQ_PLUGIN_VERSION);
+    assert(expectedSha256Values.has(mount.running_sha256), 'Running plugin SHA does not match the plugin binary');
+    console.log(`PASS: '${VAULT_PQ_PLUGIN_NAME}' ${VAULT_PQ_PLUGIN_VERSION} is registered and running at ${mountPath}`);
+  }
 }
 
 // Function to initialize manager transit engine
@@ -345,6 +366,16 @@ async function createACLPolicies(token: string) {
             capabilities: ['create', 'read', 'update'],
           },
 
+          // PQ (Falcon-1024) wallet manager key — its own mount, scoped
+          // to the one key name. No `list`: there is no manager listing
+          // feature, and the user policy grants nothing here at all.
+          [`${VAULT_PQ_MANAGERS_PATH}/keys/${VAULT_MANAGER_KEY}`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
+          [`${VAULT_PQ_MANAGERS_PATH}/sign/${VAULT_MANAGER_KEY}`]: {
+            capabilities: ['create', 'read', 'update'],
+          },
+
           // USER
           // -------
           // 1) allow /keys/* path
@@ -410,7 +441,10 @@ async function createACLPolicies(token: string) {
       console.log(policyExists ? `ACL policy '${policyName}' updated` : `ACL policy '${policyName}' created`);
     }
   } catch (error) {
+    // A swallowed failure here leaves the manager AppRole without the
+    // capabilities the service needs and the run looking successful.
     console.error('Failed to create ACL policies:', error);
+    throw error;
   }
 }
 
@@ -677,6 +711,23 @@ async function getOrCreateManager(token: string) {
   console.log('Manager public key: \n', publicKey);
 }
 
+// Idempotently create the Falcon-1024 wallet manager key in the
+// manager-only PQ mount and persist its Algorand address. The plugin
+// returns the existing key rather than rotating it, so repeated runs
+// preserve the account (and its balance).
+async function getOrCreatePqManager(token: string) {
+  const url: string = `${VAULT_BASE_URL}/v1/${VAULT_PQ_MANAGERS_PATH}/keys/${VAULT_MANAGER_KEY}`;
+  const response = await axios.post(url, {}, { headers: { 'X-Vault-Token': token } });
+  assert(response.status === 200);
+
+  const encoded: string = response.data.data.public_key;
+  const publicKey = Buffer.from(encoded, 'base64');
+  assert.strictEqual(publicKey.length, 1793, 'Vault returned a malformed Falcon-1024 public key');
+  const { address } = addressFromPQKey(Buffer.from('f1'), publicKey);
+  fs.writeFileSync(PQ_MANAGER_ADDRESS_FILE, address.toString());
+  console.log('PQ manager public address: \n', address.toString());
+}
+
 // Main function
 async function main() {
   // Decide what to do based on Vault's actual server state, not on the
@@ -750,7 +801,13 @@ async function main() {
   // change every time the sandbox is reset).
   await fetchAndPersistGenesis();
   console.log('\n\n\nMANAGER ALGORAND PUBLIC ADDRESS\n------');
+  // The transit manager identity is always provisioned: DID/OID4VC signs
+  // with it whichever scheme the wallet manager uses.
   await getOrCreateManager(sealKeys.root_token);
+  if (FALCON_MANAGER) {
+    console.log('\n\n\nPQ MANAGER ALGORAND PUBLIC ADDRESS\n------');
+    await getOrCreatePqManager(sealKeys.root_token);
+  }
 }
 
 // Run main function

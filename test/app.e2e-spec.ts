@@ -21,6 +21,15 @@ const VAULT_MANAGER_KEY = 'manager';
 const MANAGER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('manager-role-and-secrets.json').toString());
 const USER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('user-role-and-secrets.json').toString());
 
+// These suites run on the host, where `VAULT_BASE_URL` (the in-container
+// `http://vault:8200`) does not resolve. The in-process `AppModule` booted
+// below reaches Vault during startup — a Falcon wallet manager validates
+// its key there — so apply the same swap `src/repl.ts` uses for host-side
+// processes before the module is compiled.
+if (process.env.CLI_USE_LOCAL_VAULT === 'true' && process.env.VAULT_LOCAL_URL) {
+  process.env.VAULT_BASE_URL = process.env.VAULT_LOCAL_URL;
+}
+
 /**
  * Current endpoints:
  *

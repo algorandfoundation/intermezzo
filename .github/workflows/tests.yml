@@ -9,6 +9,15 @@ jobs:
       pull-requests: write
       checks: write
     runs-on: ubuntu-latest
+    # Two isolated configurations of the same stack. The wallet manager
+    # scheme is fixed at provisioning and startup, so it cannot be switched
+    # inside a running app — each entry gets its own runner, Vault data,
+    # accounts and network.
+    strategy:
+      fail-fast: false
+      matrix:
+        manager_account_type: [ed25519, falcon1024]
+    name: build (manager ${{ matrix.manager_account_type }})
     steps:
       - uses: actions/checkout@v6
 
@@ -29,6 +38,7 @@ jobs:
 
       - name: Vault PQ plugin tests
         working-directory: vault/plugin
+        if: matrix.manager_account_type == 'ed25519'
         run: go test -race ./...
 
       - uses: actions/setup-node@v6
@@ -42,12 +52,15 @@ jobs:
         run: yarn --frozen-lockfile --ignore-engines
 
       - name: Lint check
+        if: matrix.manager_account_type == 'ed25519'
         run: yarn lint
 
       - name: Format check
+        if: matrix.manager_account_type == 'ed25519'
         run: yarn format
 
       - uses: ArtiomTr/jest-coverage-report-action@v2
+        if: matrix.manager_account_type == 'ed25519'
         with:
           package-manager: yarn
           test-script: yarn jest
@@ -55,6 +68,16 @@ jobs:
       # Seed .env from the template before any docker compose step
       - name: Seed .env from template
         run: cp .env.template .env
+
+      # The default configuration leaves VAULT_MANAGER_ACCOUNT_TYPE unset to
+      # prove the ed25519 fallback; Falcon is set before provisioning and startup.
+      # The leading newline matters: .env.template has no trailing newline.
+      - name: Select the wallet manager account type
+        run: |
+          sed -i '/^VAULT_MANAGER_ACCOUNT_TYPE=/d' .env
+          if [ '${{ matrix.manager_account_type }}' = falcon1024 ]; then
+            printf '\nVAULT_MANAGER_ACCOUNT_TYPE=falcon1024\n' >> .env
+          fi
 
       # Sync GENESIS_ID / GENESIS_HASH from the running LocalNet into .env
       # so pawn signs transactions with the correct genesis. LocalNet is
@@ -106,7 +129,8 @@ jobs:
         run: yarn test:e2e
 
       # Scoped to failures so passing runs stay quiet: the Vault-side reason a
-      # plugin mount or a signing call failed is only ever in the server log.
-      - name: Vault logs
+      # plugin mount or a signing call failed is only ever in the server log,
+      # and a Falcon manager that fails its startup check only in pawn's.
+      - name: Vault and pawn logs
         if: failure()
-        run: docker compose logs --no-color vault
+        run: docker compose logs --no-color vault pawn

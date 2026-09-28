@@ -99,8 +99,9 @@ export class ChainService {
       freezeAddress?: string;
       clawbackAddress?: string;
     },
+    suggested_params?: TruncatedSuggestedParamsResponse,
   ): Promise<Uint8Array> {
-    const suggested_params: TruncatedSuggestedParamsResponse = await this.getSuggestedParams();
+    suggested_params = suggested_params ?? (await this.getSuggestedParams());
 
     const assetParams: AssetConfigTransactionFields = {
       assetId: 0n,
