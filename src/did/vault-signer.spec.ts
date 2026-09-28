@@ -68,6 +68,15 @@ describe('vault-signer', () => {
   });
 
   describe('buildManagerSigner', () => {
+    it('rejects a PQ manager key before signing', async () => {
+      const vaultService = createMockInstance(VaultService);
+      vaultService.getManagerPublicKey.mockResolvedValue(Buffer.alloc(1793));
+      await expect(buildManagerSigner(vaultService, createMockInstance(ChainService), 'tok')).rejects.toThrow(
+        'DID operations support only standard Ed25519 accounts',
+      );
+      expect(vaultService.signAsManager).not.toHaveBeenCalled();
+    });
+
     it('returns the manager Address and a signer that signs via signAsManager', async () => {
       const vaultService = createMockInstance(VaultService);
       const chainService = createMockInstance(ChainService);

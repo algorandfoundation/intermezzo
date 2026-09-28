@@ -1,5 +1,13 @@
 import { base58 } from '@scure/base';
 
+export const ED25519_DID_ONLY_MESSAGE =
+  'DID operations support only standard Ed25519 accounts; PQ accounts are unsupported.';
+
+/** Raw keys supplied by the Ed25519 controller / manager paths must be 32 bytes. */
+export function assertEd25519PublicKey(publicKey: Uint8Array): void {
+  if (publicKey.length !== 32) throw new Error(ED25519_DID_ONLY_MESSAGE);
+}
+
 /** Multicodec prefix (`0xed 0x01`) that identifies an ed25519 public key in a `did:key`. */
 export const ED25519_MULTICODEC_PREFIX = Uint8Array.from([0xed, 0x01]);
 

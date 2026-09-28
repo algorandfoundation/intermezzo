@@ -1,6 +1,7 @@
-import { ConflictException, Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Address, AlgorandClient, waitForConfirmation } from '@algorandfoundation/algokit-utils';
+import { decodeSignedTransaction as decodeSdkSignedTransaction } from 'algosdk';
 
 import {
   DidAlgoStorageClient,
@@ -15,11 +16,11 @@ import {
   resolveDIDDocument,
   tryReadMetadata,
 } from '../../libs/did-algo';
-import { decodeSignedTransaction, encodeTransaction } from '@algorandfoundation/algokit-utils/transact';
+import { decodeSignedTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { parseDidAlgo } from '../../libs/credo-did-algo';
 import { buildDidDocument } from './did-document';
-import { decodeDidKeyEd25519 } from './did-key';
-import { buildManagerSigner } from './vault-signer';
+import { assertEd25519PublicKey, decodeDidKeyEd25519, ED25519_DID_ONLY_MESSAGE } from './did-key';
+import { buildManagerSigner, decodeVaultSignature } from './vault-signer';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
 import { APP_ACCOUNT_BASE_MBR_MICROALGOS, topUpFromSender } from '../../libs/did-algo/algorand';
@@ -387,6 +388,7 @@ export class DidService {
    * provisioned yet. Never falls back to the manager appId.
    */
   async getUserAppId(didKey: string, token: string): Promise<bigint | undefined> {
+    decodeDidKeyEd25519(didKey);
     const entry = await this.vaultService.kvRead<{ appId: string }>(userAppIdKvPath(didKey), token);
     return entry?.appId ? BigInt(entry.appId) : undefined;
   }
@@ -429,8 +431,6 @@ export class DidService {
         this.logger.warn(`listUserDids: skipping un-decodable KV entry "${entry}"`);
         continue;
       }
-      const appId = await this.getUserAppId(didKey, vaultToken);
-      if (appId === undefined) continue;
       let publicKey: Uint8Array;
       try {
         publicKey = decodeDidKeyEd25519(didKey);
@@ -438,6 +438,8 @@ export class DidService {
         this.logger.warn(`listUserDids: skipping invalid did:key "${didKey}": ${(err as Error).message}`);
         continue;
       }
+      const appId = await this.getUserAppId(didKey, vaultToken);
+      if (appId === undefined) continue;
       const did = buildDidIdentifier(network, appId, publicKey);
       const appAddress = new DidAlgoStorageClient({ appId, algorand }).appAddress.toString();
       out.push({ didKey, did, appId: appId.toString(), appAddress });
@@ -474,8 +476,8 @@ export class DidService {
    * `didDocument` is `null` when the contract exists but no document
    * is currently READY (mid-upload, mid-delete, or never published).
    *
-   * Returns `null` for malformed `did:key`s, and when no `appId` was
-   * supplied and none is registered in Vault for the key.
+   * Rejects malformed or non-Ed25519 `did:key`s. Returns `null` when
+   * no `appId` was supplied and none is registered in Vault for the key.
    */
   async getUserDidLive(
     didKey: string,
@@ -488,13 +490,7 @@ export class DidService {
     appAddress: string;
     didDocument: Record<string, unknown> | null;
   } | null> {
-    let publicKey: Uint8Array;
-    try {
-      publicKey = decodeDidKeyEd25519(didKey);
-    } catch (err) {
-      this.logger.warn(`getUserDidLive: invalid did:key "${didKey}": ${(err as Error).message}`);
-      return null;
-    }
+    const publicKey = decodeDidKeyEd25519(didKey);
 
     const appId = appIdOverride ?? (await this.getUserAppId(didKey, vaultToken));
     if (appId === undefined) return null;
@@ -513,6 +509,7 @@ export class DidService {
    * the host no longer maintains a local cache of published documents.
    */
   deriveDid(publicKey: Uint8Array): string {
+    assertEd25519PublicKey(publicKey);
     return buildDidIdentifier(this.getNetwork(), this.getAppId(), publicKey);
   }
 
@@ -529,6 +526,7 @@ export class DidService {
     appId: bigint;
     document: object;
   } {
+    assertEd25519PublicKey(publicKey);
     const network = this.getNetwork();
     const appId = this.getAppId();
     const did = buildDidIdentifier(network, appId, publicKey);
@@ -624,6 +622,7 @@ export class DidService {
    * on-chain document existed.
    */
   async deleteControlledDid(publicKey: Uint8Array, vaultToken: string): Promise<{ txIds: string[] | null }> {
+    assertEd25519PublicKey(publicKey);
     const algorand = this.buildAlgorandClient();
     const appId = this.getAppId();
     const { address: managerAddress, signer } = await buildManagerSigner(
@@ -666,6 +665,8 @@ export class DidService {
     ownerDidKey: string,
     appId: bigint,
   ): { did: string; network: string; appId: bigint; document: object } {
+    assertEd25519PublicKey(publicKey);
+    decodeDidKeyEd25519(ownerDidKey);
     const network = this.getNetwork();
     const did = buildDidIdentifier(network, appId, publicKey);
     const document = buildDidDocument({ did, publicKey, controllerDid: ownerDidKey });
@@ -759,7 +760,8 @@ export class DidService {
       throw new ConflictException(`Per-user DIDAlgoStorage already deployed for ${didKey} (appId=${existing}).`);
     }
     const plan = await this.buildUserContractCreate({ didKey, vaultToken });
-    const merged = await this.mergeAndSignGroup(plan.group, signedTxns, vaultToken);
+    const merged = this.validateUserSignedGroup(plan.group, signedTxns);
+    await this.signManagerTransactions(plan.group, merged, vaultToken);
 
     const algorand = this.buildAlgorandClient();
     const response = await algorand.client.algod.sendRawTransaction(merged);
@@ -899,17 +901,16 @@ export class DidService {
       );
     }
 
+    // Validate the entire request before sponsoring or broadcasting any group.
+    const validated = plan.groups.map((expected, g) =>
+      this.validateUserSignedGroup(expected, groups[g].signedTxns ?? []),
+    );
     const algorand = this.buildAlgorandClient();
     const txIds: string[] = [];
     for (let g = 0; g < plan.groups.length; g += 1) {
-      const expected: DidUnsignedGroup = {
-        groupIdB64: plan.groups[g].groupIdB64,
-        txnGroup: plan.groups[g].txnGroup,
-        indexesToSign: plan.groups[g].indexesToSign,
-        signers: plan.groups[g].signers,
-        kinds: plan.groups[g].kinds,
-      };
-      const merged = await this.mergeAndSignGroup(expected, groups[g].signedTxns ?? [], vaultToken);
+      const expected = plan.groups[g];
+      const merged = validated[g];
+      await this.signManagerTransactions(expected, merged, vaultToken);
       // Run algod's `simulate` against the fully-signed group BEFORE
       // broadcasting. If the live network would reject this group,
       // simulate produces a structured `failureMessage` + `failedAt`
@@ -981,9 +982,8 @@ export class DidService {
 
   /**
    * Validate a wallet-signed atomic group against the canonical
-   * unsigned bytes `expected`, sign the manager-role positions via
-   * Vault Transit, and return the merged wire-format ready for
-   * `sendRawTransaction`.
+   * unsigned bytes `expected`. Return the validated wallet bytes,
+   * leaving manager positions empty until all groups pass validation.
    *
    * Validation rules per user-role position:
    *   - The corresponding entry in `signedTxns` must be present
@@ -991,18 +991,14 @@ export class DidService {
    *   - The decoded `SignedTransaction.txn`'s canonical bytes must
    *     equal `expected.txnGroup[i]` (i.e. the wallet signed the
    *     exact bytes the server emitted).
-   *   - No logic-sig (`lsig`) or multisig (`msig`) wrapping — the
-   *     wallet must be a plain ed25519 single-key signer.
+   *   - No PQ (`pqsig`), logic-sig (`lsig`), or multisig (`msig`)
+   *     wrapping — the wallet must be a plain ed25519 single-key signer.
    *
    * The host commits its signature only after every user-role
    * position passes validation, eliminating the "host pre-signs a
    * txn the wallet hasn't seen yet" attack surface.
    */
-  private async mergeAndSignGroup(
-    expected: DidUnsignedGroup,
-    signedTxns: (string | null)[],
-    vaultToken: string,
-  ): Promise<Uint8Array[]> {
+  private validateUserSignedGroup(expected: DidUnsignedGroup, signedTxns: (string | null)[]): Uint8Array[] {
     const merged: Uint8Array[] = new Array(expected.txnGroup.length);
     for (let i = 0; i < expected.txnGroup.length; i += 1) {
       const role = expected.signers[i];
@@ -1010,45 +1006,47 @@ export class DidService {
       if (role === 'user') {
         const wire = signedTxns[i];
         if (!wire) {
-          throw new Error(
+          throw new BadRequestException(
             `Wallet did not sign user-role position ${i} (${expected.kinds[i]}); ` +
               `expected a signed transaction in signedTxns[${i}].`,
           );
         }
         const wireBytes = new Uint8Array(Buffer.from(wire, 'base64'));
-        let decoded;
+        let decoded: ReturnType<typeof decodeSdkSignedTransaction>;
         try {
-          decoded = decodeSignedTransaction(wireBytes);
-        } catch (e) {
-          throw new Error(`Failed to decode wallet-signed txn at position ${i}: ${(e as Error).message}`);
+          decoded = decodeSdkSignedTransaction(wireBytes);
+        } catch {
+          throw new BadRequestException(`Invalid wallet-signed transaction at position ${i}`);
         }
-        if (decoded.lSig) {
-          throw new Error(`Position ${i}: wallet returned a logic-sig wrapped txn; refusing to broadcast.`);
+        if (decoded.pqsig || decoded.lsig || decoded.msig || decoded.sig?.length !== 64) {
+          throw new BadRequestException(ED25519_DID_ONLY_MESSAGE);
         }
-        if (decoded.mSig) {
-          throw new Error(`Position ${i}: wallet returned a multisig wrapped txn; refusing to broadcast.`);
-        }
-        if (!decoded.sig) {
-          throw new Error(`Position ${i}: wallet-signed txn has no ed25519 signature attached.`);
-        }
-        const reEncoded = Buffer.from(encodeTransaction(decoded.txn)).toString('base64');
+        const reEncoded = Buffer.from(decoded.txn.bytesToSign()).toString('base64');
         if (reEncoded !== expectedUnsignedB64) {
-          throw new Error(
+          throw new BadRequestException(
             `Position ${i} (${expected.kinds[i]}): wallet-signed txn does not match the canonical bytes ` +
               `emitted by the build endpoint — refusing to broadcast a transaction the host did not generate.`,
           );
         }
         merged[i] = wireBytes;
-      } else if (role === 'manager') {
-        const unsigned = new Uint8Array(Buffer.from(expectedUnsignedB64, 'base64'));
-        const vaultSig = await this.vaultService.signAsManager(unsigned, vaultToken);
-        const signature = new Uint8Array(Buffer.from(vaultSig.toString().split(':')[2], 'base64'));
-        merged[i] = this.chainService.addSignatureToTxn(unsigned, signature);
-      } else {
+      } else if (role !== 'manager') {
         throw new Error(`Position ${i}: unknown signer role "${role}"`);
       }
     }
     return merged;
+  }
+
+  private async signManagerTransactions(
+    expected: DidUnsignedGroup,
+    merged: Uint8Array[],
+    vaultToken: string,
+  ): Promise<void> {
+    for (let i = 0; i < expected.txnGroup.length; i += 1) {
+      if (expected.signers[i] !== 'manager') continue;
+      const unsigned = new Uint8Array(Buffer.from(expected.txnGroup[i], 'base64'));
+      const signature = decodeVaultSignature(await this.vaultService.signAsManager(unsigned, vaultToken));
+      merged[i] = this.chainService.addSignatureToTxn(unsigned, signature);
+    }
   }
 }
 

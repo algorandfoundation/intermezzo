@@ -154,6 +154,9 @@ AppRole coordinates account-type claims and PQ discovery; it does not grant the
 caller signing access. PQ transaction fees and envelopes are applied
 automatically.
 
+DID operations require Ed25519 keys. DID listings skip unsupported keys, and
+PQ transaction signatures are rejected before manager signing or broadcast.
+
 Deploy this claim-aware version to every application instance before enabling
 PQ account creation. No audit or backfill is required because PQ creation has
 not previously been deployed. Create accounts through the application endpoint;
