@@ -95,7 +95,27 @@ revocation. Defining an external token freshness interval is separate work;
 adding `exp` requires periodic refresh even when no bits change.
 
 List URLs must remain reachable for the lifetime of their credentials.
+They are derived from `OID4VC_BASE_URL`, so that value cannot change once
+issuance starts: a verifier that cannot fetch the list fails the credential.
 The public endpoint never creates lists; unknown/non-UUID IDs return 404.
+
+## Spec conformance
+
+Against [`draft-ietf-oauth-status-list-13`](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-13):
+
+| Requirement | Where |
+| --- | --- |
+| §5.1 token: `typ: statuslist+jwt`, `sub` = list URI, `iat`, `status_list{bits,lst}` | `Oid4vcStatusService.getStatusListJwt` |
+| §4.1 `lst` is ZLIB at highest level, base64url | `@sd-jwt/jwt-status-list` |
+| §6.2 credential carries `status.status_list{uri, idx}` | issuer credential mapper, SD-JWT branch |
+| §7 `0x00` valid / `0x01` invalid | `STATUS_VALID` / `STATUS_REVOKED` |
+| §8.2 `Content-Type: application/statuslist+jwt` | `Oid4vcStatusController.getStatusList` |
+| §13.3 byte array starts all-valid | new lists are created all zero |
+| §13.3 no double allocation | Vault CAS on every list write |
+
+There is no suspension (`0x02`): it needs `bits: 2`, and `@sd-jwt`'s
+default validator rejects every non-zero status alike, so a suspended
+credential would look revoked.
 
 ## Dependency constraints retained
 
@@ -108,6 +128,9 @@ The public endpoint never creates lists; unknown/non-UUID IDs return 404.
   support its credential-status verification.
 - The local fetcher wraps a private Credo method. Keep its integration tests
   when updating Credo; it avoids loopback HTTP, not Vault network traffic.
+  Without it, wallet authentication would depend on the process reaching
+  itself at `OID4VC_BASE_URL`; in a container where that is an external
+  name, every wallet request would fail with 401.
 - The existing Vault signing return-type mismatch and W3C custom-claim
   serialization defect remain outside this work.
 
