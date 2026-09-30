@@ -11,7 +11,7 @@ import {
 import { makePaymentTxnWithSuggestedParamsFromObject, msgpackRawDecode, msgpackRawEncode } from 'algosdk';
 
 import { DidService, UserContractCreatePlan, UserDidUpdatePlan } from './did.service';
-import { ED25519_DID_ONLY_MESSAGE } from './did-key';
+import { UnsupportedDidKeyError } from './did-key';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
@@ -244,9 +244,10 @@ describe('DidService', () => {
     it('rejects a malformed did:key without any Vault or chain I/O', async () => {
       (vaultService.kvRead as jest.Mock).mockClear();
 
-      await expect(didService.getUserDidLive('did:key:not-a-key', 'vt')).rejects.toThrow(
-        'did:key did:key:not-a-key is not multibase-z encoded',
-      );
+      const result = didService.getUserDidLive('did:key:not-a-key', 'vt');
+
+      await expect(result).rejects.toBeInstanceOf(UnsupportedDidKeyError);
+      await expect(result).rejects.toThrow('did:key did:key:not-a-key is not multibase-z encoded');
       expect(vaultService.kvRead).not.toHaveBeenCalled();
       expect(resolveDIDDocumentMock).not.toHaveBeenCalled();
     });
@@ -329,7 +330,8 @@ describe('DidService', () => {
         () => didService.submitUserDidDocumentUpdate({ didKey, vaultToken: 'vt', document: {}, groups: [] }),
       ];
       for (const operation of operations) {
-        await expect(operation()).rejects.toThrow('is not an ed25519 key');
+        await expect(operation()).rejects.toThrow(UnsupportedDidKeyError);
+        await expect(operation()).rejects.toMatchObject({ didKey });
       }
       expect(vaultService.kvRead).not.toHaveBeenCalled();
       expect(vaultService.kvWrite).not.toHaveBeenCalled();
@@ -340,13 +342,13 @@ describe('DidService', () => {
 
     it.each([0, 31, 33, 1793])('rejects %i-byte raw keys before deriving, publishing, or deleting', async (length) => {
       const key = new Uint8Array(length);
-      expect(() => didService.deriveDid(key)).toThrow(ED25519_DID_ONLY_MESSAGE);
-      expect(() => didService.buildControllerDocument(key)).toThrow(ED25519_DID_ONLY_MESSAGE);
-      expect(() => didService.buildUncontrolledDocument(key, USER_DID_KEY, 42n)).toThrow(ED25519_DID_ONLY_MESSAGE);
+      expect(() => didService.deriveDid(key)).toThrow(UnsupportedDidKeyError);
+      expect(() => didService.buildControllerDocument(key)).toThrow(UnsupportedDidKeyError);
+      expect(() => didService.buildUncontrolledDocument(key, USER_DID_KEY, 42n)).toThrow(UnsupportedDidKeyError);
       await expect(
         didService.publishControlledDid({ controller: 'pq', publicKey: key, vaultToken: 'vt' }),
-      ).rejects.toThrow(ED25519_DID_ONLY_MESSAGE);
-      await expect(didService.deleteControlledDid(key, 'vt')).rejects.toThrow(ED25519_DID_ONLY_MESSAGE);
+      ).rejects.toThrow(UnsupportedDidKeyError);
+      await expect(didService.deleteControlledDid(key, 'vt')).rejects.toThrow(UnsupportedDidKeyError);
       expect(buildManagerSignerMock).not.toHaveBeenCalled();
       expect(DidAlgoStorageClientMock).not.toHaveBeenCalled();
       expect(replaceDIDDocumentMock).not.toHaveBeenCalled();
@@ -356,7 +358,7 @@ describe('DidService', () => {
     it('rejects a non-Ed25519 owner even with a standard document key', () => {
       const owner = 'did:key:z' + base58.encode(unsupportedKeys[1][1]);
       expect(() => didService.buildUncontrolledDocument(CONTROLLER_PUB_KEY, owner, 42n)).toThrow(
-        'is not an ed25519 key',
+        UnsupportedDidKeyError,
       );
     });
 

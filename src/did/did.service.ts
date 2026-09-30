@@ -19,7 +19,12 @@ import {
 import { decodeSignedTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { parseDidAlgo } from '../../libs/credo-did-algo';
 import { buildDidDocument } from './did-document';
-import { assertEd25519PublicKey, decodeDidKeyEd25519, ED25519_DID_ONLY_MESSAGE } from './did-key';
+import {
+  assertEd25519PublicKey,
+  decodeDidKeyEd25519,
+  ED25519_DID_ONLY_MESSAGE,
+  UnsupportedDidKeyError,
+} from './did-key';
 import { buildManagerSigner, decodeVaultSignature } from './vault-signer';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
@@ -435,7 +440,8 @@ export class DidService {
       try {
         publicKey = decodeDidKeyEd25519(didKey);
       } catch (err) {
-        this.logger.warn(`listUserDids: skipping invalid did:key "${didKey}": ${(err as Error).message}`);
+        if (!(err instanceof UnsupportedDidKeyError)) throw err;
+        this.logger.warn(`listUserDids: skipping invalid did:key "${didKey}": ${err.message}`);
         continue;
       }
       const appId = await this.getUserAppId(didKey, vaultToken);
@@ -476,7 +482,8 @@ export class DidService {
    * `didDocument` is `null` when the contract exists but no document
    * is currently READY (mid-upload, mid-delete, or never published).
    *
-   * Rejects malformed or non-Ed25519 `did:key`s. Returns `null` when
+   * Rejects malformed or non-Ed25519 `did:key`s with
+   * {@link UnsupportedDidKeyError}. Returns `null` when
    * no `appId` was supplied and none is registered in Vault for the key.
    */
   async getUserDidLive(

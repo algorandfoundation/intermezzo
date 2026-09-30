@@ -12,8 +12,17 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiNotFoundResponse, ApiQuery, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiOperation,
+  ApiNotFoundResponse,
+  ApiQuery,
+  ApiSecurity,
+  ApiTags,
+} from '@nestjs/swagger';
 import { DidService, UserContractCreatePlan, UserDidUpdatePlan } from './did.service';
+import { UnsupportedDidKeyError } from './did-key';
 import { Public } from '../auth/constants';
 import { CredentialAuthGuard } from '../auth/credential-auth.guard';
 import type { CredentialAuthRequest } from '../auth/credential-auth.guard';
@@ -42,6 +51,22 @@ interface UserDidEntry {
 /** Express request augmented by the global manager `AuthGuard`. */
 interface ManagerAuthedRequest {
   vault_token: string;
+}
+
+/**
+ * Map service-layer did:key rejections to 400 instead of the global 500.
+ * Only failures that carry a `didKey` come from caller input; a raw-key
+ * rejection here means the manager key is not Ed25519 and stays a 500.
+ */
+async function rejectUnsupportedDidKey<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (err) {
+    if (err instanceof UnsupportedDidKeyError && err.didKey !== undefined) {
+      throw new BadRequestException(err.message);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -131,6 +156,7 @@ export class DidController {
       'Explicit `DIDAlgoStorage` app id to resolve against (only valid with `live=true`). ' +
       'When omitted, the app id falls back to the Vault KV registry.',
   })
+  @ApiBadRequestResponse({ description: 'The did:key is malformed or not an Ed25519 key.' })
   @ApiNotFoundResponse({ description: 'No per-user did:algo registered for the supplied did:key.' })
   async getIdentity(
     @Param('didKey') didKey: string,
@@ -149,13 +175,15 @@ export class DidController {
         }
         appIdOverride = BigInt(appId);
       }
-      const entry = await this.didService.getUserDidLive(didKey, request.vault_token, appIdOverride);
+      const entry = await rejectUnsupportedDidKey(
+        this.didService.getUserDidLive(didKey, request.vault_token, appIdOverride),
+      );
       if (!entry) {
         throw new NotFoundException(`No per-user did:algo found for ${didKey}`);
       }
       return entry;
     }
-    const entry = await this.didService.getUserDid(didKey, request.vault_token);
+    const entry = await rejectUnsupportedDidKey(this.didService.getUserDid(didKey, request.vault_token));
     if (!entry) {
       throw new NotFoundException(`No per-user did:algo registered for ${didKey}`);
     }
@@ -190,6 +218,7 @@ export class DidController {
       '`did:key`-derived address the contract creator on chain. The two `pay` positions are ' +
       'left unsigned for the host to sign at submit time after byte-for-byte validation.',
   })
+  @ApiBadRequestResponse({ description: 'The did:key is malformed or not an Ed25519 key.' })
   async createTransactions(
     // Reserved for future options (e.g. dispenser overrides). Empty body is accepted.
     @Body() _body: BuildUserContractCreateDto,
@@ -197,7 +226,7 @@ export class DidController {
   ): Promise<UserContractCreatePlan> {
     const didKey = request.didKey!;
     const vaultToken = await this.managerToken.getToken();
-    return await this.didService.buildUserContractCreate({ didKey, vaultToken });
+    return await rejectUnsupportedDidKey(this.didService.buildUserContractCreate({ didKey, vaultToken }));
   }
 
   /**
@@ -224,17 +253,20 @@ export class DidController {
       'just rebuilt, signs the manager-funded `pay` positions via Vault Transit, broadcasts ' +
       'the atomic group, persists the new app id to Vault KV, and returns the new `did:algo`.',
   })
+  @ApiBadRequestResponse({ description: 'The did:key is malformed or not an Ed25519 key.' })
   async createSubmit(
     @Body() body: SubmitUserContractCreateDto,
     @Req() request: CredentialAuthRequest,
   ): Promise<{ appId: string; appAddress: string; did: string; txId: string }> {
     const didKey = request.didKey!;
     const vaultToken = await this.managerToken.getToken();
-    return await this.didService.submitUserContractCreate({
-      didKey,
-      signedTxns: body.signedTxns,
-      vaultToken,
-    });
+    return await rejectUnsupportedDidKey(
+      this.didService.submitUserContractCreate({
+        didKey,
+        signedTxns: body.signedTxns,
+        vaultToken,
+      }),
+    );
   }
 
   /**
@@ -297,6 +329,7 @@ export class DidController {
       'into 16-txn groups; the on-chain contract reclaims the prior box MBR via inner refunds ' +
       'and locks in the new MBR via `mbrPayment`, so the caller pays only the net delta.',
   })
+  @ApiBadRequestResponse({ description: 'The did:key is malformed or not an Ed25519 key.' })
   @ApiNotFoundResponse({ description: 'No per-user did:algo registered for the credential-bound did:key.' })
   async updateTransactions(
     @Body() body: BuildUserDidDocumentUpdateDto,
@@ -307,11 +340,13 @@ export class DidController {
     // that guard so this is always set by the time we get here.
     const didKey = request.didKey!;
     const vaultToken = await this.managerToken.getToken();
-    const plan = await this.didService.buildUserDidDocumentUpdate({
-      didKey,
-      document: body.document,
-      vaultToken,
-    });
+    const plan = await rejectUnsupportedDidKey(
+      this.didService.buildUserDidDocumentUpdate({
+        didKey,
+        document: body.document,
+        vaultToken,
+      }),
+    );
     if (!plan) {
       throw new NotFoundException(`No per-user did:algo registered for ${didKey}`);
     }
@@ -360,6 +395,7 @@ export class DidController {
       'credential-bound `did:key` identifies the per-user `DIDAlgoStorage` contract being ' +
       'mutated. The transactions themselves are already wallet-signed.',
   })
+  @ApiBadRequestResponse({ description: 'The did:key is malformed or not an Ed25519 key.' })
   @ApiNotFoundResponse({ description: 'No per-user did:algo registered for the credential-bound did:key.' })
   async submitUserDocumentUpdate(
     @Body() body: SubmitUserDidDocumentUpdateDto,
@@ -367,11 +403,13 @@ export class DidController {
   ): Promise<{ txIds: string[] }> {
     const didKey = request.didKey!;
     const vaultToken = await this.managerToken.getToken();
-    return await this.didService.submitUserDidDocumentUpdate({
-      didKey,
-      document: body.document,
-      groups: body.groups,
-      vaultToken,
-    });
+    return await rejectUnsupportedDidKey(
+      this.didService.submitUserDidDocumentUpdate({
+        didKey,
+        document: body.document,
+        groups: body.groups,
+        vaultToken,
+      }),
+    );
   }
 }
