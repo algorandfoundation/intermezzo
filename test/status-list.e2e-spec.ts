@@ -121,14 +121,14 @@ describe('Credential status list (e2e)', () => {
   });
 
   /** Allocates an entry, records the session, and issues a credential against it. */
-  async function issueCredential(sessionId: string): Promise<string> {
+  async function issueCredential(sessionId: string, credoIssuanceSessionId = sessionId): Promise<string> {
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     await sessions.save({
       id: sessionId,
-      credoIssuanceSessionId: sessionId,
+      credoIssuanceSessionId,
     } as Partial<Oid4vcIssuanceSession>);
 
-    const entry = await statusService.allocateForSession(sessionId);
+    const entry = await statusService.allocateForSession(credoIssuanceSessionId);
     return sdjwt.issue({
       iss: ISSUER_DID,
       vct: 'device-attestation-credential',
@@ -175,6 +175,28 @@ describe('Credential status list (e2e)', () => {
       .expect(201);
 
     await expect(sdjwt.verify(credentialA)).resolves.toBeDefined();
+  });
+
+  it('revokes by Credo session id, reactivates by local id, and refuses both at once', async () => {
+    const credential = await issueCredential('local-session', 'credo-session');
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ sessionId: 'local-session', credoIssuanceSessionId: 'credo-session' })
+      .expect(400);
+    await expect(sdjwt.verify(credential)).resolves.toBeDefined();
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ credoIssuanceSessionId: 'credo-session' })
+      .expect(201);
+    await expect(sdjwt.verify(credential)).rejects.toThrow('Status is not valid');
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/reactivate')
+      .send({ sessionId: 'local-session' })
+      .expect(201);
+    await expect(sdjwt.verify(credential)).resolves.toBeDefined();
   });
 
   it('keeps both UUID URLs verifiable and revocable after rollover', async () => {

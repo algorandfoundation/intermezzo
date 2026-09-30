@@ -66,13 +66,13 @@ export class Oid4vcStatusController {
       "Revoke every credential issued under an issuance session. Takes effect on the verifier's next status fetch.",
   })
   async revoke(@Body() dto: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.status.revokeBySessionId(dto.sessionId, dto.reason);
+    return this.status.revoke(dto);
   }
 
   @ApiBearerAuth()
   @Post('reactivate')
   @ApiOperation({ summary: 'Reverse a revocation made in error.' })
   async reactivate(@Body() dto: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.status.reactivateBySessionId(dto.sessionId);
+    return this.status.reactivate(dto);
   }
 }

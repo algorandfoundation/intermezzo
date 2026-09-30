@@ -12,17 +12,17 @@ const TOKEN = 'eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJkaWQ6YWxnbyJ9.c2ln';
 describe('Oid4vcStatusController', () => {
   let app: INestApplication;
   let getStatusListJwt: jest.Mock;
-  let revokeBySessionId: jest.Mock;
-  let reactivateBySessionId: jest.Mock;
+  let revoke: jest.Mock;
+  let reactivate: jest.Mock;
 
   beforeEach(async () => {
     getStatusListJwt = jest.fn(async () => TOKEN);
     // Arrays: a session can hold an entry per credential it issued, and all
     // of them are flipped together.
-    revokeBySessionId = jest.fn(async () => [
+    revoke = jest.fn(async () => [
       { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
     ]);
-    reactivateBySessionId = jest.fn(async () => [
+    reactivate = jest.fn(async () => [
       { listId: 'f538cd53-79e5-4877-b6c2-51c09c51f8ab', idx: 7, uri: 'https://host/v1/x' },
     ]);
 
@@ -31,7 +31,7 @@ describe('Oid4vcStatusController', () => {
       providers: [
         {
           provide: Oid4vcStatusService,
-          useValue: { getStatusListJwt, revokeBySessionId, reactivateBySessionId },
+          useValue: { getStatusListJwt, revoke, reactivate },
         },
       ],
     }).compile();
@@ -84,21 +84,21 @@ describe('Oid4vcStatusController', () => {
         .send({ sessionId: 'session-a', reason: 'device reported stolen' })
         .expect(201);
 
-      expect(revokeBySessionId).toHaveBeenCalledWith('session-a', 'device reported stolen');
+      expect(revoke).toHaveBeenCalledWith({ sessionId: 'session-a', reason: 'device reported stolen' });
     });
 
-    it('reactivates without a reason', async () => {
+    it('reactivates by Credo session id, without a reason', async () => {
       await request(app.getHttpServer())
         .post('/credential/status/reactivate')
-        .send({ sessionId: 'session-a' })
+        .send({ credoIssuanceSessionId: 'credo-a' })
         .expect(201);
 
-      expect(reactivateBySessionId).toHaveBeenCalledWith('session-a');
+      expect(reactivate).toHaveBeenCalledWith({ credoIssuanceSessionId: 'credo-a' });
     });
 
-    it('rejects a body with no session id', async () => {
-      await request(app.getHttpServer()).post('/credential/status/revoke').send({}).expect(400);
-      expect(revokeBySessionId).not.toHaveBeenCalled();
+    it('rejects an empty session id', async () => {
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ sessionId: '' }).expect(400);
+      expect(revoke).not.toHaveBeenCalled();
     });
 
     it('stays behind the global auth guard', () => {

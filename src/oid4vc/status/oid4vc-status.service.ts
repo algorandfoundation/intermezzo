@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -16,6 +17,7 @@ import { VaultService } from '../../vault/vault.service';
 import { Oid4vcAgentProvider } from '../agent/oid4vc-agent.provider';
 import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
+import { ChangeCredentialStatusDto } from '../dto/status-change.dto';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 import {
   STATUS_LIST_SIZE,
@@ -176,6 +178,16 @@ export class Oid4vcStatusService implements OnModuleInit {
     return entry;
   }
 
+  /** Revokes the session `target` names. Verification fails from the next status fetch onwards. */
+  async revoke(target: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
+    return this.revokeBySessionId(await this.localSessionId(target), target.reason);
+  }
+
+  /** Reverses {@link revoke}, for a revocation made in error. */
+  async reactivate(target: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
+    return this.reactivateBySessionId(await this.localSessionId(target));
+  }
+
   /**
    * Revokes the credential issued for `sessionId`. Verification fails for
    * everyone from the next status fetch onwards.
@@ -226,6 +238,17 @@ export class Oid4vcStatusService implements OnModuleInit {
   async getStatus(listId: string, idx: number): Promise<number> {
     const record = await this.requireList(listId);
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
+  }
+
+  /** The local session id `target` names; everything downstream keys on it. */
+  private async localSessionId({ sessionId, credoIssuanceSessionId }: ChangeCredentialStatusDto): Promise<string> {
+    if (!sessionId === !credoIssuanceSessionId) {
+      throw new BadRequestException('Provide exactly one of `sessionId` or `credoIssuanceSessionId`');
+    }
+    if (sessionId) return sessionId;
+    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
+    if (!session) throw new NotFoundException(`No issuance session for Credo session ${credoIssuanceSessionId}`);
+    return session.id;
   }
 
   private async setSessionStatus(sessionId: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {

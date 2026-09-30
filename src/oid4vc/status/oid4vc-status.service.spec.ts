@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getListFromStatusListJWT } from '@sd-jwt/jwt-status-list';
 import { AgentContext } from '@credo-ts/core';
@@ -244,6 +244,21 @@ describe('Oid4vcStatusService', () => {
     save.mockRestore();
     await makeService().revokeBySessionId('session-a');
     expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+  });
+
+  it('addresses a session by exactly one of its local or Credo id', async () => {
+    await sessions.save({ id: 'local-a', credoIssuanceSessionId: 'credo-a' });
+    const entry = await service.allocateForSession('credo-a');
+    expect(await service.revoke({ credoIssuanceSessionId: 'credo-a', reason: 'stolen' })).toEqual([entry]);
+    expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+    expect((await sessions.findOneById('local-a'))!.revokedReason).toBe('stolen');
+    await service.reactivate({ sessionId: 'local-a' });
+    expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+    await expect(service.revoke({})).rejects.toThrow(BadRequestException);
+    await expect(service.revoke({ sessionId: 'local-a', credoIssuanceSessionId: 'credo-a' })).rejects.toThrow(
+      BadRequestException,
+    );
+    await expect(service.revoke({ credoIssuanceSessionId: 'missing' })).rejects.toThrow(NotFoundException);
   });
 
   it('rejects unknown and unredeemed sessions', async () => {

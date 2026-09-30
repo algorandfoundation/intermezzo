@@ -75,8 +75,9 @@ its signature, reads the bit and rejects the credential unless it is `0`.
 The wallet authentication guard also requires a well-formed reference to an
 issuer UUID list; status-free device-attestation credentials are rejected.
 
-Revoke by issuance session id (the id from
-`GET /v1/credential/issuer/sessions`):
+Revoke by issuance session: send exactly one of `sessionId` (the local Vault
+session `id`) or `credoIssuanceSessionId`. The offer response and
+`GET /v1/credential/issuer/sessions` return both:
 
 ```sh
 curl -X POST http://localhost:3000/v1/credential/status/revoke \
