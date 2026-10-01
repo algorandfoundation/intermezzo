@@ -1,3 +1,5 @@
+import { isUUID } from 'class-validator';
+import { Oid4vcConfig } from '../oid4vc/oid4vc.config';
 import { CanActivate, ExecutionContext, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 
@@ -50,6 +52,9 @@ export interface CredentialAuthRequest {
  *      `did:key` is exposed as `request.didKey` for downstream
  *      handlers that need to derive the caller's Algorand address.
  *
+ *   5. A status reference to an issuer UUID list and a non-negative integer
+ *      index is required, even if the verifier accepts a status-free token.
+ *
  * The manager JWT / Vault AppRole login (`AuthGuard`) is a separate
  * path that gates manager-only routes and is unaffected by this
  * guard.
@@ -58,7 +63,10 @@ export interface CredentialAuthRequest {
 export class CredentialAuthGuard implements CanActivate {
   private readonly logger = new Logger(CredentialAuthGuard.name);
 
-  constructor(private readonly agentProvider: Oid4vcAgentProvider) {}
+  constructor(
+    private readonly agentProvider: Oid4vcAgentProvider,
+    private readonly config: Oid4vcConfig,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<CredentialAuthRequest>();
@@ -82,6 +90,18 @@ export class CredentialAuthGuard implements CanActivate {
     }
     if (payload.vct !== DEVICE_ATTESTATION_VCT) {
       throw new UnauthorizedException(`Credential vct ${String(payload.vct)} is not ${DEVICE_ATTESTATION_VCT}`);
+    }
+    const status = payload.status as { status_list?: { uri?: unknown; idx?: unknown } } | undefined;
+    const reference = status?.status_list;
+    const prefix = `${this.config.statusListBaseUrl}/`;
+    if (
+      typeof reference?.uri !== 'string' ||
+      !reference.uri.startsWith(prefix) ||
+      !isUUID(reference.uri.slice(prefix.length), '4') ||
+      !Number.isSafeInteger(reference.idx) ||
+      (reference.idx as number) < 0
+    ) {
+      throw new UnauthorizedException('Credential must reference an issuer status list with a valid index');
     }
     const cnf = payload.cnf as { kid?: string; id?: string } | undefined;
     const boundDidUrl = cnf?.kid ?? cnf?.id;

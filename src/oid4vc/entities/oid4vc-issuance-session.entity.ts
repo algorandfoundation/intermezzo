@@ -1,3 +1,5 @@
+import { StatusListEntry } from './status-list.entity';
+
 /**
  * Application-level mapping for an OID4VCI issuance session.
  *
@@ -60,6 +62,38 @@ export class Oid4vcIssuanceSession {
    * payload that should be issued when the wallet redeems the offer).
    */
   issuanceMetadata?: Record<string, unknown>;
+
+  /**
+   * Status list entries for the credentials issued from this session, in
+   * issuance order. Assigned by the credential mapper at redemption time and
+   * embedded in each credential as `status.status_list`; absent until the
+   * wallet actually redeems the offer.
+   *
+   * A list rather than a single entry because one session can yield more
+   * than one credential — several `credential_configuration_ids` in the
+   * offer, or a repeated credential request. Each gets its own entry, and
+   * appending rather than replacing is what keeps every one of them
+   * revocable.
+   *
+   * This is the only handle we have for revoking a specific credential, so
+   * it is written before the signed credential is returned.
+   */
+  statusEntries?: StatusListEntry[];
+
+  /** Durable intent. Pending operations can be resumed with the same revoke/reactivate request. */
+  statusChange?: {
+    id: string;
+    value: 0 | 1;
+    pending: boolean;
+    requestedAt: string;
+    reason?: string;
+  };
+
+  /** When the credential was revoked, if it has been. */
+  revokedAt?: Date;
+
+  /** Operator-supplied note recorded alongside {@link revokedAt}. */
+  revokedReason?: string;
 
   createdAt: Date;
 
