@@ -120,13 +120,19 @@ describe('Credential status list (e2e)', () => {
     await app.close();
   });
 
-  /** Allocates an entry, records the session, and issues a credential against it. */
-  async function issueCredential(sessionId: string, credoIssuanceSessionId = sessionId): Promise<string> {
+  /** Allocates an entry, records the session (and holder index), and issues a credential against it. */
+  async function issueCredential(
+    sessionId: string,
+    credoIssuanceSessionId = sessionId,
+    holderDidKey?: string,
+  ): Promise<string> {
     const sessions = app.get(Oid4vcIssuanceSessionRepository);
     await sessions.save({
       id: sessionId,
       credoIssuanceSessionId,
+      holderDidKey,
     } as Partial<Oid4vcIssuanceSession>);
+    if (holderDidKey) await sessions.indexHolder(holderDidKey, sessionId);
 
     const entry = await statusService.allocateForSession(credoIssuanceSessionId);
     return sdjwt.issue({
@@ -197,6 +203,25 @@ describe('Credential status list (e2e)', () => {
       .send({ sessionId: 'local-session' })
       .expect(201);
     await expect(sdjwt.verify(credential)).resolves.toBeDefined();
+  });
+
+  it('revokes and reactivates every credential issued to a holder in one call', async () => {
+    const holderDidKey = 'did:key:z6MkTwoCredsA';
+    const a = await issueCredential('holder-session-a', undefined, holderDidKey);
+    const b = await issueCredential('holder-session-b', undefined, holderDidKey);
+    const other = await issueCredential('other-holder-session', undefined, 'did:key:z6MkTwoCredsB');
+
+    await request(app.getHttpServer())
+      .post('/v1/credential/status/revoke')
+      .send({ holderDidKey, reason: 'lost device' })
+      .expect(201);
+    await expect(sdjwt.verify(a)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(b)).rejects.toThrow('Status is not valid');
+    await expect(sdjwt.verify(other)).resolves.toBeDefined();
+
+    await request(app.getHttpServer()).post('/v1/credential/status/reactivate').send({ holderDidKey }).expect(201);
+    await expect(sdjwt.verify(a)).resolves.toBeDefined();
+    await expect(sdjwt.verify(b)).resolves.toBeDefined();
   });
 
   it('keeps both UUID URLs verifiable and revocable after rollover', async () => {

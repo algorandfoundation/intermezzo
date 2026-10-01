@@ -76,6 +76,15 @@ describe('Oid4vcStatusService', () => {
         if (cas !== undefined && cas !== version) throw new VaultCasConflictError(path);
         kv.set(path, { data: copy(data), version: version + 1 });
       },
+      // Mirrors Vault's KV-v2 LIST: immediate child names under `path/`, no recursion.
+      kvList: async (path: string) => {
+        const prefix = `${path}/`;
+        const children = new Set<string>();
+        for (const key of kv.keys()) {
+          if (key.startsWith(prefix)) children.add(key.slice(prefix.length).split('/')[0]);
+        }
+        return [...children];
+      },
       sign,
     } as unknown as VaultService;
     lists = new StatusListRepository(vault, tokenProvider);
@@ -260,6 +269,48 @@ describe('Oid4vcStatusService', () => {
     );
     await expect(service.revoke({ credoIssuanceSessionId: 'missing' })).rejects.toThrow(NotFoundException);
   });
+
+  it('revokes and reactivates every session pinned to a holder, fencing its unredeemed offers', async () => {
+    for (const [id, holderDidKey] of [
+      ['h-1', 'did:key:zH'],
+      ['h-2', 'did:key:zH'],
+      ['h-open', 'did:key:zH'],
+      ['b-1', 'did:key:zB'],
+    ]) {
+      await sessions.save({ id, credoIssuanceSessionId: id, holderDidKey });
+      await sessions.indexHolder(holderDidKey, id);
+    }
+    const h1 = await service.allocateForSession('h-1');
+    storedList(h1.listId).nextIndex = STATUS_LIST_SIZE; // h-2's entry lands on a second list
+    const h2 = await service.allocateForSession('h-2');
+    const b1 = await service.allocateForSession('b-1');
+    const bits = () => Promise.all([h1, h2, b1].map((e) => service.getStatus(e.listId, e.idx)));
+
+    expect(await service.revoke({ holderDidKey: 'did:key:zH', reason: 'stolen' })).toHaveLength(2);
+    expect(await bits()).toEqual([1, 1, 0]);
+    await expect(service.allocateForSession('h-open')).rejects.toThrow(ConflictException);
+
+    // The fence is lifted by the holder, or by the offer's own session id.
+    await service.reactivate({ sessionId: 'h-open' });
+    await service.revoke({ sessionId: 'h-open' });
+    await service.reactivate({ holderDidKey: 'did:key:zH' });
+    expect(await bits()).toEqual([0, 0, 0]);
+    await expect(service.allocateForSession('h-open')).resolves.toBeDefined();
+
+    await expect(service.revoke({ sessionId: 'h-1', holderDidKey: 'did:key:zH' })).rejects.toThrow(BadRequestException);
+    await expect(service.revoke({ holderDidKey: 'did:key:zUnknown' })).rejects.toThrow(NotFoundException);
+  });
+
+  // `?holderDidKey=` reaches the repository unvalidated, and the value becomes a Vault KV path segment.
+  it.each(['../../records', 'did:key:z../../records', 'did:key:', ''])(
+    'refuses to build a holder index path from %p',
+    async (holderDidKey) => {
+      const list = jest.spyOn(vault, 'kvList');
+      await expect(sessions.findByHolder(holderDidKey)).rejects.toThrow(BadRequestException);
+      await expect(sessions.indexHolder(holderDidKey, 'session-a')).rejects.toThrow(BadRequestException);
+      expect(list).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects unknown and unredeemed sessions', async () => {
     await expect(service.revokeBySessionId('missing')).rejects.toThrow(NotFoundException);

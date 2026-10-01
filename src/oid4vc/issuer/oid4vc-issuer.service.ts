@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 
@@ -219,6 +220,7 @@ export class Oid4vcIssuerService implements OnModuleInit {
     });
 
     const record = this.sessionRepo.create({
+      id: randomUUID(),
       credoIssuanceSessionId: issuanceSession.id,
       issuerId: Oid4vcIssuerService.ISSUER_ID,
       holderDidKey: input.holderDidKey,
@@ -228,6 +230,9 @@ export class Oid4vcIssuerService implements OnModuleInit {
       state: issuanceSession.state,
       issuanceMetadata: input.issuanceMetadata,
     });
+    // Index first: an index entry without its session is skipped by findByHolder, while a
+    // session missing from the index would escape a holder-wide revocation.
+    await this.sessionRepo.indexHolder(input.holderDidKey, record.id);
     return this.sessionRepo.save(record);
   }
 
@@ -242,7 +247,10 @@ export class Oid4vcIssuerService implements OnModuleInit {
     return session;
   }
 
-  async listSessions(): Promise<Oid4vcIssuanceSession[]> {
+  /** All sessions, or only those pinned to `holderDidKey` when supplied. */
+  async listSessions(holderDidKey?: string): Promise<Oid4vcIssuanceSession[]> {
+    // `?holderDidKey=` must be rejected by `findByHolder`, not widen to every session.
+    if (holderDidKey !== undefined) return this.sessionRepo.findByHolder(holderDidKey);
     return this.sessionRepo.find({ order: { createdAt: 'DESC' } });
   }
 

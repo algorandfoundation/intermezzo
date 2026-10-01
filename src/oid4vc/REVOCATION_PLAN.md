@@ -1,8 +1,9 @@
 # Credential status and revocation — implementation plan
 
 **Branch:** `feat/credentials-status-and-revoke`
-**Scope:** fresh installations; per-session revocation of issued SD-JWT VCs,
-with automatic rollover beyond one million allocated status entries.
+**Scope:** fresh installations; revocation of issued SD-JWT VCs per issuance
+session or per holder `did:key`, with automatic rollover beyond one million
+allocated status entries.
 No migration, legacy `default` alias, or status-free wallet compatibility.
 
 The original phases 0–6 implemented issuance, Vault storage, revocation,
@@ -20,6 +21,8 @@ or merging that PR is separate from this implementation.
 - [x] Conditional session appends and durable, resumable status operations.
 - [x] Conditional Credo state mirroring so it cannot overwrite revocation.
 - [x] Wallet authentication requires an issuer UUID status reference.
+- [x] Revoke/reactivate by holder `did:key`: every session pinned to the
+  holder, unredeemed offers included.
 - [x] Unit and HTTP tests for races, failures, rollover, and enforcement.
 - [x] Separate opt-in million-allocation check and real-Vault validation.
 
@@ -33,6 +36,10 @@ Vault paths:
 
 - `intermezzo/oid4vc/status-lists/records/<uuid>`: public list data.
 - `intermezzo/oid4vc/status-lists/active`: private pointer `{ listId }`.
+- `intermezzo/oid4vc/sessions/issuance/by-holder/<multibase>/<sessionId>`:
+  one key per session, written before the session record at offer creation.
+  The `did:key` must match `did:key:z<base58>` before its multibase part is
+  used as a path segment; the key type is not decoded.
 - Issuance sessions retain `statusEntries: [{ listId, idx }, ...]`, audit
   fields, and `statusChange: { id, value, pending, requestedAt, reason? }`.
 
@@ -69,6 +76,11 @@ sessions, Vault history, or Credo records, and not a throughput guarantee.
    including after a process restart. There is no background retry worker.
 5. Credo state mirroring uses the same session CAS path. Ordinary session
    `save` is used for initial offer creation, not concurrent mutation.
+6. A holder request runs steps 2–4 once per session pinned to the holder,
+   in turn, not atomically: re-send it to finish after a part-way failure.
+   A session with no entries yet records the status without changing bits,
+   so its offer cannot issue while revoked. An offer created after the
+   holder's sessions are listed is not covered.
 
 Reactivation blocks issuance while pending and reopens it on completion.
 A successful operation has updated every captured entry and persisted
@@ -191,13 +203,26 @@ p50 6.28 ms, p95 36.41 ms, and no caller-level 503 retries. The 200 warm
 SD-JWT checks measured p50 5.44 ms and p95 7.01 ms. These are one local
 synthetic run, not production sizing numbers or full OID4VC issuance latency.
 
+### Recorded validation (2026-10-01, holder `did:key` revocation)
+
+All 28 unit suites passed (283 tests; the opt-in capacity test skipped), as
+did the six in-memory status-list HTTP integration tests, lint, formatting,
+and build. The real-Vault check passed on Vault 1.15.6: 200 session
+creations/allocations with two workers measured 316.24/s, p50 5.44 ms,
+p95 10.54 ms, and no retries; 200 warm SD-JWT checks measured p50 4.81 ms
+and p95 5.62 ms. It revokes by session id, so it does not exercise the
+holder index against a live Vault. The capacity check and the live-stack
+`test/app.e2e-spec.ts` were not re-run.
+
 ## Deferred, with explicit boundaries
 
-- Session listing still scans all Vault records sequentially. Indexed
-  pagination is required before claiming million-session administration.
+- Unfiltered session listing still scans all Vault records sequentially.
+  `?holderDidKey=` is index-backed, but indexed pagination is still
+  required before claiming million-session administration.
 - No Redis, invalidation bus, new database, or per-list queues. Add only
   when representative production measurements justify them.
-- No suspension or device-wide sweep across sessions.
+- No suspension. Holder-wide revocation covers one `did:key` at a time
+  and is not atomic across its sessions.
 - No credential expiry/list retirement policy. Old list URLs remain served.
 - Real deployment sizing still needs its own issuance/verification rates,
   Vault topology, retention settings, and latency targets.

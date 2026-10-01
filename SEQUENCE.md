@@ -159,9 +159,9 @@ sequenceDiagram
     Pawn-->>Verifier: Signed status list JWT
     Verifier->>Verifier: Check idx<br/>0 = valid, 1 = revoked
 
-    Manager->>Pawn: POST /v1/credential/status/revoke<br/>{ sessionId or credoIssuanceSessionId, reason? }
+    Manager->>Pawn: POST /v1/credential/status/revoke<br/>{ sessionId, credoIssuanceSessionId or holderDidKey, reason? }
     Pawn->>Pawn: Persist revocation intent; block issuance<br/>CAS all recorded bits to 1; persist completion
-    Manager->>Pawn: POST /v1/credential/status/reactivate<br/>{ sessionId or credoIssuanceSessionId }
+    Manager->>Pawn: POST /v1/credential/status/reactivate<br/>{ sessionId, credoIssuanceSessionId or holderDidKey }
     Pawn->>Pawn: Persist reactivation intent<br/>CAS all recorded bits to 0; persist completion
 ```
 
