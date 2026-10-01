@@ -294,6 +294,27 @@ You can use https://bank.testnet.algorand.network/ to dispense some ALGO.
 yarn test:e2e
 ```
 
+## Opt-in Status List Checks
+
+Skipped by default. Capacity check (1,000,001 allocations against an in-memory Vault):
+
+```sh
+STATUS_LIST_CAPACITY_TEST=1 yarn test --runInBand \
+  src/oid4vc/status/oid4vc-status.service.spec.ts -t '1,000,001'
+```
+
+Real Vault check, against a disposable dev Vault only (it creates and removes its own KV/transit mounts):
+
+```sh
+docker run --rm -d --name intermezzo-status-check \
+  -p 127.0.0.1:18200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=status-check-only \
+  hashicorp/vault:1.15.6 server -dev -dev-listen-address=0.0.0.0:8200
+STATUS_LIST_VAULT_URL=http://127.0.0.1:18200 \
+STATUS_LIST_VAULT_TOKEN=status-check-only \
+  yarn test:e2e --runInBand status-list-vault
+docker stop intermezzo-status-check
+```
+
 
 # Fresh Restart
 
