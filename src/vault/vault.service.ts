@@ -16,13 +16,27 @@ export class VaultService {
   ) {}
 
   /**
+   * `X-Vault-Namespace` header for every outgoing request, or `{}` when
+   * `VAULT_NAMESPACE` is unset or empty (a Vault without namespaces, such as
+   * the community image used by docker-compose).
+   *
+   * On a namespaced Vault (Enterprise, HCP, OpenBao) a request without this
+   * header lands in the root namespace, where this service's AppRole and
+   * mounts do not exist, so it is rejected with `403 permission denied`
+   * (token lookup-self being the one call OpenBao resolves from the token itself).
+   */
+  private namespaceHeaders(): Record<string, string> {
+    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
+    return vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {};
+  }
+
+  /**
    *
    * @param token - personal access token
    * @returns
    */
   async authGithub(token: string): Promise<string> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
@@ -34,7 +48,7 @@ export class VaultService {
         {
           headers: {
             'Content-Type': 'application/json',
-            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+            ...this.namespaceHeaders(),
           },
         },
       );
@@ -65,7 +79,7 @@ export class VaultService {
           allow_deletion: false,
         },
         {
-          headers: { 'X-Vault-Token': token },
+          headers: { 'X-Vault-Token': token, ...this.namespaceHeaders() },
         },
       );
     } catch (error) {
@@ -87,7 +101,6 @@ export class VaultService {
   async getKey(keyName: string, transitKeyPath: string, token: string): Promise<Buffer> {
     // https://developer.hashicorp.com/vault/api-docs/secret/transit#read-key
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
@@ -98,7 +111,7 @@ export class VaultService {
         headers: {
           'X-Vault-Token': token,
           'Content-Type': 'application/json',
-          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          ...this.namespaceHeaders(),
         },
       });
     } catch (error) {
@@ -111,7 +124,6 @@ export class VaultService {
 
   public async sign(keyName: string, transitPath: string, data: Uint8Array, token: string): Promise<Buffer> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
 
     let result: AxiosResponse;
     try {
@@ -123,7 +135,7 @@ export class VaultService {
         {
           headers: {
             'X-Vault-Token': token,
-            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+            ...this.namespaceHeaders(),
           },
         },
       );
@@ -152,10 +164,11 @@ export class VaultService {
 
     let result: AxiosResponse;
     try {
-      result = await this.httpService.axiosRef.post(`${baseUrl}/v1/auth/approle/login`, {
-        role_id: roleId,
-        secret_id: secretId,
-      });
+      result = await this.httpService.axiosRef.post(
+        `${baseUrl}/v1/auth/approle/login`,
+        { role_id: roleId, secret_id: secretId },
+        { headers: this.namespaceHeaders() },
+      );
     } catch (error) {
       throw new HttpErrorByCode[error.response.status]('VaultException');
     }
@@ -168,7 +181,7 @@ export class VaultService {
 
     try {
       await this.httpService.axiosRef.get(`${baseUrl}/v1/auth/token/lookup-self`, {
-        headers: { 'X-Vault-Token': token },
+        headers: { 'X-Vault-Token': token, ...this.namespaceHeaders() },
       });
       return true;
     } catch (error) {
@@ -230,14 +243,13 @@ export class VaultService {
     token: string,
   ): Promise<T | undefined> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
     const url = `${baseUrl}/v1/${mount}/data/${path}`;
     try {
       const result = await this.httpService.axiosRef.get(url, {
         headers: {
           'X-Vault-Token': token,
-          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          ...this.namespaceHeaders(),
         },
       });
       const data = result.data?.data?.data;
@@ -255,7 +267,6 @@ export class VaultService {
    */
   async kvWrite(path: string, data: Record<string, unknown>, token: string): Promise<void> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
     const url = `${baseUrl}/v1/${mount}/data/${path}`;
     try {
@@ -266,7 +277,7 @@ export class VaultService {
           headers: {
             'X-Vault-Token': token,
             'Content-Type': 'application/json',
-            ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+            ...this.namespaceHeaders(),
           },
         },
       );
@@ -283,14 +294,13 @@ export class VaultService {
    */
   async kvDelete(path: string, token: string): Promise<void> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
     const url = `${baseUrl}/v1/${mount}/metadata/${path}`;
     try {
       await this.httpService.axiosRef.delete(url, {
         headers: {
           'X-Vault-Token': token,
-          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          ...this.namespaceHeaders(),
         },
       });
     } catch (error) {
@@ -306,7 +316,6 @@ export class VaultService {
    */
   async kvList(path: string, token: string): Promise<string[]> {
     const baseUrl: string = this.configService.get<string>('VAULT_BASE_URL');
-    const vaultNamespace: string = this.configService.get<string>('VAULT_NAMESPACE');
     const mount = this.getKvMount();
     const url = `${baseUrl}/v1/${mount}/metadata/${path}`;
     try {
@@ -315,7 +324,7 @@ export class VaultService {
         method: 'LIST',
         headers: {
           'X-Vault-Token': token,
-          ...(vaultNamespace ? { 'X-Vault-Namespace': vaultNamespace } : {}),
+          ...this.namespaceHeaders(),
         },
       });
       return (result.data?.data?.keys ?? []) as string[];
@@ -344,7 +353,7 @@ export class VaultService {
       result = await this.httpService.axiosRef.request({
         url: `${baseUrl}/v1/${transitKeyPath}/keys`,
         method: 'LIST',
-        headers: { 'X-Vault-Token': token },
+        headers: { 'X-Vault-Token': token, ...this.namespaceHeaders() },
       });
     } catch (error) {
       const status = error?.response?.status ?? 500;
