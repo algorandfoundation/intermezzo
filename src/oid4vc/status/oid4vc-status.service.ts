@@ -178,14 +178,31 @@ export class Oid4vcStatusService implements OnModuleInit {
     return entry;
   }
 
-  /** Revokes the session `target` names. Verification fails from the next status fetch onwards. */
+  /** Revokes the sessions `target` names. Verification fails from the next status fetch onwards. */
   async revoke(target: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.revokeBySessionId(await this.localSessionId(target), target.reason);
+    return this.setTargetStatus(target, STATUS_REVOKED, target.reason);
   }
 
   /** Reverses {@link revoke}, for a revocation made in error. */
   async reactivate(target: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
-    return this.reactivateBySessionId(await this.localSessionId(target));
+    return this.setTargetStatus(target, STATUS_VALID);
+  }
+
+  /**
+   * One session at a time, so a holder's sessions are not changed atomically:
+   * re-sending the request finishes a part-way failure. A holder's unredeemed
+   * offers get the status too, which stops them issuing while revoked.
+   */
+  private async setTargetStatus(
+    target: ChangeCredentialStatusDto,
+    value: 0 | 1,
+    reason?: string,
+  ): Promise<AllocatedStatusEntry[]> {
+    const results: AllocatedStatusEntry[] = [];
+    for (const sessionId of await this.localSessionIds(target)) {
+      results.push(...(await this.setSessionStatus(sessionId, value, reason, Boolean(target.holderDidKey))));
+    }
+    return results;
   }
 
   /**
@@ -240,20 +257,38 @@ export class Oid4vcStatusService implements OnModuleInit {
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
   }
 
-  /** The local session id `target` names; everything downstream keys on it. */
-  private async localSessionId({ sessionId, credoIssuanceSessionId }: ChangeCredentialStatusDto): Promise<string> {
-    if (!sessionId === !credoIssuanceSessionId) {
-      throw new BadRequestException('Provide exactly one of `sessionId` or `credoIssuanceSessionId`');
+  /** The local session ids `target` names; everything downstream keys on them. */
+  private async localSessionIds({
+    sessionId,
+    credoIssuanceSessionId,
+    holderDidKey,
+  }: ChangeCredentialStatusDto): Promise<string[]> {
+    if ([sessionId, credoIssuanceSessionId, holderDidKey].filter(Boolean).length !== 1) {
+      throw new BadRequestException('Provide exactly one of `sessionId`, `credoIssuanceSessionId` or `holderDidKey`');
     }
-    if (sessionId) return sessionId;
-    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
-    if (!session) throw new NotFoundException(`No issuance session for Credo session ${credoIssuanceSessionId}`);
-    return session.id;
+    if (sessionId) return [sessionId];
+    if (credoIssuanceSessionId) {
+      const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
+      if (!session) throw new NotFoundException(`No issuance session for Credo session ${credoIssuanceSessionId}`);
+      return [session.id];
+    }
+    const sessions = await this.sessions.findByHolder(holderDidKey!);
+    if (!sessions.length) throw new NotFoundException(`No issuance sessions for ${holderDidKey}`);
+    return sessions.map((session) => session.id);
   }
 
-  private async setSessionStatus(sessionId: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {
+  /**
+   * `allowEmpty` records the status on a session that has issued nothing yet,
+   * fencing its offer. A session fenced that way stays changeable by its own id.
+   */
+  private async setSessionStatus(
+    sessionId: string,
+    value: 0 | 1,
+    reason?: string,
+    allowEmpty = false,
+  ): Promise<AllocatedStatusEntry[]> {
     const session = await this.sessions.mutate(sessionId, (current) => {
-      if (!current.statusEntries?.length) {
+      if (!current.statusEntries?.length && !allowEmpty && !current.statusChange) {
         throw new NotFoundException(`Issuance session ${sessionId} has no status list entry`);
       }
       if (current.statusChange?.pending) {
@@ -267,7 +302,7 @@ export class Oid4vcStatusService implements OnModuleInit {
       current.statusChange = { id: randomUUID(), value, pending: true, requestedAt: new Date().toISOString(), reason };
     });
     const operation = session.statusChange!;
-    const entries = session.statusEntries!;
+    const entries = session.statusEntries ?? [];
     const byList = new Map<string, number[]>();
     for (const entry of entries) {
       if (!byList.has(entry.listId)) byList.set(entry.listId, []);

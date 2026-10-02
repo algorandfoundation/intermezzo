@@ -35,11 +35,12 @@ App-level orchestration endpoints (Nest):
 |--------|-------------------------------------|--------------------------------------------|
 | GET    | `/v1/credential/issuer/configurations` | List supported credential configurations   |
 | POST   | `/v1/credential/issuer/offers`         | Create a credential offer (returns QR URI) |
+| GET    | `/v1/credential/issuer/sessions?holderDidKey=` | List issuance sessions, optionally for one holder |
 | GET    | `/v1/credential/issuer/sessions/:id`   | Inspect an issuance session                |
 | POST   | `/v1/credential/verifier/requests`     | Create a presentation request              |
 | GET    | `/v1/credential/verifier/sessions/:id` | Inspect a verification session + claims    |
 | GET    | `/v1/credential/status/list/:listId`   | **Public.** Signed status list token       |
-| POST   | `/v1/credential/status/revoke`         | Revoke all credentials in a session               |
+| POST   | `/v1/credential/status/revoke`         | Revoke all credentials in a session, or of a holder `did:key` |
 | POST   | `/v1/credential/status/reactivate`     | Undo a revocation                          |
 
 The OID4VCI/OID4VP **protocol endpoints** themselves (token, credential,
@@ -84,6 +85,18 @@ curl -X POST http://localhost:3000/v1/credential/status/revoke \
   -H "Authorization: Bearer $MANAGER_JWT" \
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"<issuance-session-id>","reason":"device reported stolen"}'
+```
+
+Or send `holderDidKey` instead, to act on every issuance session pinned to
+that wallet `did:key`. Its unredeemed offers are revoked too, so they cannot
+issue until the holder is reactivated. Sessions are changed one at a time,
+not atomically: if one fails, re-send the request to finish.
+
+```sh
+curl -X POST http://localhost:3000/v1/credential/status/revoke \
+  -H "Authorization: Bearer $MANAGER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"holderDidKey":"did:key:z6Mk...","reason":"device reported stolen"}'
 ```
 
 `POST .../reactivate` with the same body reverses it. Both operations cover
@@ -231,6 +244,9 @@ App-level mappings persisted in Vault KV:
   configuration for status queries. The issuance session also carries
   `statusEntries` — one `(listId, idx)` per credential the session issued —
   plus durable `statusChange` intent and `revokedAt` / `revokedReason` on completion.
+- `intermezzo/oid4vc/sessions/issuance/by-holder/<multibase>/<sessionId>` —
+  one key per issuance session, written at offer creation, so a holder's
+  sessions can be listed and revoked together.
 - `intermezzo/oid4vc/status-lists/records/<id>` — one record per status
   list: a 16,384-entry bitstring (2 KiB raw; compressed size depends on
   the status distribution) and the next free index.
