@@ -227,7 +227,7 @@ Pawn also supports a CLI mode, in which you can use for a personal wallet and to
 
     2.1) __If your vault is deployed remotely, you need to change the `CLI_USE_LOCAL_VAULT` to `false` and set the `VAULT_BASE_URL` to your remote vault address.__
 
-    2.2) __If that Vault uses namespaces (HCP Vault Dedicated, Vault Enterprise, OpenBao), also set `VAULT_NAMESPACE` (e.g. `admin/`). Every request, including the AppRole login, carries it as `X-Vault-Namespace`, so the AppRole auth method and the transit / KV mounts must all live inside that namespace. `vault:development:init` only provisions an un-namespaced Vault.__
+    2.2) __If that Vault uses namespaces (HCP Vault Dedicated, Vault Enterprise, OpenBao), also set `VAULT_NAMESPACE` (e.g. `admin/`). Every request, including the AppRole login, carries it as `X-Vault-Namespace`, so the AppRole auth method and the transit, PQ and KV mounts must all live inside that namespace. `vault:development:init` only provisions an un-namespaced Vault.__
     
 3) Run the CLI command:
 
