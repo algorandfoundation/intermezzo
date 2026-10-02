@@ -87,6 +87,7 @@ describe('Oid4vcVerifierService', () => {
       expect(result).toMatchObject({
         credoVerificationSessionId: 'credo-v-1',
         authorizationRequest: 'openid4vp://request',
+        outcome: 'pending',
       });
     });
   });
@@ -116,6 +117,26 @@ describe('Oid4vcVerifierService', () => {
         presentations: ['vp'],
         submission: { id: 's' },
       });
+      expect(r.outcome).toBe('verified');
+    });
+
+    it.each([
+      ['Presentation verification failed: Status is not valid', 'revoked'],
+      ['Verify Error: Invalid JWT Signature', 'failed'],
+    ])('maps Credo error %s to %s', async (errorMessage, outcome) => {
+      mockRepo.findOneBy.mockResolvedValue({
+        id: 'x',
+        credoVerificationSessionId: 'credo-v-1',
+        state: 'RequestCreated',
+        outcome: 'pending',
+      });
+      verifierApi.getVerificationSessionById.mockResolvedValue({
+        state: 'Error',
+        errorMessage,
+      });
+      verifierApi.getVerifiedAuthorizationResponse.mockRejectedValue(new Error('not verified'));
+
+      await expect(service.findSession('x')).resolves.toMatchObject({ state: 'Error', outcome });
     });
   });
 });
