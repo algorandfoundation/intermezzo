@@ -154,7 +154,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
       // `W3cCredentialSubject` only maps `id` and `claims`, so the `tier`
       // claim passed through `issuanceMetadata` is silently dropped. That is
       // a pre-existing defect in this branch, untouched by status list
-      // support — see REVOCATION_PLAN.md §10.
+      // support.
       expect(asJson.credentialSubject).toEqual({ id: HOLDER_DID_KEY });
 
       expect(allocate).not.toHaveBeenCalled();

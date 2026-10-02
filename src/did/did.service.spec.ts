@@ -1,9 +1,17 @@
 import createMockInstance from 'jest-create-mock-instance';
 import { ConfigService } from '@nestjs/config';
-import { Address } from '@algorandfoundation/algokit-utils';
+import { BadRequestException } from '@nestjs/common';
+import { Address, AlgorandClient } from '@algorandfoundation/algokit-utils';
 import { base58 } from '@scure/base';
+import {
+  encodeTransaction,
+  decodeTransaction,
+  encodeSignedTransaction,
+} from '@algorandfoundation/algokit-utils/transact';
+import { makePaymentTxnWithSuggestedParamsFromObject, msgpackRawDecode, msgpackRawEncode } from 'algosdk';
 
-import { DidService } from './did.service';
+import { DidService, UserContractCreatePlan, UserDidUpdatePlan } from './did.service';
+import { UnsupportedDidKeyError } from './did-key';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
@@ -22,6 +30,7 @@ jest.mock('../../libs/did-algo', () => {
   };
 });
 jest.mock('./vault-signer', () => ({
+  ...jest.requireActual('./vault-signer'),
   buildManagerSigner: jest.fn(),
 }));
 
@@ -65,6 +74,7 @@ describe('DidService', () => {
   const CONTROLLER_PUB_KEY = new Uint8Array(32).fill(0x77);
   const MANAGER_PUB_KEY = new Uint8Array(32).fill(0x88);
   const MANAGER_ADDRESS = new Address(MANAGER_PUB_KEY);
+  const USER_DID_KEY = 'did:key:z' + base58.encode(Uint8Array.from([0xed, 0x01, ...CONTROLLER_PUB_KEY]));
 
   const metadataValueMock = jest.fn();
 
@@ -121,7 +131,10 @@ describe('DidService', () => {
     await didService.ensureAppIdLoaded();
   });
 
-  afterEach(() => jest.clearAllMocks());
+  afterEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+  });
 
   describe('pure helpers', () => {
     it('deriveDid returns the canonical did:algo identifier for a key', () => {
@@ -140,7 +153,7 @@ describe('DidService', () => {
     });
 
     it('buildUncontrolledDocument hands controllership to the supplied did:key', () => {
-      const owner = 'did:key:z6MkExampleHolder';
+      const owner = USER_DID_KEY;
       const { did, document } = didService.buildUncontrolledDocument(CONTROLLER_PUB_KEY, owner, 42n);
       const doc = document as Record<string, unknown> & {
         alsoKnownAs?: string[];
@@ -228,12 +241,13 @@ describe('DidService', () => {
     const USER_PUB_KEY = new Uint8Array(32).fill(0x42);
     const USER_DID_KEY = 'did:key:z' + base58.encode(Uint8Array.from([0xed, 0x01, ...USER_PUB_KEY]));
 
-    it('returns null for a malformed did:key without any Vault or chain I/O', async () => {
+    it('rejects a malformed did:key without any Vault or chain I/O', async () => {
       (vaultService.kvRead as jest.Mock).mockClear();
 
-      const result = await didService.getUserDidLive('did:key:not-a-key', 'vt');
+      const result = didService.getUserDidLive('did:key:not-a-key', 'vt');
 
-      expect(result).toBeNull();
+      await expect(result).rejects.toBeInstanceOf(UnsupportedDidKeyError);
+      await expect(result).rejects.toThrow('did:key did:key:not-a-key is not multibase-z encoded');
       expect(vaultService.kvRead).not.toHaveBeenCalled();
       expect(resolveDIDDocumentMock).not.toHaveBeenCalled();
     });
@@ -292,6 +306,159 @@ describe('DidService', () => {
 
       expect(result?.appId).toBe('42');
       expect(result?.didDocument).toBeNull();
+    });
+  });
+
+  describe('Ed25519-only DID operations', () => {
+    const unsupportedKeys = [
+      ['Falcon-sized key with an Ed25519 prefix', Uint8Array.from([0xed, 0x01, ...new Uint8Array(1793)])],
+      ['P-256 key', Uint8Array.from([0x80, 0x24, ...new Uint8Array(33)])],
+      ['wrong codec with a 32-byte key', Uint8Array.from([0xec, 0x01, ...new Uint8Array(32)])],
+    ] as const;
+
+    it.each(unsupportedKeys)('rejects %s across all user DID paths before I/O', async (_name, key) => {
+      const didKey = 'did:key:z' + base58.encode(key);
+      vaultService.kvRead.mockClear();
+      const operations = [
+        () => didService.getUserAppId(didKey, 'vt'),
+        () => didService.getUserDid(didKey, 'vt'),
+        () => didService.getUserDidLive(didKey, 'vt'),
+        () => didService.getUserDidLive(didKey, 'vt', 42n),
+        () => didService.buildUserContractCreate({ didKey, vaultToken: 'vt' }),
+        () => didService.submitUserContractCreate({ didKey, vaultToken: 'vt', signedTxns: [] }),
+        () => didService.buildUserDidDocumentUpdate({ didKey, vaultToken: 'vt' }),
+        () => didService.submitUserDidDocumentUpdate({ didKey, vaultToken: 'vt', document: {}, groups: [] }),
+      ];
+      for (const operation of operations) {
+        await expect(operation()).rejects.toThrow(UnsupportedDidKeyError);
+        await expect(operation()).rejects.toMatchObject({ didKey });
+      }
+      expect(vaultService.kvRead).not.toHaveBeenCalled();
+      expect(vaultService.kvWrite).not.toHaveBeenCalled();
+      expect(buildManagerSignerMock).not.toHaveBeenCalled();
+      expect(DidAlgoStorageClientMock).not.toHaveBeenCalled();
+      expect(resolveDIDDocumentMock).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 31, 33, 1793])('rejects %i-byte raw keys before deriving, publishing, or deleting', async (length) => {
+      const key = new Uint8Array(length);
+      expect(() => didService.deriveDid(key)).toThrow(UnsupportedDidKeyError);
+      expect(() => didService.buildControllerDocument(key)).toThrow(UnsupportedDidKeyError);
+      expect(() => didService.buildUncontrolledDocument(key, USER_DID_KEY, 42n)).toThrow(UnsupportedDidKeyError);
+      await expect(
+        didService.publishControlledDid({ controller: 'pq', publicKey: key, vaultToken: 'vt' }),
+      ).rejects.toThrow(UnsupportedDidKeyError);
+      await expect(didService.deleteControlledDid(key, 'vt')).rejects.toThrow(UnsupportedDidKeyError);
+      expect(buildManagerSignerMock).not.toHaveBeenCalled();
+      expect(DidAlgoStorageClientMock).not.toHaveBeenCalled();
+      expect(replaceDIDDocumentMock).not.toHaveBeenCalled();
+      expect(deleteDIDDocumentMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-Ed25519 owner even with a standard document key', () => {
+      const owner = 'did:key:z' + base58.encode(unsupportedKeys[1][1]);
+      expect(() => didService.buildUncontrolledDocument(CONTROLLER_PUB_KEY, owner, 42n)).toThrow(
+        UnsupportedDidKeyError,
+      );
+    });
+
+    it('lists only Ed25519 identities without reading unsupported registry entries', async () => {
+      jest.spyOn(didService['logger'], 'warn').mockImplementation(() => undefined);
+      const invalidKey = 'did:key:z' + base58.encode(unsupportedKeys[0][1]);
+      vaultService.kvList.mockResolvedValue([
+        encodeURIComponent(invalidKey) + '/',
+        encodeURIComponent(USER_DID_KEY) + '/',
+      ]);
+      vaultService.kvRead.mockClear();
+      expect(await didService.listUserDids('vt')).toEqual([
+        expect.objectContaining({ didKey: USER_DID_KEY, did: didService.deriveDid(CONTROLLER_PUB_KEY) }),
+      ]);
+      expect(vaultService.kvRead).toHaveBeenCalledTimes(1);
+      expect(vaultService.kvRead).toHaveBeenCalledWith(expect.stringContaining(encodeURIComponent(USER_DID_KEY)), 'vt');
+    });
+  });
+
+  describe('submitted DID signatures', () => {
+    const signature = new Uint8Array(64).fill(1);
+    const sdkTxn = makePaymentTxnWithSuggestedParamsFromObject({
+      sender: MANAGER_ADDRESS.toString(),
+      receiver: MANAGER_ADDRESS.toString(),
+      amount: 1,
+      suggestedParams: { fee: 1000, minFee: 1000, flatFee: true, firstValid: 1, lastValid: 1000 },
+    });
+    const txn = decodeTransaction(sdkTxn.bytesToSign());
+    const unsigned = Buffer.from(encodeTransaction(txn)).toString('base64');
+    const signed = encodeSignedTransaction({ txn, sig: signature });
+    const envelope = msgpackRawDecode(signed) as Record<string, unknown>;
+    const pq = { sch: Buffer.from('f1'), slt: 0, pk: new Uint8Array(1793), sig: new Uint8Array(1226) };
+    const group: UserContractCreatePlan['group'] = {
+      groupIdB64: '',
+      txnGroup: [unsigned, unsigned, unsigned],
+      indexesToSign: [2],
+      signers: ['manager', 'manager', 'user'],
+      kinds: ['pay', 'pay', 'pay'],
+    };
+    let broadcast: jest.Mock;
+
+    beforeEach(() => {
+      broadcast = jest.fn().mockResolvedValue({ txId: 'tx-id' });
+      jest.spyOn(AlgorandClient, 'fromConfig').mockReturnValue({
+        client: { algod: { sendRawTransaction: broadcast, simulateRawTransactions: jest.fn().mockResolvedValue({}) } },
+      } as unknown as AlgorandClient);
+      vaultService.kvRead.mockResolvedValue(undefined);
+      vaultService.signAsManager.mockResolvedValue(
+        Buffer.from(`vault:v1:${Buffer.from(signature).toString('base64')}`),
+      );
+      chainService.addSignatureToTxn.mockReturnValue(signed);
+      jest.spyOn(didService, 'buildUserContractCreate').mockResolvedValue({
+        didKey: USER_DID_KEY,
+        userAddress: MANAGER_ADDRESS.toString(),
+        managerAddress: MANAGER_ADDRESS.toString(),
+        group,
+      });
+      jest
+        .spyOn(didService, 'buildUserDidDocumentUpdate')
+        .mockResolvedValue({ groups: [group, group] } as UserDidUpdatePlan);
+    });
+
+    it.each([
+      ['PQ only', { txn: envelope.txn, pqsig: pq }],
+      ['PQ alongside Ed25519', { ...envelope, pqsig: pq }],
+      ['missing signature', { txn: envelope.txn }],
+      ['short signature', { ...envelope, sig: new Uint8Array(63) }],
+      ['logic signature', { ...envelope, lsig: { l: new Uint8Array([1]) } }],
+      ['multisignature', { ...envelope, msig: { v: 1, thr: 1, subsig: [{ pk: CONTROLLER_PUB_KEY, s: signature }] } }],
+    ])('rejects %s before signing or broadcasting any create/update group', async (_name, invalid) => {
+      const signedTxns = [null, null, Buffer.from(msgpackRawEncode(invalid)).toString('base64')];
+      await expect(
+        didService.submitUserContractCreate({ didKey: USER_DID_KEY, vaultToken: 'vt', signedTxns }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        didService.submitUserDidDocumentUpdate({
+          didKey: USER_DID_KEY,
+          vaultToken: 'vt',
+          document: {},
+          groups: [{ signedTxns: [null, null, Buffer.from(signed).toString('base64')] }, { signedTxns }],
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(vaultService.signAsManager).not.toHaveBeenCalled();
+      expect(broadcast).not.toHaveBeenCalled();
+      expect(vaultService.kvWrite).not.toHaveBeenCalled();
+    });
+
+    it('continues to sponsor and broadcast standard Ed25519 updates', async () => {
+      const signedTxns = [null, null, Buffer.from(signed).toString('base64')];
+      await expect(
+        didService.submitUserDidDocumentUpdate({
+          didKey: USER_DID_KEY,
+          vaultToken: 'vt',
+          document: {},
+          groups: [{ signedTxns }, { signedTxns }],
+        }),
+      ).resolves.toEqual({ txIds: ['tx-id', 'tx-id'] });
+      expect(vaultService.signAsManager).toHaveBeenCalledTimes(4);
+      expect(broadcast).toHaveBeenCalledTimes(2);
+      expect(broadcast).toHaveBeenCalledWith([signed, signed, signed]);
     });
   });
 

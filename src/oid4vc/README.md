@@ -134,6 +134,9 @@ Three things worth knowing:
   so any other signing key fails verification.
 - **Fresh installations require status references for wallet authentication.**
   There is no legacy `default` list alias or status-free compatibility mode.
+- **There is no suspension.** Lists use `bits: 1`; a `0x02` status would
+  need `bits: 2`, and `@sd-jwt`'s validator rejects every non-zero status,
+  so a suspended credential would look revoked.
 
 This service resolves its own lists in-process rather than fetching its
 own URL (`Oid4vcStatusService#installLocalStatusListFetcher`), so
@@ -252,8 +255,7 @@ App-level mappings persisted in Vault KV:
 
 Session entry appends, status transitions, and Credo state mirroring use
 conditional writes. Session listing still scans Vault sequentially; it is
-not a scalable million-session administration interface. See
-[`REVOCATION_PLAN.md`](./REVOCATION_PLAN.md) for validation and deferred work.
+not a scalable million-session administration interface.
 
 The Vault key binding map is **in-memory** (manager-only) and rebuilt on
 boot by `Oid4vcAgentProvider`.

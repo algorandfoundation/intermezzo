@@ -92,4 +92,10 @@ describe('did-document', () => {
     expect(a).toMatch(/^z[1-9A-HJ-NP-Za-km-z]+$/);
     expect(a.length).toBeGreaterThanOrEqual(40);
   });
+
+  it('rejects a Falcon public key instead of labeling it Ed25519', () => {
+    expect(() => buildDidDocument({ did: DID, publicKey: new Uint8Array(1793) })).toThrow(
+      'DID operations support only standard Ed25519 accounts',
+    );
+  });
 });

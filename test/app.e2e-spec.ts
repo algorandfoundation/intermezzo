@@ -125,13 +125,12 @@ describe('App E2E', () => {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       expect(user_detail_response.status).toBe(200); // HTTP 200 OK
-      expect(user_detail_response.data).toEqual(
-        expect.objectContaining({
-          user_id: user_uid,
-          public_address: create_user_response.data.public_address,
-          algoBalance: '0', // Initial balance is set to 0
-        }),
-      );
+      expect(user_detail_response.data).toStrictEqual({
+        user_id: user_uid,
+        public_address: create_user_response.data.public_address,
+        algoBalance: '0', // Initial balance is set to 0
+        account_type: 'ed25519', // default when the create body omits it
+      });
     });
   });
 
