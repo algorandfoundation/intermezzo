@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -20,12 +21,20 @@ import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address } from '@algorandfoundation/algokit-utils';
-import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
+import {
+  decodeSignedTransaction,
+  decodeTransaction,
+  encodeTransaction,
+  groupTransactions,
+  Transaction,
+} from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
+import { SponsorRequestDto } from './sponsor-request.dto';
+import { SponsorResponseDto } from './sponsor-response.dto';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { createHash } from 'crypto';
-import { addressFromPQKey } from 'algosdk';
+import { addressFromPQKey, msgpackRawDecode } from 'algosdk';
 
 /**
  * A user's account as resolved from Vault: which scheme backs it, its
@@ -751,5 +760,99 @@ export class WalletService {
     }
 
     return this.signAndSubmit(unSignedTxs, senders, vault_token, suggested_params.minFee, true);
+  }
+
+  /**
+   * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
+   *
+   * Index 0 is an unsigned zero-value payment from the manager to itself whose fee covers the group.
+   * Non-sponsor transactions may be signed (ed25519, msig, lsig or Falcon `pqsig`) or unsigned, must have fee 0,
+   * and are returned unchanged.
+   */
+  async sponsorTransactionGroup(
+    vault_token: string,
+    sponsorRequestDto: SponsorRequestDto,
+  ): Promise<SponsorResponseDto> {
+    const { transactions: base64Transactions } = sponsorRequestDto;
+
+    const envelopes = base64Transactions.map((transaction, index) => {
+      const raw = Buffer.from(transaction, 'base64');
+      try {
+        // Unsigned: a bare transaction, with or without the "TX" prefix. Signed: a `{ txn, sig | msig | lsig | pqsig }`
+        // envelope. Raw msgpack keys are read because algokit's decodeSignedTransaction drops `pqsig`.
+        const fields = raw.subarray(0, 2).toString() === 'TX' ? {} : (msgpackRawDecode(raw) as object);
+        if (!('txn' in fields)) {
+          return { txn: decodeTransaction(raw), signed: false, pq: false };
+        }
+        return {
+          txn: decodeSignedTransaction(raw).txn,
+          signed: ['sig', 'msig', 'lsig', 'pqsig'].some((key) => key in fields),
+          pq: 'pqsig' in fields,
+        };
+      } catch (error) {
+        throw new BadRequestException(
+          `Failed to decode transaction at index ${index}: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    });
+
+    const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
+    const sponsorAddress: string = new Address(sponsorPublicKey).toString();
+
+    // The group id every transaction carries must be the one computed from the transactions themselves.
+    const [canonical] = groupTransactions(envelopes.map(({ txn }) => new Transaction({ ...txn, group: undefined })));
+    const groupId = Buffer.from(canonical.group!);
+    if (!envelopes.every(({ txn }) => txn.group && groupId.equals(txn.group))) {
+      throw new BadRequestException(
+        'All transactions must share the group id computed from the submitted transactions',
+      );
+    }
+
+    const [{ txn: sponsorTxn, signed: sponsorSigned }] = envelopes;
+    if (sponsorSigned) {
+      throw new BadRequestException('Sponsor fee transaction (index 0) must be unsigned');
+    }
+    if (sponsorTxn.type !== 'pay') {
+      throw new BadRequestException('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
+    }
+    if (sponsorTxn.sender.toString() !== sponsorAddress) {
+      throw new BadRequestException(`Sponsor fee transaction sender must be the sponsor address (${sponsorAddress})`);
+    }
+    if (sponsorTxn.payment?.receiver?.toString() !== sponsorAddress) {
+      throw new BadRequestException(`Sponsor fee transaction receiver must be the sponsor address (${sponsorAddress})`);
+    }
+    if ((sponsorTxn.payment.amount ?? 0n) !== 0n) {
+      throw new BadRequestException('Sponsor fee transaction amount must be 0');
+    }
+    if (sponsorTxn.rekeyTo) {
+      throw new BadRequestException('Sponsor fee transaction must not set rekeyTo');
+    }
+    if (sponsorTxn.payment.closeRemainderTo) {
+      throw new BadRequestException('Sponsor fee transaction must not set payment.closeRemainderTo');
+    }
+
+    for (let i = 1; i < envelopes.length; i += 1) {
+      if ((envelopes[i].txn.fee ?? 0n) !== 0n) {
+        throw new BadRequestException(`Non-sponsor transaction at index ${i} must have fee = 0`);
+      }
+    }
+
+    // A Falcon (`pqsig`) transaction costs 3x the minimum fee. Unsigned transactions are counted at 1x, so a caller
+    // that will Falcon-sign one later must raise the sponsor fee itself.
+    const pqCount = envelopes.filter(({ pq }) => pq).length;
+    const { minFee } = await this.chainService.getSuggestedParams();
+    const requiredFee: bigint = BigInt(minFee) * BigInt(envelopes.length + 2 * pqCount);
+    const sponsorFee: bigint = sponsorTxn.fee ?? 0n;
+    if (sponsorFee < requiredFee) {
+      throw new BadRequestException(
+        `Sponsor fee transaction fee (${sponsorFee}) is below required fee (${requiredFee}) for ${envelopes.length} transactions (${pqCount} PQ-signed)`,
+      );
+    }
+
+    const signedSponsor: Uint8Array = await this.signTxAsManager(encodeTransaction(sponsorTxn), vault_token);
+
+    return {
+      transactions: [Buffer.from(signedSponsor).toString('base64'), ...base64Transactions.slice(1)],
+    };
   }
 }

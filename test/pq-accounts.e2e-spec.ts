@@ -610,5 +610,108 @@ describe('PQ accounts E2E', () => {
       expect(algosdk.encodeMsgpack(pending.txn).length).toBeGreaterThan(3000);
       expect(await chain.getAccountBalance(user.public_address)).toBe(1000000n - 48000n - 136n);
     }, 60000);
+
+    describe('fee sponsorship', () => {
+      const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
+      const vaultHeaders = () => ({ headers: { 'X-Vault-Token': vaultToken } });
+
+      // Sign as the user's own wallet would, outside Intermezzo, so the sponsor endpoint receives a signed companion.
+      const signAsWallet = async (user: { user_id: string; account_type: string }, tx: Uint8Array) => {
+        const input = b64(tx);
+        if (user.account_type === 'ed25519') {
+          const { data } = await axios.post(
+            `${VAULT_BASE_URL}/v1/${VAULT_TRANSIT_USERS_PATH}/sign/${user.user_id}`,
+            { input },
+            vaultHeaders(),
+          );
+          return chain.addSignatureToTxn(tx, Buffer.from(data.data.signature.split(':')[2], 'base64'));
+        }
+        const { data: key } = await axios.get(
+          `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/keys/${user.user_id}`,
+          vaultHeaders(),
+        );
+        const { data } = await axios.post(
+          `${VAULT_BASE_URL}/v1/${VAULT_PQ_USERS_PATH}/sign/${user.user_id}`,
+          { input },
+          vaultHeaders(),
+        );
+        const publicKey = Buffer.from(key.data.public_key, 'base64');
+        const { salt } = algosdk.addressFromPQKey(Buffer.from('f1'), publicKey);
+        const signature = Buffer.from(data.data.signature, 'base64');
+        return chain.addPqSignatureToTxn(tx, { scheme: 'f1', salt, publicKey, signature });
+      };
+
+      // An unsigned manager fee txn grouped with a wallet-signed, zero-fee 10000 µALGO user payment.
+      const sponsoredGroup = async (
+        user: { user_id: string; account_type: string; public_address: string },
+        fee: bigint,
+      ) => {
+        const params = await chain.getSuggestedParams();
+        const withFee = (tx: Uint8Array, txnFee: bigint) => {
+          const txn = algosdk.decodeUnsignedTransaction(tx.slice(2));
+          txn.fee = txnFee;
+          return txn.bytesToSign();
+        };
+        const [sponsorTx, userTx] = chain.setGroupID([
+          withFee(await chain.craftPaymentTx(managerAddress, managerAddress, 0, params), fee),
+          withFee(await chain.craftPaymentTx(user.public_address, managerAddress, 10000, params), 0n),
+        ]);
+        return { sponsorTx, userTx: await signAsWallet(user, userTx) };
+      };
+
+      it.each([
+        ['ed25519', 2],
+        ['falcon1024', 4],
+      ] as const)(
+        'confirms a sponsored %s payment at %ix the minimum fee, the user paying none',
+        async (accountType, multiple) => {
+          const user = await fundedUser(accountType);
+          const { minFee } = await chain.getSuggestedParams();
+          const { sponsorTx, userTx } = await sponsoredGroup(user, BigInt(minFee) * BigInt(multiple));
+
+          const { transactions } = await post('wallet/transactions/sponsor/', {
+            transactions: [sponsorTx, userTx].map(b64),
+          });
+          expect(transactions[1]).toBe(b64(userTx));
+          await chain.submitTransaction(transactions.map((tx: string) => Buffer.from(tx, 'base64')));
+
+          const userTxId = algosdk.decodeSignedTransaction(userTx).txn.txID();
+          const pending = await algod.pendingTransactionInformation(userTxId).do();
+          expect(pending.confirmedRound).toBeGreaterThan(0n);
+          expect(pending.txn.txn.fee).toBe(0n);
+          expect(pending.txn.pqsig !== undefined).toBe(accountType === 'falcon1024');
+          expect(await chain.getAccountBalance(user.public_address)).toBe(990000n);
+        },
+        60000,
+      );
+
+      it('rejects a Falcon-signed companion below 4x the minimum fee, as the network would', async () => {
+        const user = await fundedUser('falcon1024');
+        const { minFee } = await chain.getSuggestedParams();
+        const { sponsorTx, userTx } = await sponsoredGroup(user, 4n * BigInt(minFee) - 1n);
+
+        await expect(
+          post('wallet/transactions/sponsor/', { transactions: [sponsorTx, userTx].map(b64) }),
+        ).rejects.toThrow(/below required fee.*1 PQ-signed/);
+
+        // The same group, simulated with the sponsor signature left empty, fails on fee too.
+        const response = await algod
+          .simulateTransactions(
+            new algosdk.modelsv2.SimulateRequest({
+              allowEmptySignatures: true,
+              txnGroups: [
+                new algosdk.modelsv2.SimulateRequestTransactionGroup({
+                  txns: [
+                    new algosdk.SignedTransaction({ txn: algosdk.decodeUnsignedTransaction(sponsorTx.slice(2)) }),
+                    algosdk.decodeSignedTransaction(userTx),
+                  ],
+                }),
+              ],
+            }),
+          )
+          .do();
+        expect(response.txnGroups[0].failureMessage).toMatch(/fee/i);
+      }, 60000);
+    });
   });
 });

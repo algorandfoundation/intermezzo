@@ -7,7 +7,14 @@ import * as crypto from 'crypto';
 import { randomBytes } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { ChainService } from '../src/chain/chain.service';
-import { getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import { Address, getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import {
+  encodeSignedTransaction,
+  encodeTransaction,
+  groupTransactions,
+  Transaction,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
 import { HttpService } from '@nestjs/axios';
 import { base58 } from '@scure/base';
 
@@ -1259,5 +1266,56 @@ describe('App E2E', () => {
       // disclosures. Either form must at least contain the JWS dots.
       expect(compact!.split('.').length).toBeGreaterThanOrEqual(3);
     }, 120000);
+
+    describe('Fee sponsorship', () => {
+      const buildSponsoredGroup = (sponsorAddress: string, senderAddress: string) => {
+        const pay = (sender: string, fee: bigint, amount: bigint) =>
+          new Transaction({
+            type: TransactionType.Payment,
+            sender: Address.fromString(sender),
+            fee,
+            firstValid: 1n,
+            lastValid: 1001n,
+            genesisId: 'e2e',
+            genesisHash: new Uint8Array(32),
+            payment: { receiver: Address.fromString(sponsorAddress), amount },
+          });
+        const [sponsorTxn, signedTxn, unsignedTxn] = groupTransactions([
+          pay(sponsorAddress, 3000n, 0n),
+          pay(senderAddress, 0n, 1n),
+          pay(senderAddress, 0n, 2n),
+        ]);
+        return [
+          encodeTransaction(sponsorTxn),
+          encodeSignedTransaction({ txn: signedTxn, sig: new Uint8Array(64).fill(1) }),
+          encodeTransaction(unsignedTxn),
+        ].map((bytes) => Buffer.from(bytes).toString('base64'));
+      };
+
+      it('(OK) lets the authenticated manager sponsor any transaction group', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+        const transactions = buildSponsoredGroup(await getManagerAddress(), new Address(randomBytes(32)).toString());
+
+        const response = await axios.post(
+          `${APP_BASE_URL}/wallet/transactions/sponsor/`,
+          { transactions },
+          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        );
+
+        expect(response.status).toBe(201);
+        expect(response.data.transactions[0]).not.toBe(transactions[0]);
+        expect(response.data.transactions[1]).toBe(transactions[1]);
+        expect(response.data.transactions[2]).toBe(transactions[2]);
+      }, 120000);
+
+      it('(FAIL) rejects an unauthenticated sponsorship request', async () => {
+        const transactions = buildSponsoredGroup(await getManagerAddress(), new Address(randomBytes(32)).toString());
+
+        await expect(
+          axios.post(`${APP_BASE_URL}/wallet/transactions/sponsor/`, { transactions }),
+        ).rejects.toMatchObject({ response: { status: 401 } });
+      }, 120000);
+    });
   });
 });
