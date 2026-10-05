@@ -363,6 +363,7 @@ export class Wallet {
       'Sponsor a transaction group by signing the **Sponsor** fee transaction at index 0. ' +
       'This manager-authenticated endpoint accepts a complete group where index 0 is an **unsigned** 0 ALGO `pay` from the manager to itself whose `fee` covers the entire group. ' +
       'Every other transaction must have `fee = 0`, may be signed or unsigned, and is returned unchanged. ' +
+      'Each Falcon (`pqsig`) signed transaction requires 3x the minimum fee. ' +
       'The manager address is available from `GET /v1/wallet/manager/`. ' +
       'This endpoint validates the canonical group id, signs only the sponsor transaction, and returns the group. The caller is responsible for any remaining signatures and network submission.',
   })

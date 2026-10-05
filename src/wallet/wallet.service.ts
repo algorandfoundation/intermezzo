@@ -20,7 +20,7 @@ import { ManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-
 import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
-import { Address, encodeAddress } from '@algorandfoundation/algokit-utils';
+import { Address } from '@algorandfoundation/algokit-utils';
 import {
   decodeSignedTransaction,
   decodeTransaction,
@@ -34,7 +34,7 @@ import { SponsorRequestDto } from './sponsor-request.dto';
 import { SponsorResponseDto } from './sponsor-response.dto';
 import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider';
 import { createHash } from 'crypto';
-import { addressFromPQKey } from 'algosdk';
+import { addressFromPQKey, msgpackRawDecode } from 'algosdk';
 
 /**
  * A user's account as resolved from Vault: which scheme backs it, its
@@ -766,7 +766,8 @@ export class WalletService {
    * Sponsors a transaction group by signing the sponsor's fee transaction at index 0.
    *
    * Index 0 is an unsigned zero-value payment from the manager to itself whose fee covers the group.
-   * Non-sponsor transactions may be signed or unsigned, must have fee 0, and are returned unchanged.
+   * Non-sponsor transactions may be signed (ed25519, msig, lsig or Falcon `pqsig`) or unsigned, must have fee 0,
+   * and are returned unchanged.
    */
   async sponsorTransactionGroup(
     vault_token: string,
@@ -774,21 +775,20 @@ export class WalletService {
   ): Promise<SponsorResponseDto> {
     const { transactions: base64Transactions } = sponsorRequestDto;
 
-    if (!base64Transactions || base64Transactions.length === 0) {
-      throw new BadRequestException('Transactions array is required and must not be empty');
-    }
-    if (base64Transactions.length < 2) {
-      throw new BadRequestException('Sponsored group must contain at least the sponsor fee txn and one user txn');
-    }
-
     const envelopes = base64Transactions.map((transaction, index) => {
-      const raw = new Uint8Array(Buffer.from(transaction, 'base64'));
+      const raw = Buffer.from(transaction, 'base64');
       try {
-        if (raw[0] === 0x54 && raw[1] === 0x58) {
-          return { txn: decodeTransaction(raw), unsignedEncoded: raw, signed: false };
+        // Unsigned: a bare transaction, with or without the "TX" prefix. Signed: a `{ txn, sig | msig | lsig | pqsig }`
+        // envelope. Raw msgpack keys are read because algokit's decodeSignedTransaction drops `pqsig`.
+        const fields = raw.subarray(0, 2).toString() === 'TX' ? {} : (msgpackRawDecode(raw) as object);
+        if (!('txn' in fields)) {
+          return { txn: decodeTransaction(raw), signed: false, pq: false };
         }
-        const decoded = decodeSignedTransaction(raw);
-        return { txn: decoded.txn, unsignedEncoded: encodeTransaction(decoded.txn), signed: true };
+        return {
+          txn: decodeSignedTransaction(raw).txn,
+          signed: ['sig', 'msig', 'lsig', 'pqsig'].some((key) => key in fields),
+          pq: 'pqsig' in fields,
+        };
       } catch (error) {
         throw new BadRequestException(
           `Failed to decode transaction at index ${index}: ${error instanceof Error ? error.message : error}`,
@@ -797,58 +797,37 @@ export class WalletService {
     });
 
     const sponsorPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
-    const sponsorAddress: string = encodeAddress(sponsorPublicKey);
+    const sponsorAddress: string = new Address(sponsorPublicKey).toString();
 
-    // ---- Group ID validation ----
-    const firstGroupBytes: Uint8Array | undefined = envelopes[0].txn.group;
-    if (!firstGroupBytes || firstGroupBytes.length === 0) {
-      throw new BadRequestException('Transactions must be grouped (missing group id)');
-    }
-    const firstGroupId: string = Buffer.from(firstGroupBytes).toString('base64');
-    for (const env of envelopes) {
-      const grp = env.txn.group;
-      if (!grp || Buffer.from(grp).toString('base64') !== firstGroupId) {
-        throw new BadRequestException('All transactions must belong to the same group');
-      }
-    }
-    try {
-      const canonicalGroup = groupTransactions(
-        envelopes.map(({ txn }) => new Transaction({ ...txn, group: undefined })),
+    // The group id every transaction carries must be the one computed from the transactions themselves.
+    const [canonical] = groupTransactions(envelopes.map(({ txn }) => new Transaction({ ...txn, group: undefined })));
+    const groupId = Buffer.from(canonical.group!);
+    if (!envelopes.every(({ txn }) => txn.group && groupId.equals(txn.group))) {
+      throw new BadRequestException(
+        'All transactions must share the group id computed from the submitted transactions',
       );
-      const canonicalGroupId = Buffer.from(canonicalGroup[0].group!).toString('base64');
-      if (canonicalGroupId !== firstGroupId) {
-        throw new BadRequestException('Transaction group id does not match the submitted transactions');
-      }
-    } catch (error) {
-      if (error instanceof BadRequestException) throw error;
-      throw new BadRequestException(`Failed to validate transaction group: ${(error as Error).message}`);
     }
 
-    // ---- Sponsor fee txn (index 0) validation ----
-    const sponsorEnv = envelopes[0];
-    const sponsorTxn = sponsorEnv.txn;
-
-    if (sponsorEnv.signed) {
+    const [{ txn: sponsorTxn, signed: sponsorSigned }] = envelopes;
+    if (sponsorSigned) {
       throw new BadRequestException('Sponsor fee transaction (index 0) must be unsigned');
     }
     if (sponsorTxn.type !== 'pay') {
       throw new BadRequestException('Sponsor fee transaction (index 0) must be a payment (`pay`) transaction');
     }
-    const sponsorTxnSender = sponsorTxn.sender.toString();
-    if (sponsorTxnSender !== sponsorAddress) {
+    if (sponsorTxn.sender.toString() !== sponsorAddress) {
       throw new BadRequestException(`Sponsor fee transaction sender must be the sponsor address (${sponsorAddress})`);
     }
-    if (!sponsorTxn.payment?.receiver || sponsorTxn.payment.receiver.toString() !== sponsorAddress) {
+    if (sponsorTxn.payment?.receiver?.toString() !== sponsorAddress) {
       throw new BadRequestException(`Sponsor fee transaction receiver must be the sponsor address (${sponsorAddress})`);
     }
-    const sponsorAmt: bigint = sponsorTxn.payment?.amount ?? 0n;
-    if (sponsorAmt !== 0n) {
+    if ((sponsorTxn.payment.amount ?? 0n) !== 0n) {
       throw new BadRequestException('Sponsor fee transaction amount must be 0');
     }
     if (sponsorTxn.rekeyTo) {
       throw new BadRequestException('Sponsor fee transaction must not set rekeyTo');
     }
-    if (sponsorTxn.payment?.closeRemainderTo) {
+    if (sponsorTxn.payment.closeRemainderTo) {
       throw new BadRequestException('Sponsor fee transaction must not set payment.closeRemainderTo');
     }
 
@@ -858,19 +837,19 @@ export class WalletService {
       }
     }
 
-    // ---- Fee coverage validation ----
-    const suggestedParams = await this.chainService.getSuggestedParams();
-    const minFee: bigint = BigInt(suggestedParams.minFee);
-    const requiredFee: bigint = minFee * BigInt(envelopes.length);
+    // A Falcon (`pqsig`) transaction costs 3x the minimum fee. Unsigned transactions are counted at 1x, so a caller
+    // that will Falcon-sign one later must raise the sponsor fee itself.
+    const pqCount = envelopes.filter(({ pq }) => pq).length;
+    const { minFee } = await this.chainService.getSuggestedParams();
+    const requiredFee: bigint = BigInt(minFee) * BigInt(envelopes.length + 2 * pqCount);
     const sponsorFee: bigint = sponsorTxn.fee ?? 0n;
     if (sponsorFee < requiredFee) {
       throw new BadRequestException(
-        `Sponsor fee transaction fee (${sponsorFee}) is below required fee (${requiredFee}) for ${envelopes.length} transactions`,
+        `Sponsor fee transaction fee (${sponsorFee}) is below required fee (${requiredFee}) for ${envelopes.length} transactions (${pqCount} PQ-signed)`,
       );
     }
 
-    // ---- Sign sponsor txn, return full group as base64 ----
-    const signedSponsor: Uint8Array = await this.signTxAsManager(sponsorEnv.unsignedEncoded, vault_token);
+    const signedSponsor: Uint8Array = await this.signTxAsManager(encodeTransaction(sponsorTxn), vault_token);
 
     return {
       transactions: [Buffer.from(signedSponsor).toString('base64'), ...base64Transactions.slice(1)],
