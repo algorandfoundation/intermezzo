@@ -7,6 +7,8 @@
  * verification method and lists it under `authentication`.
  */
 
+import { assertEd25519PublicKey } from './did-key';
+
 export interface DidVerificationMethod {
   id: string;
   type: string;
@@ -82,6 +84,7 @@ const P256_MULTICODEC_PREFIX = new Uint8Array([0x80, 0x24]);
  * `Ed25519VerificationKey2020` data integrity suite.
  */
 export function encodePublicKeyMultibase(publicKey: Uint8Array): string {
+  assertEd25519PublicKey(publicKey);
   const prefixed = new Uint8Array(ED25519_MULTICODEC_PREFIX.length + publicKey.length);
   prefixed.set(ED25519_MULTICODEC_PREFIX, 0);
   prefixed.set(publicKey, ED25519_MULTICODEC_PREFIX.length);

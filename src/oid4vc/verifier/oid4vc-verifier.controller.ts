@@ -47,5 +47,6 @@ function toResponse(session: Oid4vcVerificationSession): PresentationRequestResp
     credoVerificationSessionId: session.credoVerificationSessionId ?? '',
     authorizationRequest: session.authorizationRequest,
     state: session.state,
+    outcome: session.outcome,
   };
 }

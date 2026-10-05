@@ -47,13 +47,19 @@ describe('Wallet Controller', () => {
         user_id: userId,
         public_address: expectedPublicAddress,
         algoBalance: expectedAmount,
+        account_type: 'ed25519',
       });
       const requestMock = { vault_token: vaultToken };
 
       const result = await walletController.userDetail(requestMock, userId);
 
       expect(mockWalletService.getUserInfo).toHaveBeenCalledWith(userId, vaultToken);
-      expect(result).toEqual({ user_id: userId, public_address: expectedPublicAddress, algoBalance: expectedAmount });
+      expect(result).toEqual({
+        user_id: userId,
+        public_address: expectedPublicAddress,
+        algoBalance: expectedAmount,
+        account_type: 'ed25519',
+      });
     });
 
     it('\(OK) create user', async () => {
@@ -65,6 +71,7 @@ describe('Wallet Controller', () => {
         user_id: userId,
         public_address: expectedPublicAddress,
         algoBalance: '0',
+        account_type: 'ed25519',
       });
 
       const result: UserInfoResponseDto = await walletController.userCreate(
@@ -75,7 +82,9 @@ describe('Wallet Controller', () => {
       expect(result.user_id).toEqual(userId);
       expect(result.public_address).toEqual(expectedPublicAddress);
       expect(result.algoBalance).toEqual('0'); // Initial balance is set to 0
-      expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, vaultToken);
+      // `account_type` is forwarded as `undefined` when the body omits it,
+      // so the service applies its own ed25519 default.
+      expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, vaultToken, undefined);
     });
   });
 
@@ -124,6 +133,7 @@ describe('Wallet Controller', () => {
         user_id: userId,
         public_address: expectedPublicAddress,
         algoBalance: algoBalanceExpected,
+        account_type: 'ed25519',
       });
       const result = await walletController.assetsBalances(requestMock, userId);
       expect(mockWalletService.getAssetHoldings).toHaveBeenCalledWith(userId, vaultToken);

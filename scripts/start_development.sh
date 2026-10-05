@@ -7,6 +7,8 @@ fi
 
 algokit localnet reset;
 
+./scripts/build_vault_plugin.sh;
+
 docker compose down;
 docker compose up -d --build;
 

@@ -3,6 +3,7 @@ import { encodeTransaction, Transaction } from '@algorandfoundation/algokit-util
 import type { TransactionSigner } from '@algorandfoundation/algokit-utils/transact';
 import { ChainService } from '../chain/chain.service';
 import { VaultService } from '../vault/vault.service';
+import { assertEd25519PublicKey } from './did-key';
 
 /**
  * Decode a Vault transit signature (`vault:v1:<base64-sig>`) into raw
@@ -59,6 +60,7 @@ export async function buildManagerSigner(
   vaultToken: string,
 ): Promise<{ address: Address; signer: TransactionSigner }> {
   const managerPublicKey = await vaultService.getManagerPublicKey(vaultToken);
+  assertEd25519PublicKey(managerPublicKey);
   const address = new Address(managerPublicKey);
   const signer = buildVaultTransactionSigner(chainService, (bytes) => vaultService.signAsManager(bytes, vaultToken));
   return { address, signer };
