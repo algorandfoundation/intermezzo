@@ -864,15 +864,6 @@ describe('VaultService', () => {
       public_key: publicKey.toString('base64'),
     };
 
-    const ok = (data: any) =>
-      ({
-        data,
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: { headers: {} as any },
-      }) as AxiosResponse;
-
     it.each(['pqCreateKey', 'pqGetKey'] as const)('%s rejects malformed public keys from Vault', async (method) => {
       configWith();
       for (const public_key of [
@@ -884,7 +875,7 @@ describe('VaultService', () => {
         publicKey.subarray(1).toString('base64'),
         keyPayload.public_key + '!',
       ]) {
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { public_key } }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: { public_key } }));
         await expect(vaultService[method]('user-1', 'token')).rejects.toThrow(HttpErrorByCode[502]);
       }
     });
@@ -892,7 +883,7 @@ describe('VaultService', () => {
     describe('pqCreateKey', () => {
       it('(OK) should POST to the key path and parse the plugin response', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         const result = await vaultService.pqCreateKey('user-1', 'token');
 
@@ -908,7 +899,7 @@ describe('VaultService', () => {
 
       it('(OK) should honour VAULT_PQ_USERS_PATH and the namespace header', async () => {
         configWith({ VAULT_PQ_USERS_PATH: 'other/pq', VAULT_NAMESPACE: 'tenant-a' });
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         await vaultService.pqCreateKey('user-1', 'token');
 
@@ -931,7 +922,7 @@ describe('VaultService', () => {
     describe('pqGetKey', () => {
       it('(OK) should GET the key path and parse the plugin response', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         const result = await vaultService.pqGetKey('user-1', 'token');
 
@@ -966,7 +957,7 @@ describe('VaultService', () => {
         const input = new Uint8Array([0x54, 0x58, 0x01, 0x02, 0x03]); // "TX" || payload
         const signature = Buffer.from('a-very-long-falcon-signature');
         (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(
-          ok({ data: { signature: signature.toString('base64') } }),
+          okResponse({ data: { signature: signature.toString('base64') } }),
         );
 
         const result = await vaultService.pqSign('user-1', input, 'token');
@@ -995,7 +986,7 @@ describe('VaultService', () => {
     describe('pqListKeys', () => {
       it('(OK) should LIST the keys path', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { keys: ['a', 'b'] } }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: { keys: ['a', 'b'] } }));
 
         const result = await vaultService.pqListKeys('token');
 
