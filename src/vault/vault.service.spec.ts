@@ -11,21 +11,30 @@ describe('VaultService', () => {
   let httpService: HttpService;
   let configService: ConfigService;
 
-  beforeAll(async () => {
-    vaultService = createMockInstance(VaultService);
+  const BASE_URL = 'http://vault';
+
+  // jest-create-mock-instance builds its mocks on a private ModuleMocker that
+  // jest.resetAllMocks() does not reach, so the mocks are recreated per test to
+  // keep call history and queued responses from leaking between tests.
+  beforeEach(() => {
     configService = createMockInstance(ConfigService);
     httpService = createMockInstance(HttpService);
-
-    Object.defineProperty(httpService, 'axiosRef', {
-      value: createMockInstance(Axios),
-    });
-  });
-
-  beforeEach(() => {
-    jest.resetAllMocks();
+    Object.defineProperty(httpService, 'axiosRef', { value: createMockInstance(Axios) });
 
     vaultService = new VaultService(httpService, configService);
   });
+
+  /** Stubs configService.get by key. VAULT_BASE_URL is always set. */
+  const configWith = (overrides: Record<string, string | undefined> = {}) => {
+    (configService.get as jest.Mock).mockImplementation((key: string) => {
+      if (key === 'VAULT_BASE_URL') return BASE_URL;
+      if (key in overrides) return overrides[key];
+      return undefined;
+    });
+  };
+
+  const okResponse = (data: unknown): AxiosResponse =>
+    ({ data, status: 200, statusText: 'OK', headers: {}, config: { headers: {} as any } }) as AxiosResponse;
 
   describe('authGithub', () => {
     it('\(OK) should be able to use personal access token to auth', async () => {
@@ -79,7 +88,7 @@ describe('VaultService', () => {
   describe('checkToken', () => {
     it('should return true when token is valid', async () => {
       const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValue(baseUrl);
+      configWith();
       (httpService.axiosRef.get as jest.Mock).mockResolvedValue({
         data: {},
         status: 200,
@@ -97,12 +106,27 @@ describe('VaultService', () => {
     });
 
     it('should throw error when token is invalid', async () => {
-      const baseUrl = 'http://vault';
-      (configService.get as jest.Mock).mockReturnValue(baseUrl);
+      configWith();
       const error = { response: { status: 401 } };
       (httpService.axiosRef.get as jest.Mock).mockRejectedValue(error);
 
       await expect(vaultService.checkToken('invalid-token')).rejects.toThrow(HttpErrorByCode[401]);
+    });
+  });
+
+  describe('getTokenWithRole', () => {
+    it('(OK) should return the client token from an AppRole login', async () => {
+      configWith();
+      (httpService.axiosRef.post as jest.Mock).mockResolvedValueOnce(okResponse({ auth: { client_token: 'token' } }));
+
+      await expect(vaultService.getTokenWithRole('role', 'secret')).resolves.toEqual('token');
+    });
+
+    it('(FAIL) should throw 401 when Vault rejects the AppRole credentials', async () => {
+      configWith();
+      (httpService.axiosRef.post as jest.Mock).mockRejectedValueOnce({ response: { status: 401 } });
+
+      await expect(vaultService.getTokenWithRole('role', 'secret')).rejects.toThrow(HttpErrorByCode[401]);
     });
   });
 
@@ -173,7 +197,7 @@ describe('VaultService', () => {
     });
   });
 
-  describe('getUserPublicKey (using _transitCreateKey)', () => {
+  describe('getUserPublicKey (using _getKey)', () => {
     it('should create key and return encoded public key', async () => {
       const baseUrl = 'http://vault';
       const transitPath = 'transit/path';
@@ -391,17 +415,173 @@ describe('VaultService', () => {
     });
   });
 
+  describe('X-Vault-Namespace header', () => {
+    const namespace = 'tenant-a';
+    const transitPath = 'transit/users';
+    const keyResponse = { data: { keys: { '1': { public_key: Buffer.alloc(32, 0xab).toString('base64') } } } };
+    const token = { 'X-Vault-Token': 'token' };
+    const json = { 'Content-Type': 'application/json' };
+    const ns = { 'X-Vault-Namespace': namespace };
+
+    // Every VaultService request to Vault: the axios function it uses, a response its
+    // parsing accepts, and the exact arguments expected with VAULT_NAMESPACE set. The four
+    // pq* methods share one request path, represented here by pqListKeys.
+    const vaultCalls = [
+      {
+        method: 'authGithub',
+        axiosMethod: 'post',
+        response: { auth: { client_token: 'token' } },
+        act: () => vaultService.authGithub('pat'),
+        expected: [`${BASE_URL}/v1/auth/github/login`, { token: 'pat' }, { headers: { ...json, ...ns } }],
+      },
+      {
+        method: 'getTokenWithRole',
+        axiosMethod: 'post',
+        response: { auth: { client_token: 'token' } },
+        act: () => vaultService.getTokenWithRole('role', 'secret'),
+        expected: [`${BASE_URL}/v1/auth/approle/login`, { role_id: 'role', secret_id: 'secret' }, { headers: ns }],
+      },
+      {
+        method: 'checkToken',
+        axiosMethod: 'get',
+        response: {},
+        act: () => vaultService.checkToken('token'),
+        expected: [`${BASE_URL}/v1/auth/token/lookup-self`, { headers: { ...token, ...ns } }],
+      },
+      {
+        method: 'transitCreateKey',
+        axiosMethod: 'post',
+        response: keyResponse,
+        act: () => vaultService.transitCreateKey('user-key', transitPath, 'token'),
+        expected: [
+          `${BASE_URL}/v1/${transitPath}/keys/user-key`,
+          { type: 'ed25519', derived: false, allow_deletion: false },
+          { headers: { ...token, ...ns } },
+        ],
+      },
+      {
+        method: 'getUserPublicKey',
+        axiosMethod: 'get',
+        response: keyResponse,
+        act: () => vaultService.getUserPublicKey('user-key', 'token'),
+        expected: [`${BASE_URL}/v1/${transitPath}/keys/user-key`, { headers: { ...token, ...json, ...ns } }],
+      },
+      {
+        method: 'signAsUser',
+        axiosMethod: 'post',
+        response: { data: { signature: 'vault:v1:c2ln' } },
+        act: () => vaultService.signAsUser('user-key', new Uint8Array([1, 2, 3]), 'token'),
+        expected: [
+          `${BASE_URL}/v1/${transitPath}/sign/user-key`,
+          { input: Buffer.from([1, 2, 3]).toString('base64') },
+          { headers: { ...token, ...ns } },
+        ],
+      },
+      {
+        method: 'getKeys',
+        axiosMethod: 'request',
+        response: { data: { keys: [] } },
+        act: () => vaultService.getKeys('token'),
+        expected: [{ url: `${BASE_URL}/v1/${transitPath}/keys`, method: 'LIST', headers: { ...token, ...ns } }],
+      },
+      {
+        method: 'canCreateUserKey',
+        axiosMethod: 'post',
+        response: { data: { 'pawn/pq-users/keys/user-key': ['create'] } },
+        act: () => vaultService.canCreateUserKey('user-key', 'falcon1024', 'token'),
+        expected: [
+          `${BASE_URL}/v1/sys/capabilities-self`,
+          { paths: ['pawn/pq-users/keys/user-key'] },
+          { headers: { ...token, ...ns } },
+        ],
+      },
+      {
+        method: 'pqListKeys',
+        axiosMethod: 'request',
+        response: { data: { keys: [] } },
+        act: () => vaultService.pqListKeys('token'),
+        expected: [{ url: `${BASE_URL}/v1/pawn/pq-users/keys`, method: 'LIST', headers: { ...token, ...ns } }],
+      },
+      {
+        method: 'kvRead',
+        axiosMethod: 'get',
+        response: { data: { data: {} } },
+        act: () => vaultService.kvRead('foo', 'token'),
+        expected: [`${BASE_URL}/v1/secret/data/foo`, { headers: { ...token, ...ns } }],
+      },
+      {
+        method: 'kvWrite',
+        axiosMethod: 'post',
+        response: {},
+        act: () => vaultService.kvWrite('foo', { a: 1 }, 'token'),
+        expected: [`${BASE_URL}/v1/secret/data/foo`, { data: { a: 1 } }, { headers: { ...token, ...json, ...ns } }],
+      },
+      {
+        method: 'kvCreate',
+        axiosMethod: 'post',
+        response: {},
+        act: () => vaultService.kvCreate('foo', { a: 1 }, 'token'),
+        expected: [
+          `${BASE_URL}/v1/secret/data/foo`,
+          { data: { a: 1 }, options: { cas: 0 } },
+          { headers: { ...token, ...json, ...ns } },
+        ],
+      },
+      {
+        method: 'kvDelete',
+        axiosMethod: 'delete',
+        response: {},
+        act: () => vaultService.kvDelete('foo', 'token'),
+        expected: [`${BASE_URL}/v1/secret/metadata/foo`, { headers: { ...token, ...ns } }],
+      },
+      {
+        method: 'kvList',
+        axiosMethod: 'request',
+        response: { data: { keys: [] } },
+        act: () => vaultService.kvList('foo', 'token'),
+        expected: [{ url: `${BASE_URL}/v1/secret/metadata/foo`, method: 'LIST', headers: { ...token, ...ns } }],
+      },
+    ] as const;
+
+    it.each(vaultCalls)(
+      '(OK) $method should send X-Vault-Namespace when VAULT_NAMESPACE is set',
+      async ({ axiosMethod, response, act, expected }) => {
+        configWith({ VAULT_TRANSIT_USERS_PATH: transitPath, VAULT_NAMESPACE: namespace });
+        const mock = httpService.axiosRef[axiosMethod] as jest.Mock;
+        mock.mockResolvedValueOnce(okResponse(response));
+
+        await act();
+
+        expect(mock).toHaveBeenCalledTimes(1);
+        expect(mock).toHaveBeenCalledWith(...expected);
+      },
+    );
+
+    describe.each([
+      ['unset', undefined],
+      // `VAULT_NAMESPACE=` in an env file must behave as unset, not send a blank header.
+      ['empty', ''],
+    ])('when VAULT_NAMESPACE is %s', (_label, value) => {
+      it.each(vaultCalls)('(OK) $method should omit X-Vault-Namespace', async ({ axiosMethod, response, act }) => {
+        configWith({ VAULT_TRANSIT_USERS_PATH: transitPath, VAULT_NAMESPACE: value });
+        const mock = httpService.axiosRef[axiosMethod] as jest.Mock;
+        mock.mockResolvedValueOnce(okResponse(response));
+
+        await act();
+
+        expect(mock).toHaveBeenCalledTimes(1);
+        // The axios config is always the last argument. Object.keys is deliberate:
+        // toHaveBeenCalledWith would treat an undefined-valued key as absent.
+        const args = mock.mock.calls[0];
+        expect(args[args.length - 1]).toHaveProperty('headers');
+        expect(Object.keys(args[args.length - 1].headers)).not.toContain('X-Vault-Namespace');
+      });
+    });
+  });
+
   describe('kv helpers', () => {
     const baseUrl = 'http://vault';
     const defaultMount = 'secret';
-
-    const configWith = (overrides: Record<string, string | undefined> = {}) => {
-      (configService.get as jest.Mock).mockImplementation((key: string) => {
-        if (key === 'VAULT_BASE_URL') return baseUrl;
-        if (key in overrides) return overrides[key];
-        return undefined;
-      });
-    };
 
     describe('kvRead', () => {
       it('(OK) should return the inner data payload', async () => {
@@ -684,23 +864,6 @@ describe('VaultService', () => {
       public_key: publicKey.toString('base64'),
     };
 
-    const configWith = (overrides: Record<string, string | undefined> = {}) => {
-      (configService.get as jest.Mock).mockImplementation((key: string) => {
-        if (key === 'VAULT_BASE_URL') return baseUrl;
-        if (key in overrides) return overrides[key];
-        return undefined;
-      });
-    };
-
-    const ok = (data: any) =>
-      ({
-        data,
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: { headers: {} as any },
-      }) as AxiosResponse;
-
     it.each(['pqCreateKey', 'pqGetKey'] as const)('%s rejects malformed public keys from Vault', async (method) => {
       configWith();
       for (const public_key of [
@@ -712,7 +875,7 @@ describe('VaultService', () => {
         publicKey.subarray(1).toString('base64'),
         keyPayload.public_key + '!',
       ]) {
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { public_key } }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: { public_key } }));
         await expect(vaultService[method]('user-1', 'token')).rejects.toThrow(HttpErrorByCode[502]);
       }
     });
@@ -720,7 +883,7 @@ describe('VaultService', () => {
     describe('pqCreateKey', () => {
       it('(OK) should POST to the key path and parse the plugin response', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         const result = await vaultService.pqCreateKey('user-1', 'token');
 
@@ -736,7 +899,7 @@ describe('VaultService', () => {
 
       it('(OK) should honour VAULT_PQ_USERS_PATH and the namespace header', async () => {
         configWith({ VAULT_PQ_USERS_PATH: 'other/pq', VAULT_NAMESPACE: 'tenant-a' });
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         await vaultService.pqCreateKey('user-1', 'token');
 
@@ -759,7 +922,7 @@ describe('VaultService', () => {
     describe('pqGetKey', () => {
       it('(OK) should GET the key path and parse the plugin response', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: keyPayload }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: keyPayload }));
 
         const result = await vaultService.pqGetKey('user-1', 'token');
 
@@ -794,7 +957,7 @@ describe('VaultService', () => {
         const input = new Uint8Array([0x54, 0x58, 0x01, 0x02, 0x03]); // "TX" || payload
         const signature = Buffer.from('a-very-long-falcon-signature');
         (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(
-          ok({ data: { signature: signature.toString('base64') } }),
+          okResponse({ data: { signature: signature.toString('base64') } }),
         );
 
         const result = await vaultService.pqSign('user-1', input, 'token');
@@ -823,7 +986,7 @@ describe('VaultService', () => {
     describe('pqListKeys', () => {
       it('(OK) should LIST the keys path', async () => {
         configWith();
-        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(ok({ data: { keys: ['a', 'b'] } }));
+        (httpService.axiosRef.request as jest.Mock).mockResolvedValueOnce(okResponse({ data: { keys: ['a', 'b'] } }));
 
         const result = await vaultService.pqListKeys('token');
 
