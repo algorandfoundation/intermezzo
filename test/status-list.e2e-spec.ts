@@ -13,6 +13,7 @@ import { Oid4vcIssuanceSessionRepository } from '../src/oid4vc/sessions/vault-re
 import { Oid4vcStatusController } from '../src/oid4vc/status/oid4vc-status.controller';
 import { Oid4vcStatusService } from '../src/oid4vc/status/oid4vc-status.service';
 import { StatusListRepository } from '../src/oid4vc/status/status-list.repository';
+import { HolderStatusRepository } from '../src/oid4vc/status/holder-status.repository';
 import { VaultCasConflictError, VaultService } from '../src/vault/vault.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
@@ -87,6 +88,7 @@ describe('Credential status list (e2e)', () => {
         Oid4vcConfig,
         StatusListRepository,
         Oid4vcIssuanceSessionRepository,
+        HolderStatusRepository,
         Oid4vcStatusService,
       ],
     }).compile();
@@ -254,6 +256,7 @@ describe('Credential status list (e2e)', () => {
       app.get(Oid4vcConfig),
       app.get(StatusListRepository),
       app.get(Oid4vcIssuanceSessionRepository),
+      app.get(HolderStatusRepository),
       app.get(Oid4vcAgentProvider),
       app.get(VaultService),
       app.get(AlgoVaultTokenProvider),

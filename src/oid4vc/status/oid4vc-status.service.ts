@@ -19,6 +19,7 @@ import { AlgoVaultTokenProvider } from '../algo/algo-vault-token.provider';
 import { Oid4vcConfig } from '../oid4vc.config';
 import { ChangeCredentialStatusDto } from '../dto/status-change.dto';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
+import { Oid4vcIssuanceSession, StatusChange, StatusSnapshot } from '../entities/oid4vc-issuance-session.entity';
 import {
   STATUS_LIST_SIZE,
   STATUS_REVOKED,
@@ -26,6 +27,7 @@ import {
   StatusListEntry,
   StatusListRecord,
 } from '../entities/status-list.entity';
+import { HolderStatusRepository } from './holder-status.repository';
 import { StatusListRepository } from './status-list.repository';
 
 /** Shape of the one `SdJwtVcService` member Phase 4 replaces. */
@@ -67,6 +69,7 @@ export class Oid4vcStatusService implements OnModuleInit {
     private readonly config: Oid4vcConfig,
     private readonly repo: StatusListRepository,
     private readonly sessions: Oid4vcIssuanceSessionRepository,
+    private readonly holders: HolderStatusRepository,
     private readonly agentProvider: Oid4vcAgentProvider,
     private readonly vault: VaultService,
     private readonly tokenProvider: AlgoVaultTokenProvider,
@@ -75,9 +78,18 @@ export class Oid4vcStatusService implements OnModuleInit {
   /**
    * Teaches the agent to resolve *our* status lists without an HTTP round
    * trip. See {@link installLocalStatusListFetcher}.
+   *
+   * Also starts the one-time holder index backfill in the background, so the
+   * first holder revocation does not pay for it. Holder lookups wait on it
+   * regardless, so a failure here only defers it.
    */
   async onModuleInit(): Promise<void> {
     if (!this.config.autoInit) return;
+    this.sessions
+      .ensureHolderIndex()
+      .catch((err: Error) =>
+        this.logger.warn(`Holder index backfill failed (${err.message}); the next holder lookup retries it.`),
+      );
     try {
       await this.installLocalStatusListFetcher();
     } catch (err) {
@@ -164,11 +176,13 @@ export class Oid4vcStatusService implements OnModuleInit {
 
   /** Persist the allocation before issuance; session CAS fences concurrent revocation. */
   async allocateForSession(credoIssuanceSessionId: string): Promise<AllocatedStatusEntry> {
-    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
-    if (!session) throw new NotFoundException(`No local issuance session for ${credoIssuanceSessionId}`);
+    // Before allocating, so a blocked redemption does not consume a slot. A
+    // change written after this check reaches the session's intent below; see
+    // setHolderStatus.
+    const session = await this.assertIssuable(credoIssuanceSessionId);
     const entry = await this.allocate();
     await this.sessions.mutate(session.id, (current) => {
-      if (current.statusChange?.pending || current.statusChange?.value === STATUS_REVOKED) {
+      if (blocksIssuance(current)) {
         throw new ConflictException(`Issuance session ${session.id} is revoked or changing status`);
       }
       current.statusEntries = [...(current.statusEntries ?? []), { listId: entry.listId, idx: entry.idx }];
@@ -176,6 +190,24 @@ export class Oid4vcStatusService implements OnModuleInit {
     // Failed issuance may consume a slot. Never recycle it: a failed response
     // does not prove that nobody received the credential.
     return entry;
+  }
+
+  /**
+   * The local session for a redemption, refusing one its session or holder
+   * blocks, allocating nothing. Credentials without a status entry, which
+   * cannot be revoked once issued, rely on this alone: a redemption already
+   * past it when a change lands still issues.
+   */
+  async assertIssuable(credoIssuanceSessionId: string): Promise<Oid4vcIssuanceSession> {
+    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
+    if (!session) throw new NotFoundException(`No local issuance session for ${credoIssuanceSessionId}`);
+    if (blocksIssuance(session)) {
+      throw new ConflictException(`Issuance session ${session.id} is revoked or changing status`);
+    }
+    if (session.holderDidKey && blocksIssuance(await this.holders.findByHolder(session.holderDidKey))) {
+      throw new ConflictException(`Holder ${session.holderDidKey} is revoked or changing status`);
+    }
+    return session;
   }
 
   /** Revokes the sessions `target` names. Verification fails from the next status fetch onwards. */
@@ -188,21 +220,18 @@ export class Oid4vcStatusService implements OnModuleInit {
     return this.setTargetStatus(target, STATUS_VALID);
   }
 
-  /**
-   * One session at a time, so a holder's sessions are not changed atomically:
-   * re-sending the request finishes a part-way failure. A holder's unredeemed
-   * offers get the status too, which stops them issuing while revoked.
-   */
+  /** Changes the session `target` names, or every session of the holder it names. */
   private async setTargetStatus(
     target: ChangeCredentialStatusDto,
     value: 0 | 1,
     reason?: string,
   ): Promise<AllocatedStatusEntry[]> {
-    const results: AllocatedStatusEntry[] = [];
-    for (const sessionId of await this.localSessionIds(target)) {
-      results.push(...(await this.setSessionStatus(sessionId, value, reason, Boolean(target.holderDidKey))));
+    const { sessionId, credoIssuanceSessionId, holderDidKey } = target;
+    if ([sessionId, credoIssuanceSessionId, holderDidKey].filter(Boolean).length !== 1) {
+      throw new BadRequestException('Provide exactly one of `sessionId`, `credoIssuanceSessionId` or `holderDidKey`');
     }
-    return results;
+    if (holderDidKey) return this.setHolderStatus(holderDidKey, value, reason);
+    return this.setSessionStatus(await this.localSessionId(target), value, reason);
   }
 
   /**
@@ -257,39 +286,35 @@ export class Oid4vcStatusService implements OnModuleInit {
     return StatusList.decompressStatusList(record.encodedList, record.bits).getStatus(idx);
   }
 
-  /** The local session ids `target` names; everything downstream keys on them. */
-  private async localSessionIds({
-    sessionId,
-    credoIssuanceSessionId,
-    holderDidKey,
-  }: ChangeCredentialStatusDto): Promise<string[]> {
-    if ([sessionId, credoIssuanceSessionId, holderDidKey].filter(Boolean).length !== 1) {
-      throw new BadRequestException('Provide exactly one of `sessionId`, `credoIssuanceSessionId` or `holderDidKey`');
-    }
-    if (sessionId) return [sessionId];
-    if (credoIssuanceSessionId) {
-      const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
-      if (!session) throw new NotFoundException(`No issuance session for Credo session ${credoIssuanceSessionId}`);
-      return [session.id];
-    }
-    const sessions = await this.sessions.findByHolder(holderDidKey!);
-    if (!sessions.length) throw new NotFoundException(`No issuance sessions for ${holderDidKey}`);
-    return sessions.map((session) => session.id);
+  /** The local session id `target` names; everything downstream keys on it. */
+  private async localSessionId({ sessionId, credoIssuanceSessionId }: ChangeCredentialStatusDto): Promise<string> {
+    if (sessionId) return sessionId;
+    const session = await this.sessions.findOneBy({ credoIssuanceSessionId });
+    if (!session) throw new NotFoundException(`No issuance session for Credo session ${credoIssuanceSessionId}`);
+    return session.id;
   }
 
-  /**
-   * `allowEmpty` records the status on a session that has issued nothing yet,
-   * fencing its offer. A session fenced that way stays changeable by its own id.
-   */
-  private async setSessionStatus(
-    sessionId: string,
-    value: 0 | 1,
-    reason?: string,
-    allowEmpty = false,
-  ): Promise<AllocatedStatusEntry[]> {
+  private async setSessionStatus(sessionId: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {
+    // A committed holder change may still write the bits of the sessions it
+    // claimed. It writes no others, and one that has not committed writes none.
+    const before = await this.sessions.findOneById(sessionId);
+    const holderDidKey = before?.holderDidKey;
+    const holderChange = holderDidKey ? (await this.holders.findByHolder(holderDidKey))?.statusChange : undefined;
+    if (holderChange?.pending && holderChange.committed && before?.statusChange?.id === holderChange.id) {
+      throw new ConflictException(`Holder ${holderDidKey} has an unfinished status change; send that request again`);
+    }
     const session = await this.sessions.mutate(sessionId, (current) => {
-      if (!current.statusEntries?.length && !allowEmpty && !current.statusChange) {
+      // A holder change leaves its intent on offers that have issued nothing,
+      // and those stay changeable by their own id.
+      if (!current.statusEntries?.length && !current.statusChange) {
         throw new NotFoundException(`Issuance session ${sessionId} has no status list entry`);
+      }
+      // Resuming a holder-wide change here could move bits that change then
+      // aborts without; only its own request may drive it.
+      if (current.statusChange?.pending && current.statusChange.prior) {
+        throw new ConflictException(
+          `Issuance session ${sessionId} is part of an unfinished holder status change; send that request again`,
+        );
       }
       if (current.statusChange?.pending) {
         if (current.statusChange.value !== value) {
@@ -303,12 +328,7 @@ export class Oid4vcStatusService implements OnModuleInit {
     });
     const operation = session.statusChange!;
     const entries = session.statusEntries ?? [];
-    const byList = new Map<string, number[]>();
-    for (const entry of entries) {
-      if (!byList.has(entry.listId)) byList.set(entry.listId, []);
-      byList.get(entry.listId)!.push(entry.idx);
-    }
-    for (const [listId, indices] of byList) {
+    for (const [listId, indices] of groupByList(entries)) {
       await this.serialise(() =>
         this.mutate(listId, async (record) => {
           // Read the LIST first, then the session intent, then CAS the list.
@@ -319,26 +339,253 @@ export class Oid4vcStatusService implements OnModuleInit {
           if (current?.statusChange?.id !== operation.id) {
             throw new ConflictException(`Status change for session ${sessionId} was superseded`);
           }
-          const list = StatusList.decompressStatusList(record.encodedList, record.bits);
-          for (const idx of indices) {
-            if (!Number.isSafeInteger(idx) || idx < 0 || idx >= record.nextIndex) {
-              throw new NotFoundException(`Status list ${listId} has no allocated entry ${idx}`);
-            }
-            list.setStatus(idx, value);
-          }
-          record.encodedList = list.compressStatusList();
+          flipBits(record, indices, value);
         }),
       );
     }
+    await this.completeSessionChange(sessionId, operation);
+    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
+  }
+
+  /**
+   * Changes every session pinned to `holderDidKey` as one transaction,
+   * coordinated through the holder's record.
+   *
+   * The holder record is written first. It fences issuance for every offer
+   * the holder has, and is the durable log a re-sent request resumes. The
+   * sessions are listed only after it, so a redemption that passed the fence
+   * check just before it belongs to a session listed here, and that session's
+   * intent CAS either blocks the allocation or returns its entry.
+   *
+   * Every intent stores what it replaced. Until the change is committed on
+   * the holder record, nothing a verifier reads has changed, and a failure
+   * aborts it: the holder and each claimed session go back to their stored
+   * state. Commit and abort are both compare-and-set writes to the holder
+   * record, so requests driving the same change concurrently can never do
+   * both. After the commit, a failure leaves the change pending, still
+   * fencing issuance, and re-sending the request finishes it. Each list's
+   * bits flip in one write.
+   */
+  private async setHolderStatus(holderDidKey: string, value: 0 | 1, reason?: string): Promise<AllocatedStatusEntry[]> {
+    // Checked before anything is written, so an unknown holder or a conflict
+    // changes nothing. Intents a holder-wide change wrote are settled against
+    // the holder record instead, below.
+    const known = await this.sessions.findByHolder(holderDidKey);
+    if (!known.length) throw new NotFoundException(`No issuance sessions for ${holderDidKey}`);
+    const conflicting = known.find(({ statusChange: change }) => change?.pending && !change.prior);
+    if (conflicting) {
+      throw new ConflictException(
+        `Issuance session ${conflicting.id} has an unfinished status change; retry that operation first`,
+      );
+    }
+
+    const holder = await this.holders.mutate(holderDidKey, (current) => {
+      if (current.statusChange?.pending) {
+        if (current.statusChange.value !== value) {
+          throw new ConflictException(
+            `Holder ${holderDidKey} has an unfinished status change; retry that operation first`,
+          );
+        }
+        return; // Resume the durable intent, preserving its original reason and operation id.
+      }
+      current.statusChange = {
+        id: randomUUID(),
+        value,
+        pending: true,
+        requestedAt: new Date().toISOString(),
+        reason,
+        prior: statusFields(current),
+      };
+    });
+    const operation = holder.statusChange!;
+
+    let claimed: Oid4vcIssuanceSession[];
+    try {
+      claimed = await this.claimHolderSessions(holderDidKey, operation);
+    } catch (error) {
+      if (!(await this.abortHolderChange(holderDidKey, operation))) {
+        throw new ServiceUnavailableException(
+          `Status change for holder ${holderDidKey} failed (${(error as Error).message}) and was not undone; ` +
+            're-send the request to finish it',
+        );
+      }
+      throw error;
+    }
+    let state = await this.commitHolderChange(holderDidKey, operation);
+    if (state === 'aborted') {
+      // A concurrent request aborted the change while this one was claiming.
+      await this.releaseHolderSessions(holderDidKey, operation).catch((error: Error) =>
+        this.logger.warn(`Could not release sessions of aborted holder change ${operation.id}: ${error.message}`),
+      );
+      throw new ConflictException(`Status change for holder ${holderDidKey} was aborted by another request; retry`);
+    }
+
+    // Committed: from here a failure leaves the change pending, for a re-send to finish.
+    const entries = claimed.flatMap((session) => session.statusEntries ?? []);
+    // If another request already finished the change, it has written these bits.
+    const toFlip = state === 'committed' ? groupByList(entries) : new Map<string, number[]>();
+    for (const [listId, indices] of toFlip) {
+      const finished = await this.serialise(() =>
+        this.mutate(listId, async (record) => {
+          // As in setSessionStatus, but fenced on the holder: every claimed
+          // session carries the same operation id, and only a committed,
+          // unfinished change may move bits.
+          const live = (await this.holders.findByHolder(holderDidKey))?.statusChange;
+          if (live?.id !== operation.id || !live.committed) {
+            throw new ConflictException(`Status change for holder ${holderDidKey} was superseded`);
+          }
+          // Finished by another request, which wrote these bits; a later
+          // change may have moved them since.
+          if (!live.pending) return true;
+          flipBits(record, indices, value);
+          return false;
+        }),
+      );
+      if (finished) {
+        state = 'finished';
+        break;
+      }
+    }
+    if (state === 'finished') {
+      // The request that finished the change completed every session it
+      // claimed, so intents of it still pending are late claims: undo them.
+      await this.releaseHolderSessions(holderDidKey, operation);
+    } else {
+      await settle(claimed.map((session) => this.completeSessionChange(session.id, operation)));
+      await this.holders.mutate(holderDidKey, (current) => {
+        if (current.statusChange?.id !== operation.id) {
+          throw new ConflictException(`Status change for holder ${holderDidKey} was superseded`);
+        }
+        completeChange(current, operation);
+      });
+    }
+    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
+  }
+
+  /**
+   * Writes `operation` as the pending intent of every session indexed under
+   * the holder, including offers that have issued nothing, and returns them
+   * as written. Each intent stores what it replaced, for an abort to restore.
+   * Sessions revoked by `sessionId` are left as they are and not returned.
+   */
+  private async claimHolderSessions(holderDidKey: string, operation: StatusChange): Promise<Oid4vcIssuanceSession[]> {
+    const ids = await this.sessions.holderSessionIds(holderDidKey);
+    const claimed = await settle(
+      ids.map(async (id) => {
+        let skipped = false;
+        try {
+          const session = await this.sessions.mutate(id, async (current) => {
+            skipped = false;
+            if (current.statusChange?.id === operation.id) return; // Claimed already, by this request or a concurrent one.
+            // Another holder change's pending intent is dead only while this
+            // change is the live one. Read after the session, so a newer change
+            // that claims it in between fails this attempt's CAS. A dead intent
+            // gives way to the state it stored.
+            if (current.statusChange?.pending && current.statusChange.prior) {
+              const live = (await this.holders.findByHolder(holderDidKey))?.statusChange;
+              if (live?.id !== operation.id || !live.pending) {
+                throw new ConflictException(`Status change for holder ${holderDidKey} was superseded`);
+              }
+              restoreStatus(current, current.statusChange.prior);
+            }
+            // Changes made by sessionId are left alone: an unfinished one must
+            // be finished first, and a revocation stays as it is.
+            const change = current.statusChange;
+            if (change?.pending) {
+              throw new ConflictException(
+                `Issuance session ${id} has an unfinished status change; retry that operation first`,
+              );
+            }
+            if (change?.value === STATUS_REVOKED && !change.byHolder) {
+              skipped = true;
+              return;
+            }
+            const { id: opId, value, requestedAt, reason } = operation;
+            const prior = statusFields(current);
+            current.statusChange = { id: opId, value, pending: true, requestedAt, reason, byHolder: true, prior };
+          });
+          return skipped ? undefined : session;
+        } catch (error) {
+          // The index entry is written before its session, so the session may not exist yet.
+          if (error instanceof NotFoundException) return undefined;
+          throw error;
+        }
+      }),
+    );
+    return claimed.filter((session): session is Oid4vcIssuanceSession => session !== undefined);
+  }
+
+  /**
+   * The point of no return: marks `operation` committed, so bits may move and
+   * no request can abort it any more. Reports instead when another request
+   * has already aborted or finished it.
+   */
+  private async commitHolderChange(
+    holderDidKey: string,
+    operation: StatusChange,
+  ): Promise<'committed' | 'aborted' | 'finished'> {
+    let state: 'committed' | 'aborted' | 'finished' = 'aborted';
+    await this.holders.mutate(holderDidKey, (current) => {
+      const change = current.statusChange;
+      state = change?.id !== operation.id ? 'aborted' : change.pending ? 'committed' : 'finished';
+      if (state === 'committed') change!.committed = true;
+    });
+    return state;
+  }
+
+  /**
+   * Aborts `operation` unless it has been committed: restores the holder
+   * record, then every session still holding the change as a pending intent,
+   * each from the state its intent stored. Returns whether it is undone. A committed
+   * change is left for a re-send to finish, and if the abort fails part-way,
+   * the next change for this holder takes over the intents left behind.
+   */
+  private async abortHolderChange(holderDidKey: string, operation: StatusChange): Promise<boolean> {
+    try {
+      let aborted = false;
+      await this.holders.mutate(holderDidKey, (current) => {
+        const change = current.statusChange;
+        aborted = change?.id !== operation.id || !change.committed;
+        if (change?.id === operation.id && !change.committed) restoreStatus(current, change.prior);
+      });
+      if (aborted) await this.releaseHolderSessions(holderDidKey, operation);
+      return aborted;
+    } catch (error) {
+      this.logger.warn(
+        `Could not abort holder change ${operation.id} for ${holderDidKey}: ${(error as Error).message}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Restores every session whose pending intent is `operation` to the state
+   * that intent stored. A completed intent is left alone: intents complete
+   * only after a commit, so it belongs to a change that finished.
+   */
+  private async releaseHolderSessions(holderDidKey: string, operation: StatusChange): Promise<void> {
+    const ids = await this.sessions.holderSessionIds(holderDidKey);
+    await settle(
+      ids.map((id) =>
+        this.sessions
+          .mutate(id, (current) => {
+            const change = current.statusChange;
+            if (change?.id === operation.id && change.pending) restoreStatus(current, change.prior);
+          })
+          .catch((error) => {
+            if (!(error instanceof NotFoundException)) throw error;
+          }),
+      ),
+    );
+  }
+
+  private async completeSessionChange(sessionId: string, operation: StatusChange): Promise<void> {
     await this.sessions.mutate(sessionId, (current) => {
       if (current.statusChange?.id !== operation.id) {
         throw new ConflictException(`Status change for session ${sessionId} was superseded`);
       }
-      current.statusChange.pending = false;
-      current.revokedAt = value === STATUS_REVOKED ? new Date(operation.requestedAt) : undefined;
-      current.revokedReason = value === STATUS_REVOKED ? operation.reason : undefined;
+      completeChange(current, operation);
     });
-    return entries.map((entry) => ({ ...entry, uri: this.config.statusListUri(entry.listId) }));
   }
 
   /**
@@ -418,4 +665,57 @@ export class Oid4vcStatusService implements OnModuleInit {
 
 function encodeSegment(segment: object): string {
   return Buffer.from(JSON.stringify(segment)).toString('base64url');
+}
+
+/** A session or holder that is revoked, or mid-change, issues nothing. */
+function blocksIssuance(record: StatusSnapshot | null | undefined): boolean {
+  return Boolean(record?.statusChange?.pending || record?.statusChange?.value === STATUS_REVOKED);
+}
+
+function statusFields({ statusChange, revokedAt, revokedReason }: StatusSnapshot): StatusSnapshot {
+  return { statusChange, revokedAt, revokedReason };
+}
+
+/** Puts back the fields a status change replaced. */
+function restoreStatus(record: StatusSnapshot, prior: StatusSnapshot | undefined): void {
+  record.statusChange = prior?.statusChange;
+  record.revokedAt = prior?.revokedAt;
+  record.revokedReason = prior?.revokedReason;
+}
+
+/** Marks `record`'s change finished, with the audit fields it implies. */
+function completeChange(record: StatusSnapshot, operation: StatusChange): void {
+  record.statusChange!.pending = false;
+  record.statusChange!.prior = undefined;
+  record.revokedAt = operation.value === STATUS_REVOKED ? new Date(operation.requestedAt) : undefined;
+  record.revokedReason = operation.value === STATUS_REVOKED ? operation.reason : undefined;
+}
+
+function groupByList(entries: StatusListEntry[]): Map<string, number[]> {
+  const byList = new Map<string, number[]>();
+  for (const entry of entries) {
+    if (!byList.has(entry.listId)) byList.set(entry.listId, []);
+    byList.get(entry.listId)!.push(entry.idx);
+  }
+  return byList;
+}
+
+/** Sets `indices` to `value`, refusing any index the list never handed out. */
+function flipBits(record: StatusListRecord, indices: number[], value: 0 | 1): void {
+  const list = StatusList.decompressStatusList(record.encodedList, record.bits);
+  for (const idx of indices) {
+    if (!Number.isSafeInteger(idx) || idx < 0 || idx >= record.nextIndex) {
+      throw new NotFoundException(`Status list ${record.id} has no allocated entry ${idx}`);
+    }
+    list.setStatus(idx, value);
+  }
+  record.encodedList = list.compressStatusList();
+}
+
+/** Waits for every write to settle, so none lands after the caller reacts, then throws the first failure. */
+async function settle<T>(writes: Promise<T>[]): Promise<T[]> {
+  const results = await Promise.allSettled(writes);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
+  return results.map((result) => (result as PromiseFulfilledResult<T>).value);
 }

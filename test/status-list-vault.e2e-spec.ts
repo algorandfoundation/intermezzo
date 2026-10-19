@@ -10,6 +10,7 @@ import { Oid4vcConfig } from '../src/oid4vc/oid4vc.config';
 import { Oid4vcIssuanceSessionRepository } from '../src/oid4vc/sessions/vault-repository';
 import { Oid4vcStatusService } from '../src/oid4vc/status/oid4vc-status.service';
 import { StatusListRepository } from '../src/oid4vc/status/status-list.repository';
+import { HolderStatusRepository } from '../src/oid4vc/status/holder-status.repository';
 import { VaultService } from '../src/vault/vault.service';
 
 // Run only against a disposable dev Vault. Each run creates and removes its own
@@ -66,6 +67,7 @@ const url = process.env.STATUS_LIST_VAULT_URL;
           new Oid4vcConfig(configService),
           new StatusListRepository(vault, tokens),
           sessions,
+          new HolderStatusRepository(vault, tokens),
           {
             ensureIssuerDid: async () => ({ did: issuer, verificationMethodId: `${issuer}#keys-1` }),
           } as unknown as Oid4vcAgentProvider,

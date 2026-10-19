@@ -20,6 +20,7 @@ import { Oid4vcSessionMirrorService } from './sessions/oid4vc-session-mirror.ser
 import { Oid4vcStatusService } from './status/oid4vc-status.service';
 import { Oid4vcStatusController } from './status/oid4vc-status.controller';
 import { StatusListRepository } from './status/status-list.repository';
+import { HolderStatusRepository } from './status/holder-status.repository';
 
 /**
  * Standalone Nest module exposing OID4VCI (issuance) and OID4VP
@@ -72,6 +73,7 @@ import { StatusListRepository } from './status/status-list.repository';
     Oid4vcVerificationSessionRepository,
     Oid4vcSessionMirrorService,
     StatusListRepository,
+    HolderStatusRepository,
     Oid4vcStatusService,
   ],
   exports: [Oid4vcConfig, Oid4vcAgentProvider, Oid4vcIssuerService, Oid4vcVerifierService, Oid4vcStatusService],
