@@ -11,12 +11,14 @@ import { VaultCasConflictError, VaultService } from '../../vault/vault.service';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 import { Oid4vcSessionMirrorService } from '../sessions/oid4vc-session-mirror.service';
 import { STATUS_LIST_SIZE, StatusListRecord } from '../entities/status-list.entity';
+import { HolderStatusRepository } from './holder-status.repository';
 import { StatusListRepository } from './status-list.repository';
-import { Oid4vcStatusService } from './oid4vc-status.service';
+import { AllocatedStatusEntry, Oid4vcStatusService } from './oid4vc-status.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
 const LIST_BASE = 'http://localhost:3000/v1/credential/status/list';
 const LIST_FOLDER = 'intermezzo/oid4vc/status-lists';
+const SESSION_FOLDER = 'intermezzo/oid4vc/sessions/issuance';
 
 function deferred() {
   let resolve!: () => void;
@@ -30,6 +32,7 @@ describe('Oid4vcStatusService', () => {
   let service: Oid4vcStatusService;
   let lists: StatusListRepository;
   let sessions: Oid4vcIssuanceSessionRepository;
+  let holders: HolderStatusRepository;
   let sign: jest.Mock;
   let publicKey: crypto.KeyObject;
   let vault: VaultService;
@@ -44,6 +47,7 @@ describe('Oid4vcStatusService', () => {
       } as unknown as ConfigService),
       lists,
       sessions,
+      holders,
       {
         ensureIssuerDid: async () => ({ did: ISSUER_DID, verificationMethodId: `${ISSUER_DID}#keys-1` }),
         getAgent: async () => {
@@ -76,10 +80,20 @@ describe('Oid4vcStatusService', () => {
         if (cas !== undefined && cas !== version) throw new VaultCasConflictError(path);
         kv.set(path, { data: copy(data), version: version + 1 });
       },
+      // Mirrors Vault's KV-v2 LIST: immediate child names under `path/`, no recursion.
+      kvList: async (path: string) => {
+        const prefix = `${path}/`;
+        const children = new Set<string>();
+        for (const key of kv.keys()) {
+          if (key.startsWith(prefix)) children.add(key.slice(prefix.length).split('/')[0]);
+        }
+        return [...children];
+      },
       sign,
     } as unknown as VaultService;
     lists = new StatusListRepository(vault, tokenProvider);
     sessions = new Oid4vcIssuanceSessionRepository(vault, tokenProvider);
+    holders = new HolderStatusRepository(vault, tokenProvider);
     service = makeService();
   });
 
@@ -215,6 +229,17 @@ describe('Oid4vcStatusService', () => {
     await expect(issue()).resolves.toBeDefined();
   });
 
+  it('refuses a blocked session before spending a slot on it', async () => {
+    const entry = await issue();
+    const { nextIndex } = storedList(entry.listId);
+    await service.revokeBySessionId('session-a');
+    await expect(issue()).rejects.toThrow(ConflictException);
+    jest.spyOn(lists, 'saveIfUnchanged').mockRejectedValueOnce(new Error('Vault down'));
+    await expect(service.reactivateBySessionId('session-a')).rejects.toThrow('Vault down'); // left pending
+    await expect(issue()).rejects.toThrow(ConflictException);
+    expect(storedList(entry.listId).nextIndex).toBe(nextIndex);
+  });
+
   it('preserves both revocations when two sessions share a list', async () => {
     const first = await issue('session-a');
     const second = await issue('session-b');
@@ -260,6 +285,597 @@ describe('Oid4vcStatusService', () => {
     );
     await expect(service.revoke({ credoIssuanceSessionId: 'missing' })).rejects.toThrow(NotFoundException);
   });
+
+  describe('by holder', () => {
+    const HOLDER = 'did:key:zH';
+
+    // The one-time backfill writes too; get it out of the way of "writes nothing" assertions.
+    beforeEach(() => sessions.ensureHolderIndex());
+
+    /** Creates an offer pinned to `holderDidKey`, indexed the way `createOffer` indexes it. */
+    async function offer(id: string, holderDidKey = HOLDER) {
+      await sessions.save({ id, credoIssuanceSessionId: id, holderDidKey });
+      await sessions.indexHolder(holderDidKey, id);
+    }
+
+    /** The fields a status change writes and an abort restores. */
+    async function audit(id: string) {
+      const { statusChange, revokedAt, revokedReason } = (await sessions.findOneById(id))!;
+      return { statusChange, revokedAt, revokedReason };
+    }
+
+    function listWrites(write: jest.SpyInstance) {
+      return write.mock.calls.filter(([path]) => String(path).startsWith(`${LIST_FOLDER}/records/`));
+    }
+
+    it('revokes and reactivates every session pinned to a holder, fencing all of its offers', async () => {
+      for (const id of ['h-1', 'h-2', 'h-open']) await offer(id);
+      await offer('b-1', 'did:key:zB');
+      const h1 = await service.allocateForSession('h-1');
+      storedList(h1.listId).nextIndex = STATUS_LIST_SIZE; // h-2's entry lands on a second list
+      const h2 = await service.allocateForSession('h-2');
+      const b1 = await service.allocateForSession('b-1');
+      const bits = () => Promise.all([h1, h2, b1].map((e) => service.getStatus(e.listId, e.idx)));
+
+      expect(await service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).toHaveLength(2);
+      expect(await bits()).toEqual([1, 1, 0]);
+      expect(await holders.findByHolder(HOLDER)).toMatchObject({
+        revokedReason: 'stolen',
+        statusChange: { value: 1, pending: false },
+      });
+
+      // The holder record fences every offer, including one created after the
+      // revocation, before a slot is spent.
+      await offer('h-late');
+      const nextIndex = storedList(h2.listId).nextIndex;
+      await expect(service.allocateForSession('h-open')).rejects.toThrow(ConflictException);
+      await expect(service.allocateForSession('h-late')).rejects.toThrow(ConflictException);
+      expect(storedList(h2.listId).nextIndex).toBe(nextIndex);
+
+      // Reactivating one offer by its own id does not lift the holder's fence.
+      await service.reactivate({ sessionId: 'h-open' });
+      await expect(service.allocateForSession('h-open')).rejects.toThrow(ConflictException);
+
+      await service.reactivate({ holderDidKey: HOLDER });
+      expect(await bits()).toEqual([0, 0, 0]);
+      await expect(service.allocateForSession('h-open')).resolves.toBeDefined();
+      await expect(service.allocateForSession('h-late')).resolves.toBeDefined();
+
+      await expect(service.revoke({ sessionId: 'h-1', holderDidKey: HOLDER })).rejects.toThrow(BadRequestException);
+    });
+
+    it('refuses a redemption without a status entry while its session or holder blocks it', async () => {
+      await expect(service.assertIssuable('missing')).rejects.toThrow(NotFoundException);
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const entry = await service.allocateForSession('h-1');
+      const { nextIndex } = storedList(entry.listId);
+      const write = jest.spyOn(vault, 'kvWrite');
+      await expect(service.assertIssuable('h-1')).resolves.toBeDefined();
+      expect(write).not.toHaveBeenCalled();
+
+      await service.revoke({ sessionId: 'h-1' });
+      await expect(service.assertIssuable('h-1')).rejects.toThrow(ConflictException);
+      await expect(service.assertIssuable('h-2')).resolves.toBeDefined();
+      await service.reactivate({ sessionId: 'h-1' });
+      await expect(service.assertIssuable('h-1')).resolves.toBeDefined();
+
+      // The holder record also fences an offer created after the revocation.
+      await service.revoke({ holderDidKey: HOLDER });
+      await offer('h-late');
+      for (const id of ['h-1', 'h-2', 'h-late']) {
+        await expect(service.assertIssuable(id)).rejects.toThrow(ConflictException);
+      }
+      await service.reactivate({ holderDidKey: HOLDER });
+      for (const id of ['h-1', 'h-2', 'h-late']) await expect(service.assertIssuable(id)).resolves.toBeDefined();
+
+      expect(storedList(entry.listId).nextIndex).toBe(nextIndex);
+    });
+
+    it('rejects an unknown holder without writing anything', async () => {
+      const write = jest.spyOn(vault, 'kvWrite');
+      await expect(service.revoke({ holderDidKey: 'did:key:zUnknown' })).rejects.toThrow(NotFoundException);
+      expect(write).not.toHaveBeenCalled();
+    });
+
+    it("flips all of a holder's bits on one list in a single write", async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const entries = [await service.allocateForSession('h-1'), await service.allocateForSession('h-2')];
+      const write = jest.spyOn(vault, 'kvWrite');
+      await service.revoke({ holderDidKey: HOLDER });
+      expect(listWrites(write)).toHaveLength(1);
+      for (const e of entries) expect(await service.getStatus(e.listId, e.idx)).toBe(1);
+    });
+
+    it('refuses a change while a sessionId change is unfinished, writing nothing', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      await service.allocateForSession('h-1');
+      await service.allocateForSession('h-2');
+      jest.spyOn(lists, 'saveIfUnchanged').mockRejectedValueOnce(new Error('Vault down'));
+      await expect(service.revokeBySessionId('h-2')).rejects.toThrow('Vault down'); // left pending
+      const write = jest.spyOn(vault, 'kvWrite');
+      await expect(service.reactivate({ holderDidKey: HOLDER })).rejects.toThrow(ConflictException);
+      await expect(service.revoke({ holderDidKey: HOLDER })).rejects.toThrow(ConflictException);
+      expect(write).not.toHaveBeenCalled();
+    });
+
+    it('leaves a revocation made by sessionId alone, in both directions', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const leaked = await service.allocateForSession('h-1');
+      const other = await service.allocateForSession('h-2');
+      await service.revoke({ sessionId: 'h-1', reason: 'leaked' });
+      const individual = await audit('h-1');
+      const bits = () => Promise.all([leaked, other].map((e) => service.getStatus(e.listId, e.idx)));
+
+      // The holder revoke changes only h-2, and keeps h-1's own reason and time.
+      expect(await service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).toEqual([
+        expect.objectContaining({ listId: other.listId, idx: other.idx }),
+      ]);
+      expect(await audit('h-1')).toEqual(individual);
+      // The holder reactivate re-enables only what the holder revoke revoked.
+      await service.reactivate({ holderDidKey: HOLDER });
+      expect(await bits()).toEqual([1, 0]);
+      expect(await audit('h-1')).toEqual(individual);
+    });
+
+    it('treats a sessionId revoke made after a holder revoke as individual', async () => {
+      await offer('h-1');
+      const entry = await service.allocateForSession('h-1');
+      await service.revoke({ holderDidKey: HOLDER });
+      await service.revoke({ sessionId: 'h-1', reason: 'leaked' });
+      await service.reactivate({ holderDidKey: HOLDER });
+
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+      expect(await audit('h-1')).toMatchObject({ revokedReason: 'leaked', statusChange: { value: 1 } });
+    });
+
+    it('restores every session and the holder when an intent write fails, before any bit moves', async () => {
+      for (const id of ['h-1', 'h-2', 'h-open']) await offer(id);
+      const entries = [await service.allocateForSession('h-1'), await service.allocateForSession('h-2')];
+      await service.revoke({ sessionId: 'h-1', reason: 'old' });
+      const ids = ['h-1', 'h-2', 'h-open'];
+      const before = await Promise.all(ids.map(audit));
+
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      const intents = jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending) throw new Error('Vault down');
+        return save(record, version);
+      });
+      const write = jest.spyOn(vault, 'kvWrite');
+      await expect(service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).rejects.toThrow('Vault down');
+      intents.mockRestore();
+
+      expect(listWrites(write)).toHaveLength(0);
+      expect(await Promise.all(ids.map(audit))).toEqual(before);
+      expect((await holders.findByHolder(HOLDER))!.statusChange).toBeUndefined();
+      expect(await Promise.all(entries.map((e) => service.getStatus(e.listId, e.idx)))).toEqual([1, 0]);
+      await expect(service.allocateForSession('h-open')).resolves.toBeDefined();
+    });
+
+    it('leaves the change pending once the bits are being written, and finishes it on re-send', async () => {
+      for (const id of ['h-1', 'h-open']) await offer(id);
+      const entry = await service.allocateForSession('h-1');
+      jest.spyOn(lists, 'saveIfUnchanged').mockRejectedValueOnce(new Error('Vault down'));
+      await expect(service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).rejects.toThrow('Vault down');
+
+      expect((await holders.findByHolder(HOLDER))!.statusChange).toMatchObject({ value: 1, pending: true });
+      await expect(service.allocateForSession('h-open')).rejects.toThrow(ConflictException);
+      await expect(makeService().reactivate({ holderDidKey: HOLDER })).rejects.toThrow(ConflictException);
+
+      await makeService().revoke({ holderDidKey: HOLDER, reason: 'replacement' });
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+      for (const record of [await holders.findByHolder(HOLDER), ...(await sessions.findByHolder(HOLDER))]) {
+        expect(record).toMatchObject({ statusChange: { pending: false }, revokedReason: 'stolen' });
+      }
+    });
+
+    it('revokes a credential whose redemption passed the holder check just before the fence', async () => {
+      await offer('h-1');
+      let raced!: AllocatedStatusEntry;
+      const save = holders.saveIfUnchanged.bind(holders);
+      jest.spyOn(holders, 'saveIfUnchanged').mockImplementationOnce(async (record, version) => {
+        raced = await makeService().allocateForSession('h-1');
+        return save(record, version);
+      });
+      await service.revoke({ holderDidKey: HOLDER });
+      expect(await service.getStatus(raced.listId, raced.idx)).toBe(1);
+    });
+
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+    it('never aborts a change that a concurrent request has committed', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const entry = await service.allocateForSession('h-1');
+      // The first request stalls claiming h-2 and then fails, after a second
+      // request has resumed the same change and finished it.
+      const stalled = deferred();
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      let h2Claims = 0;
+      jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending && h2Claims++ === 0) {
+          await stalled.promise;
+          throw new Error('Vault down');
+        }
+        return save(record, version);
+      });
+      const failed = expect(service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).rejects.toThrow('Vault down');
+      while (h2Claims < 1) await tick();
+      await makeService().revoke({ holderDidKey: HOLDER });
+      stalled.resolve();
+      await failed;
+
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+      expect(await holders.findByHolder(HOLDER)).toMatchObject({
+        revokedReason: 'stolen',
+        statusChange: { pending: false },
+      });
+      for (const id of ['h-1', 'h-2']) {
+        expect(await audit(id)).toMatchObject({ revokedReason: 'stolen', statusChange: { value: 1, pending: false } });
+      }
+    });
+
+    it('releases what a request claimed when another request aborted the change', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      await service.allocateForSession('h-1');
+      const before = await Promise.all(['h-1', 'h-2'].map(audit));
+      // Both requests stall claiming h-2. The first then fails and aborts; the
+      // second claims h-2 after that abort, so it must undo its own claim.
+      const first = deferred();
+      const second = deferred();
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      let h2Claims = 0;
+      jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending) {
+          const claim = h2Claims++;
+          if (claim === 0) {
+            await first.promise;
+            throw new Error('Vault down');
+          }
+          if (claim === 1) await second.promise;
+        }
+        return save(record, version);
+      });
+      const write = jest.spyOn(vault, 'kvWrite');
+      const firstFailed = expect(service.revoke({ holderDidKey: HOLDER })).rejects.toThrow('Vault down');
+      while (h2Claims < 1) await tick();
+      const secondFailed = expect(makeService().revoke({ holderDidKey: HOLDER })).rejects.toThrow(
+        /aborted by another request/,
+      );
+      while (h2Claims < 2) await tick();
+      first.resolve();
+      await firstFailed;
+      second.resolve();
+      await secondFailed;
+
+      expect(listWrites(write)).toHaveLength(0);
+      expect(await Promise.all(['h-1', 'h-2'].map(audit))).toEqual(before);
+      expect((await holders.findByHolder(HOLDER))!.statusChange).toBeUndefined();
+    });
+
+    it('refuses a single-session change to a session a holder change has claimed', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const entry = await service.allocateForSession('h-1');
+      const before = await audit('h-1');
+      // While the holder change is still claiming, revoke h-1 by its own id.
+      // Taking over the holder's intent would move a bit the abort below
+      // does not know about.
+      let single: unknown;
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending) {
+          while (!(await sessions.findOneById('h-1'))!.statusChange?.pending) await tick();
+          single = await makeService()
+            .revoke({ sessionId: 'h-1' })
+            .catch((error: unknown) => error);
+          throw new Error('Vault down');
+        }
+        return save(record, version);
+      });
+      await expect(service.revoke({ holderDidKey: HOLDER })).rejects.toThrow('Vault down');
+
+      expect(single).toBeInstanceOf(ConflictException);
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+      expect(await audit('h-1')).toEqual(before);
+    });
+
+    it('takes over an intent an aborted holder change left behind, restoring what it stored', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      await service.allocateForSession('h-1');
+      const stored = { statusChange: { id: 'old', value: 0 as const, pending: false, requestedAt: '2026-01-01' } };
+      await sessions.mutate('h-1', (current) => {
+        current.statusChange = { id: 'dead', value: 1, pending: true, requestedAt: '2026-01-02', prior: stored };
+      });
+      await expect(service.revoke({ sessionId: 'h-1' })).rejects.toThrow(/holder status change/);
+
+      // An opposite holder change is not blocked by it, and its own abort
+      // restores the stored state rather than the dead intent.
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      const intents = jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending) throw new Error('Vault down');
+        return save(record, version);
+      });
+      await expect(service.reactivate({ holderDidKey: HOLDER })).rejects.toThrow('Vault down');
+      intents.mockRestore();
+      expect(await audit('h-1')).toEqual(stored);
+
+      await service.reactivate({ holderDidKey: HOLDER });
+      expect(await audit('h-1')).toMatchObject({ statusChange: { value: 0, pending: false } });
+    });
+
+    /** Stalls the first pending intent write to h-2 until `release` resolves. */
+    function stallClaimOfH2(release: Promise<void>) {
+      const entered = deferred();
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      let claims = 0;
+      jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending && claims++ === 0) {
+          entered.resolve();
+          await release;
+        }
+        return save(record, version);
+      });
+      return entered.promise;
+    }
+
+    /** Stalls the first status list write until `release` resolves. */
+    function stallFirstListWrite(release: Promise<void>) {
+      const entered = deferred();
+      const save = lists.saveIfUnchanged.bind(lists);
+      jest.spyOn(lists, 'saveIfUnchanged').mockImplementationOnce(async (record, version) => {
+        entered.resolve();
+        await release;
+        return save(record, version);
+      });
+      return entered.promise;
+    }
+
+    it('stops a delayed bit write once its holder change has finished', async () => {
+      await offer('h-1');
+      const entry = await service.allocateForSession('h-1');
+      // The first request stalls before its list write. A re-send finishes the
+      // change, and h-1 is then reactivated by its own id.
+      const stalled = deferred();
+      const entered = stallFirstListWrite(stalled.promise);
+      const first = service.revoke({ holderDidKey: HOLDER });
+      await entered;
+      await makeService().revoke({ holderDidKey: HOLDER });
+      await makeService().reactivate({ sessionId: 'h-1' });
+      stalled.resolve();
+      await expect(first).resolves.toBeDefined(); // its change did finish
+
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+      expect(await audit('h-1')).toMatchObject({ statusChange: { value: 0, pending: false } });
+    });
+
+    it('undoes a late claim instead of completing it, once the change has finished', async () => {
+      await offer('h-1');
+      const entry = await service.allocateForSession('h-1');
+      await holders.mutate(HOLDER, (current) => {
+        current.statusChange = {
+          id: 'A',
+          value: 1,
+          pending: true,
+          committed: true,
+          requestedAt: '2026-01-01',
+          prior: {},
+        };
+      });
+      // Just after this request resumes the change, another request finishes it
+      // and h-1 is then reactivated by sessionId.
+      const reactivated = { id: 'Y', value: 0 as const, pending: false, requestedAt: '2026-01-02' };
+      const saveHolder = holders.saveIfUnchanged.bind(holders);
+      jest.spyOn(holders, 'saveIfUnchanged').mockImplementationOnce(async (record, version) => {
+        const saved = await saveHolder(record, version);
+        await holders.mutate(HOLDER, (current) => {
+          current.statusChange!.pending = false;
+        });
+        await sessions.mutate('h-1', (current) => {
+          current.statusChange = reactivated;
+        });
+        return saved;
+      });
+      await expect(service.revoke({ holderDidKey: HOLDER })).resolves.toBeDefined();
+
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(0);
+      expect(await audit('h-1')).toEqual({ statusChange: reactivated });
+    });
+
+    it.each([false, true])(
+      'lets an unfinished sessionId change finish beside a holder change that does not own it (committed=%s)',
+      async (committed) => {
+        await offer('h-1');
+        const entry = await service.allocateForSession('h-1');
+        // A holder revoke abandoned before it finished, and a revoke of h-1 by
+        // sessionId it never claimed, also abandoned: each used to wait for the other.
+        await holders.mutate(HOLDER, (current) => {
+          current.statusChange = { id: 'A', value: 1, pending: true, committed, requestedAt: '2026-01-01', prior: {} };
+        });
+        await sessions.mutate('h-1', (current) => {
+          current.statusChange = { id: 'C', value: 1, pending: true, requestedAt: '2026-01-01' };
+        });
+
+        await expect(service.revoke({ sessionId: 'h-1' })).resolves.toHaveLength(1);
+        await expect(service.revoke({ holderDidKey: HOLDER })).resolves.toEqual([]);
+        expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+        expect(await holders.findByHolder(HOLDER)).toMatchObject({ statusChange: { pending: false } });
+      },
+    );
+
+    it('never takes over the intent of a newer holder change', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const stalled = deferred();
+      const entered = stallClaimOfH2(stalled.promise);
+      const failed = expect(service.revoke({ holderDidKey: HOLDER })).rejects.toThrow(/superseded/);
+      await entered;
+      // Meanwhile the first request's change is aborted, and a newer one claims h-2 and commits.
+      const newer = { id: 'newer', value: 1 as const, pending: true, requestedAt: '2026-01-02', prior: {} };
+      await holders.mutate(HOLDER, (current) => {
+        current.statusChange = { ...newer, committed: true };
+      });
+      await sessions.mutate('h-2', (current) => {
+        current.statusChange = newer;
+      });
+      stalled.resolve();
+      await failed;
+
+      expect((await sessions.findOneById('h-2'))!.statusChange).toMatchObject({ id: 'newer', pending: true });
+      expect((await sessions.findOneById('h-1'))!.statusChange).toBeUndefined();
+    });
+
+    it('completes quietly when another request has already finished the change', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const entry = await service.allocateForSession('h-1');
+      const stalled = deferred();
+      const entered = stallClaimOfH2(stalled.promise);
+      const first = service.revoke({ holderDidKey: HOLDER });
+      await entered;
+      await makeService().revoke({ holderDidKey: HOLDER });
+      const write = jest.spyOn(vault, 'kvWrite');
+      stalled.resolve();
+
+      await expect(first).resolves.toEqual([expect.objectContaining({ listId: entry.listId, idx: entry.idx })]);
+      expect(listWrites(write)).toHaveLength(0);
+      for (const id of ['h-1', 'h-2']) {
+        expect(await audit(id)).toMatchObject({ statusChange: { value: 1, pending: false } });
+      }
+    });
+
+    it('succeeds when a concurrent re-send finishes the change during its bit writes', async () => {
+      await offer('h-1');
+      const entry = await service.allocateForSession('h-1');
+      const stalled = deferred();
+      const entered = stallFirstListWrite(stalled.promise);
+      const first = service.revoke({ holderDidKey: HOLDER });
+      await entered;
+      await makeService().revoke({ holderDidKey: HOLDER });
+      stalled.resolve();
+
+      await expect(first).resolves.toEqual([expect.objectContaining({ listId: entry.listId, idx: entry.idx })]);
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+      expect(await holders.findByHolder(HOLDER)).toMatchObject({ statusChange: { pending: false } });
+    });
+
+    it('never releases sessions that its finished change has completed', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      await service.allocateForSession('h-1');
+      const stalled = deferred();
+      const entered = stallClaimOfH2(stalled.promise);
+      const late = expect(service.revoke({ holderDidKey: HOLDER, reason: 'stolen' })).rejects.toThrow(/superseded/);
+      await entered;
+      // A re-send finishes the change; then a newer change claims h-2, so the
+      // stalled request fails and releases what it still holds.
+      await makeService().revoke({ holderDidKey: HOLDER });
+      const finished = await audit('h-1');
+      const newer = { id: 'newer', value: 0 as const, pending: true, requestedAt: '2026-01-03', prior: {} };
+      await holders.mutate(HOLDER, (current) => {
+        current.statusChange = newer;
+      });
+      await sessions.mutate('h-2', (current) => {
+        current.statusChange = newer;
+      });
+      stalled.resolve();
+      await late;
+
+      expect(finished).toMatchObject({ revokedReason: 'stolen', statusChange: { pending: false } });
+      expect(await audit('h-1')).toEqual(finished);
+    });
+
+    it('reports a change it could not undo, rather than its original error', async () => {
+      for (const id of ['h-1', 'h-2']) await offer(id);
+      const save = sessions.saveIfUnchanged.bind(sessions);
+      jest.spyOn(sessions, 'saveIfUnchanged').mockImplementation(async (record, version) => {
+        if (record.id === 'h-2' && record.statusChange?.pending) throw new Error('Vault down');
+        return save(record, version);
+      });
+      const saveHolder = holders.saveIfUnchanged.bind(holders);
+      jest
+        .spyOn(holders, 'saveIfUnchanged')
+        .mockImplementationOnce(saveHolder)
+        .mockRejectedValueOnce(new Error('still down'));
+
+      await expect(service.revoke({ holderDidKey: HOLDER })).rejects.toThrow(ServiceUnavailableException);
+      expect((await holders.findByHolder(HOLDER))!.statusChange).toMatchObject({ pending: true });
+    });
+
+    it('still issues for a holder did:key the index cannot hold', async () => {
+      await sessions.save({ id: 'odd', credoIssuanceSessionId: 'odd', holderDidKey: 'did:key:not-base58!' });
+      await expect(service.allocateForSession('odd')).resolves.toBeDefined();
+      await expect(service.revoke({ sessionId: 'odd' })).resolves.toHaveLength(1);
+    });
+  });
+
+  describe('holder index backfill', () => {
+    const HOLDER = 'did:key:zH';
+    const MARKER = `${SESSION_FOLDER}/migrations/by-holder`;
+
+    it('indexes sessions saved before the index existed, so a holder revocation reaches them', async () => {
+      await sessions.save({ id: 'legacy', credoIssuanceSessionId: 'legacy', holderDidKey: HOLDER });
+      await sessions.save({ id: 'unindexable', holderDidKey: 'did:key:not-base58!' });
+      await sessions.save({ id: 'anonymous' });
+      const entry = await service.allocateForSession('legacy');
+
+      await service.revoke({ holderDidKey: HOLDER });
+      expect(await service.getStatus(entry.listId, entry.idx)).toBe(1);
+      expect(kv.get(MARKER)?.data).toMatchObject({ sessions: 3 });
+    });
+
+    it('scans once per Vault, and once per process for concurrent lookups', async () => {
+      await sessions.save({ id: 'legacy', holderDidKey: HOLDER });
+      const list = jest.spyOn(vault, 'kvList');
+      const scans = () => list.mock.calls.filter(([path]) => path === `${SESSION_FOLDER}/records`).length;
+
+      await Promise.all([sessions.findByHolder(HOLDER), sessions.findByHolder(HOLDER)]);
+      expect(scans()).toBe(1);
+      // Another process reads the marker instead of scanning again.
+      await new Oid4vcIssuanceSessionRepository(vault, tokenProvider).findByHolder(HOLDER);
+      expect(scans()).toBe(1);
+    });
+
+    it('fails a lookup rather than answering from a partial index, and retries on the next', async () => {
+      await sessions.save({ id: 'legacy', holderDidKey: HOLDER });
+      jest.spyOn(vault, 'kvList').mockRejectedValueOnce(new Error('Vault down'));
+      await expect(sessions.findByHolder(HOLDER)).rejects.toThrow('Vault down');
+      expect(kv.has(MARKER)).toBe(false);
+      expect((await sessions.findByHolder(HOLDER)).map((session) => session.id)).toEqual(['legacy']);
+    });
+
+    it('writes the marker with a fresh token, as the scan can outlast the first', async () => {
+      await sessions.save({ id: 'legacy', holderDidKey: HOLDER });
+      let issued = 0;
+      const tokens = { getToken: async () => `token-${++issued}` } as unknown as AlgoVaultTokenProvider;
+      const write = jest.spyOn(vault, 'kvWrite');
+      await new Oid4vcIssuanceSessionRepository(vault, tokens).ensureHolderIndex();
+
+      const [, , markerToken] = write.mock.calls.find(([path]) => path === MARKER)!;
+      expect(markerToken).toBe(`token-${issued}`);
+      expect(issued).toBeGreaterThan(1);
+    });
+
+    it('fails rather than skips a session when Vault rejects its index write', async () => {
+      await sessions.save({ id: 'legacy', holderDidKey: HOLDER });
+      jest.spyOn(vault, 'kvWrite').mockRejectedValueOnce(new BadRequestException('VaultException'));
+      await expect(sessions.ensureHolderIndex()).rejects.toThrow(BadRequestException);
+      expect(kv.has(MARKER)).toBe(false);
+    });
+
+    it('starts at boot when auto-init is on', async () => {
+      const ensure = jest.spyOn(sessions, 'ensureHolderIndex');
+      await makeService({ autoInit: false }).onModuleInit();
+      expect(ensure).not.toHaveBeenCalled();
+      await makeService({ agentError: new Error('agent unavailable') }).onModuleInit();
+      expect(ensure).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // `?holderDidKey=` reaches the repository unvalidated, and the value becomes a Vault KV path segment.
+  it.each(['../../records', 'did:key:z../../records', 'did:key:', ''])(
+    'refuses to build a holder index path from %p',
+    async (holderDidKey) => {
+      const list = jest.spyOn(vault, 'kvList');
+      await expect(sessions.findByHolder(holderDidKey)).rejects.toThrow(BadRequestException);
+      await expect(sessions.indexHolder(holderDidKey, 'session-a')).rejects.toThrow(BadRequestException);
+      expect(list).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects unknown and unredeemed sessions', async () => {
     await expect(service.revokeBySessionId('missing')).rejects.toThrow(NotFoundException);

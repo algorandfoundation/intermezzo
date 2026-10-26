@@ -35,11 +35,12 @@ App-level orchestration endpoints (Nest):
 |--------|-------------------------------------|--------------------------------------------|
 | GET    | `/v1/credential/issuer/configurations` | List supported credential configurations   |
 | POST   | `/v1/credential/issuer/offers`         | Create a credential offer (returns QR URI) |
+| GET    | `/v1/credential/issuer/sessions?holderDidKey=` | List issuance sessions, optionally for one holder |
 | GET    | `/v1/credential/issuer/sessions/:id`   | Inspect an issuance session                |
 | POST   | `/v1/credential/verifier/requests`     | Create a presentation request              |
 | GET    | `/v1/credential/verifier/sessions/:id` | Inspect a verification session + claims    |
 | GET    | `/v1/credential/status/list/:listId`   | **Public.** Signed status list token       |
-| POST   | `/v1/credential/status/revoke`         | Revoke all credentials in a session               |
+| POST   | `/v1/credential/status/revoke`         | Revoke all credentials in a session, or of a holder `did:key` |
 | POST   | `/v1/credential/status/reactivate`     | Undo a revocation                          |
 
 The OID4VCI/OID4VP **protocol endpoints** themselves (token, credential,
@@ -84,6 +85,48 @@ curl -X POST http://localhost:3000/v1/credential/status/revoke \
   -H "Authorization: Bearer $MANAGER_JWT" \
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"<issuance-session-id>","reason":"device reported stolen"}'
+```
+
+Or send `holderDidKey` instead, to act on every issuance session pinned to
+that wallet `did:key`. While the holder is revoked, none of its offers can be
+redeemed, including offers created after the revocation. Reactivating one
+session by `sessionId` changes that session's credentials but does not lift
+this. The change is one transaction:
+
+- The holder's record is written first. It blocks the holder's issuance and
+  records the change.
+- Every session then records the change. If that step fails, everything
+  written so far is restored and the request returns the error, with nothing
+  changed. If it cannot be restored, the request returns 503 instead, and the
+  change stays pending until it is re-sent.
+- Each status list then flips all of the holder's bits in one write. If this
+  or a later step fails, or the server stops partway, the change stays
+  pending and issuance stays blocked. Re-send the same request to finish it.
+
+Concurrent requests for the same holder work on the same change, which is
+either undone before any bit moves or finished, never both. While it is
+unfinished, its sessions cannot be changed by `sessionId` (409): re-send the
+holder request instead.
+
+A holder change leaves changes made by `sessionId` alone. A credential revoked
+by `sessionId` keeps its own reason and time through a holder revoke, and
+stays revoked when the holder is reactivated: reactivate it by `sessionId`.
+If one of the holder's sessions has an unfinished `sessionId` change, the
+holder request is refused (409) until that change is finished.
+
+Sessions created before the holder index existed are indexed once per Vault.
+The backfill starts at boot, and holder lookups wait for it, failing rather
+than answering from a partial index. If instances without the index run
+alongside upgraded ones during a rollout, delete the marker
+(`intermezzo/oid4vc/sessions/issuance/migrations/by-holder`) once the rollout
+is done, then restart. The backfill runs again at boot and indexes the
+sessions those instances created.
+
+```sh
+curl -X POST http://localhost:3000/v1/credential/status/revoke \
+  -H "Authorization: Bearer $MANAGER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"holderDidKey":"did:key:z6Mk...","reason":"device reported stolen"}'
 ```
 
 `POST .../reactivate` with the same body reverses it. Both operations cover
@@ -140,6 +183,14 @@ Adding `exp` requires refreshing tokens even when no status bits change.
 W3C `jwt_vc_json` credentials get **no** status claim: Credo refuses to
 verify credential status for JWT VCs, so adding one would break
 verification rather than enable it.
+
+Since they cannot be revoked once issued, redemption is where they are
+stopped. A W3C offer is refused while its session or holder is revoked or
+has an unfinished status change, the same check SD-JWT redemption makes. An
+offer that has issued nothing cannot be revoked by `sessionId` (404), so
+revoke its holder to stop it. A redemption already past that check when a
+revocation lands still issues, and revoke responses list no entries for
+these credentials.
 
 ### Holder binding
 
@@ -231,6 +282,14 @@ App-level mappings persisted in Vault KV:
   configuration for status queries. The issuance session also carries
   `statusEntries` — one `(listId, idx)` per credential the session issued —
   plus durable `statusChange` intent and `revokedAt` / `revokedReason` on completion.
+- `intermezzo/oid4vc/sessions/issuance/by-holder/<multibase>/<sessionId>` —
+  one key per issuance session, written at offer creation, so a holder's
+  sessions can be listed and revoked together.
+- `intermezzo/oid4vc/sessions/issuance/migrations/by-holder` — written when
+  the one-time backfill of the holder index has covered every existing session.
+- `intermezzo/oid4vc/holders/records/<multibase>` — one record per holder that
+  has been revoked or reactivated by `holderDidKey`: the durable status change
+  and the issuance block, plus `revokedAt` / `revokedReason`.
 - `intermezzo/oid4vc/status-lists/records/<id>` — one record per status
   list: a 16,384-entry bitstring (2 KiB raw; compressed size depends on
   the status distribution) and the next free index.

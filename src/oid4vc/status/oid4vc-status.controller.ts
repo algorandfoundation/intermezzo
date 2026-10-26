@@ -55,15 +55,16 @@ export class Oid4vcStatusController {
   }
 
   /**
-   * Returns every entry the session holds, not one: a session that redeemed
-   * more than one credential carries an entry per credential, and all of them
-   * are revoked together.
+   * Returns every entry the sessions hold, not one: a session that redeemed
+   * more than one credential carries an entry per credential, and a holder
+   * can have several sessions. All of them are revoked together.
    */
   @ApiBearerAuth()
   @Post('revoke')
   @ApiOperation({
     summary:
-      "Revoke every credential issued under an issuance session. Takes effect on the verifier's next status fetch.",
+      'Revoke every credential issued under an issuance session, or to a holder `did:key`. ' +
+      "Takes effect on the verifier's next status fetch.",
   })
   async revoke(@Body() dto: ChangeCredentialStatusDto): Promise<AllocatedStatusEntry[]> {
     return this.status.revoke(dto);

@@ -96,6 +96,13 @@ describe('Oid4vcStatusController', () => {
       expect(reactivate).toHaveBeenCalledWith({ credoIssuanceSessionId: 'credo-a' });
     });
 
+    it('passes a holder did:key through', async () => {
+      const holderDidKey = 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH';
+      await request(app.getHttpServer()).post('/credential/status/revoke').send({ holderDidKey }).expect(201);
+
+      expect(revoke).toHaveBeenCalledWith({ holderDidKey });
+    });
+
     it('rejects an empty session id', async () => {
       await request(app.getHttpServer()).post('/credential/status/revoke').send({ sessionId: '' }).expect(400);
       expect(revoke).not.toHaveBeenCalled();

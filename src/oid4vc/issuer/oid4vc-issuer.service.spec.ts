@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OpenId4VciCredentialRequestToCredentialMapper } from '@credo-ts/openid4vc';
 
@@ -7,7 +8,7 @@ import { Oid4vcConfig } from '../oid4vc.config';
 import { VaultService } from '../../vault/vault.service';
 import { Oid4vcIssuanceSessionRepository } from '../sessions/vault-repository';
 import { Oid4vcStatusService } from '../status/oid4vc-status.service';
-import { Oid4vcIssuerService } from './oid4vc-issuer.service';
+import { DEFAULT_CREDENTIAL_CONFIGURATIONS, Oid4vcIssuerService } from './oid4vc-issuer.service';
 
 const ISSUER_DID = 'did:algo:testnet:app:1:' + 'aa'.repeat(32);
 const HOLDER_DID_KEY = 'did:key:z6MkExampleHolderKey';
@@ -23,6 +24,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
   let findOneBy: jest.Mock;
   let save: jest.Mock;
   let allocate: jest.Mock;
+  let assertIssuable: jest.Mock;
   let isConfigured: jest.Mock;
   let kvList: jest.Mock;
   let kvRead: jest.Mock;
@@ -31,6 +33,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
     findOneBy = jest.fn(async () => ({ id: 'local-session-1', credoIssuanceSessionId: 'credo-session-1' }));
     save = jest.fn(async (entity: Record<string, unknown>) => entity);
     allocate = jest.fn(async () => ({ listId: LIST_ID, idx: 7, uri: LIST_URI }));
+    assertIssuable = jest.fn(async () => undefined);
     // Defaults only, unless a test opts into dynamic Vault configurations.
     isConfigured = jest.fn(() => false);
     kvList = jest.fn(async () => []);
@@ -55,7 +58,7 @@ describe('Oid4vcIssuerService credential mapper', () => {
       { findOneBy, save } as unknown as Oid4vcIssuanceSessionRepository,
       { kvList, kvRead } as unknown as VaultService,
       { isConfigured, getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
-      { allocateForSession: allocate } as unknown as Oid4vcStatusService,
+      { allocateForSession: allocate, assertIssuable } as unknown as Oid4vcStatusService,
     );
 
     await service.onModuleInit();
@@ -137,8 +140,9 @@ describe('Oid4vcIssuerService credential mapper', () => {
   describe('W3C JWT VC', () => {
     // Credo hardcodes 'Verifying credential status is not supported for JWT
     // VCs', so a `credentialStatus` here would make verification fail rather
-    // than check anything. This branch must stay status-free.
-    it('is left untouched by status list support', async () => {
+    // than check anything. This branch must never carry a status claim, so
+    // its redemption is checked instead.
+    it('carries no status claim and allocates no entry', async () => {
       withDynamicJwtVcConfiguration();
 
       const signed = (await issue('legacy-jwt-vc', {
@@ -157,8 +161,113 @@ describe('Oid4vcIssuerService credential mapper', () => {
       // support.
       expect(asJson.credentialSubject).toEqual({ id: HOLDER_DID_KEY });
 
+      expect(assertIssuable).toHaveBeenCalledWith('credo-session-1');
       expect(allocate).not.toHaveBeenCalled();
       expect(save).not.toHaveBeenCalled();
     });
+
+    it('issues nothing when the session or its holder blocks issuance', async () => {
+      withDynamicJwtVcConfiguration();
+      assertIssuable.mockRejectedValue(new ConflictException('Holder did:key:z6Mk is revoked or changing status'));
+
+      await expect(issue('legacy-jwt-vc', { _holderDidKey: HOLDER_DID_KEY })).rejects.toThrow(ConflictException);
+    });
+  });
+});
+
+describe('Oid4vcIssuerService createOffer / listSessions', () => {
+  let sessionRepo: {
+    create: jest.Mock;
+    save: jest.Mock;
+    indexHolder: jest.Mock;
+    discard: jest.Mock;
+    find: jest.Mock;
+    findByHolder: jest.Mock;
+  };
+  let service: Oid4vcIssuerService;
+
+  beforeEach(() => {
+    sessionRepo = {
+      create: jest.fn((data: Record<string, unknown>) => data),
+      save: jest.fn(async (data: Record<string, unknown>) => data),
+      indexHolder: jest.fn(async () => undefined),
+      discard: jest.fn(async () => undefined),
+      find: jest.fn(async () => []),
+      findByHolder: jest.fn(async () => []),
+    };
+
+    service = new Oid4vcIssuerService(
+      {
+        getAgent: async () => ({
+          modules: {
+            openId4VcIssuer: {
+              getIssuerByIssuerId: jest.fn(async () => ({
+                credentialConfigurationsSupported: DEFAULT_CREDENTIAL_CONFIGURATIONS,
+              })),
+              updateIssuerMetadata: jest.fn(async () => undefined),
+              createCredentialOffer: jest.fn(async () => ({
+                issuanceSession: { id: 'credo-session-1', preAuthorizedCode: 'code', state: 'OfferCreated' },
+                credentialOffer: 'openid-credential-offer://example',
+              })),
+            },
+          },
+        }),
+        setCredentialMapper: () => undefined,
+      } as unknown as Oid4vcAgentProvider,
+      new Oid4vcConfig({ get: <T>(_key: string, d?: T) => d } as unknown as ConfigService),
+      sessionRepo as unknown as Oid4vcIssuanceSessionRepository,
+      { kvList: jest.fn(async () => []) } as unknown as VaultService,
+      { isConfigured: () => false, getToken: jest.fn(async () => 'vault-token') } as unknown as AlgoVaultTokenProvider,
+      {} as unknown as Oid4vcStatusService,
+    );
+  });
+
+  // A session missing from the index would escape a holder-wide revocation.
+  it('indexes the holder did:key before saving the session', async () => {
+    const saved = await service.createOffer({
+      credentialConfigurationIds: ['device-attestation-credential'],
+      holderDidKey: HOLDER_DID_KEY,
+    });
+
+    expect(sessionRepo.indexHolder).toHaveBeenCalledWith(HOLDER_DID_KEY, saved.id);
+    expect(sessionRepo.indexHolder.mock.invocationCallOrder[0]).toBeLessThan(
+      sessionRepo.save.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('discards the session and its index entry when saving fails', async () => {
+    sessionRepo.save.mockRejectedValueOnce(new Error('Vault down'));
+    await expect(
+      service.createOffer({
+        credentialConfigurationIds: ['device-attestation-credential'],
+        holderDidKey: HOLDER_DID_KEY,
+      }),
+    ).rejects.toThrow('Vault down');
+
+    const [[, id]] = sessionRepo.indexHolder.mock.calls;
+    expect(sessionRepo.discard).toHaveBeenCalledWith(HOLDER_DID_KEY, id);
+  });
+
+  it('lists all sessions when no holder is given', async () => {
+    await service.listSessions();
+
+    expect(sessionRepo.find).toHaveBeenCalledWith({ order: { createdAt: 'DESC' } });
+    expect(sessionRepo.findByHolder).not.toHaveBeenCalled();
+  });
+
+  it("lists only a holder's sessions when holderDidKey is given", async () => {
+    await service.listSessions(HOLDER_DID_KEY);
+
+    expect(sessionRepo.findByHolder).toHaveBeenCalledWith(HOLDER_DID_KEY);
+    expect(sessionRepo.find).not.toHaveBeenCalled();
+  });
+
+  // `?holderDidKey=` is a malformed filter, not an absent one: it must reach
+  // findByHolder's did:key check rather than widening to every session.
+  it('passes an explicitly empty holderDidKey through for rejection', async () => {
+    await service.listSessions('');
+
+    expect(sessionRepo.findByHolder).toHaveBeenCalledWith('');
+    expect(sessionRepo.find).not.toHaveBeenCalled();
   });
 });

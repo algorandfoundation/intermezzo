@@ -1,5 +1,39 @@
 import { StatusListEntry } from './status-list.entity';
 
+/** A durable revoke or reactivate, on a session or on a holder. */
+export interface StatusChange {
+  id: string;
+  value: 0 | 1;
+  pending: boolean;
+  requestedAt: string;
+  reason?: string;
+  /**
+   * Holder changes only: set before any status bit moves. From then on the
+   * change can only be finished, never aborted.
+   */
+  committed?: boolean;
+  /**
+   * Session intents only: set when a holder-wide change wrote the intent, and
+   * kept once it completes, so a later holder-wide change can tell its own
+   * revocations from revocations made by `sessionId`.
+   */
+  byHolder?: boolean;
+  /**
+   * What this change replaced, restored if a holder-wide change aborts. Kept
+   * on a holder's pending change, and on each session intent a holder-wide
+   * change writes, where it also marks the intent as that change's. Dropped
+   * when the change completes.
+   */
+  prior?: StatusSnapshot;
+}
+
+/** The fields a status change writes. */
+export interface StatusSnapshot {
+  statusChange?: StatusChange;
+  revokedAt?: Date;
+  revokedReason?: string;
+}
+
 /**
  * Application-level mapping for an OID4VCI issuance session.
  *
@@ -81,13 +115,7 @@ export class Oid4vcIssuanceSession {
   statusEntries?: StatusListEntry[];
 
   /** Durable intent. Pending operations can be resumed with the same revoke/reactivate request. */
-  statusChange?: {
-    id: string;
-    value: 0 | 1;
-    pending: boolean;
-    requestedAt: string;
-    reason?: string;
-  };
+  statusChange?: StatusChange;
 
   /** When the credential was revoked, if it has been. */
   revokedAt?: Date;

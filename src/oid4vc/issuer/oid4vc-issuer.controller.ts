@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { Oid4vcIssuerService } from './oid4vc-issuer.service';
@@ -65,9 +65,11 @@ export class Oid4vcIssuerController {
   }
 
   @Get('sessions')
-  @ApiOperation({ summary: 'List all locally-tracked issuance sessions.' })
-  async listSessions(): Promise<Oid4vcIssuanceSession[]> {
-    return this.issuer.listSessions();
+  @ApiOperation({
+    summary: 'List locally-tracked issuance sessions, optionally filtered to a holder `did:key`.',
+  })
+  async listSessions(@Query('holderDidKey') holderDidKey?: string): Promise<Oid4vcIssuanceSession[]> {
+    return this.issuer.listSessions(holderDidKey);
   }
 
   @Get('sessions/:id')
